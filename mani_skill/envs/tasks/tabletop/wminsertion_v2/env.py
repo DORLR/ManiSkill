@@ -25,21 +25,29 @@ from mani_skill.utils.structs.pose import Pose
 from .common import _sp, _raw, _pitch, _pose_error, _native_rgb256_config
 from .geometry import (
     ACTIVE_GRASP_PITCH_RANGE_DEG,
-    HOLE_OFFSET_LIMIT_M,
-    RESET_IK_SEED,
+    DEFAULT_SEED,
+    FIXED_GRASP_PITCH_DEG,
+    FIXED_GRASP_POSITION_M,
+    GRASP_POSITION_RANGE_M,
+    HOLE_OFFSET_RANGES_M,
     RNG_NAMESPACE,
     sample_pitch,
+    sample_grasp_position,
     sample_hole_offset,
     validate_hole_offset,
+    validate_hole_offset_ranges,
     validate_pitch_range,
+    validate_pitch,
+    validate_grasp_position_range,
+    validate_grasp_position,
+    validate_seed,
     partition_receptacle,
 )
 from .robot import CHARGER_LINK_NAME, ROBOT_UID, FixedLinkGrasp
 
 ENV_ID = "WMInsertionChargerRandomized-v2"
 FIXED_LINK_ENV_ID = ENV_ID
-FUTURE_GRASP_PITCH_RANGE_DEG = (-60.0, -25.0)
-GRIP_CENTER_IN_CHARGER_M = (-0.020, 0.0, 0.0015)
+GRIP_VERTICAL_OFFSET_M = 0.0015
 FRONT_FIXED_SOCKET_POSE = (
     0.055732615292072296,
     -0.08228035271167755,
@@ -101,7 +109,7 @@ class WMInsertionChargerEnvV2(PlugChargerEnv):
 
     Default RGB-D is native millimetre depth plus RGB from hand_camera.
     Use obs_mode="rgb" for RGB only. Calibration overrides belong in reset
-    options: grasp_pitch_deg and hole_offset_yz_m.
+    options: grasp_pitch_deg, grasp_position_m and hole_offset_yz_m.
     """
 
     SUPPORTED_ROBOTS = [ROBOT_UID]
@@ -110,8 +118,15 @@ class WMInsertionChargerEnvV2(PlugChargerEnv):
         self,
         *,
         pitch_range_deg=ACTIVE_GRASP_PITCH_RANGE_DEG,
+        grasp_pitch_enabled=True,
+        fixed_grasp_pitch_deg=FIXED_GRASP_PITCH_DEG,
         hole_offset_enabled=True,
-        reset_ik_seed=RESET_IK_SEED,
+        hole_offset_range_yz_m=HOLE_OFFSET_RANGES_M,
+        grasp_position_enabled=True,
+        grasp_position_range_m=GRASP_POSITION_RANGE_M,
+        fixed_grasp_position_m=FIXED_GRASP_POSITION_M,
+        seed=DEFAULT_SEED,
+        reset_ik_seed=None,
         robot_init_qpos_noise=0.0,
         **kwargs,
     ):
@@ -124,17 +139,45 @@ class WMInsertionChargerEnvV2(PlugChargerEnv):
             raise ValueError("WMInsertion-v2 uses its fixed-child Panda")
         if kwargs.get("reconfiguration_freq", 1) != 1:
             raise ValueError("Translated hole geometry requires reconfiguration_freq=1")
-        if (
-            float(robot_init_qpos_noise) != 0.0
-            or isinstance(reset_ik_seed, bool)
-            or reset_ik_seed != RESET_IK_SEED
+        if float(robot_init_qpos_noise) != 0.0:
+            raise ValueError("Use robot_init_qpos_noise=0")
+        for name, enabled in (
+            ("grasp_pitch_enabled", grasp_pitch_enabled),
+            ("hole_offset_enabled", hole_offset_enabled),
+            ("grasp_position_enabled", grasp_position_enabled),
         ):
-            raise ValueError("Use robot_init_qpos_noise=0 and reset_ik_seed=9101")
-        if not isinstance(hole_offset_enabled, bool):
-            raise ValueError("hole_offset_enabled must be bool")
+            if not isinstance(enabled, bool):
+                raise ValueError(f"{name} must be bool")
+        self.default_seed = validate_seed(seed)
+        self.reset_ik_seed = validate_seed(
+            seed if reset_ik_seed is None else reset_ik_seed
+        )
+        self._initial_reset_pending = True
         self.pitch_range_deg = validate_pitch_range(pitch_range_deg)
+        self.grasp_pitch_enabled = grasp_pitch_enabled
+        self.fixed_grasp_pitch_deg = validate_pitch(fixed_grasp_pitch_deg)
         self.hole_offset_enabled = hole_offset_enabled
-        self.reset_ik_seed = RESET_IK_SEED
+        self.hole_offset_range_yz_m = validate_hole_offset_ranges(
+            hole_offset_range_yz_m
+        )
+        self.grasp_position_enabled = grasp_position_enabled
+        self.grasp_position_range_m = validate_grasp_position_range(
+            grasp_position_range_m
+        )
+        self.fixed_grasp_position_m = validate_grasp_position(fixed_grasp_position_m)
+        # Reject configured regions whose corners would put an opening outside the fixed board.
+        for dy in self.hole_offset_range_yz_m[0]:
+            for dz in self.hole_offset_range_yz_m[1]:
+                partition_receptacle(
+                    [
+                        self._peg_size[0],
+                        self._peg_size[1] + self._clearance,
+                        self._peg_size[2] + self._clearance,
+                    ],
+                    self._receptacle_size,
+                    self._peg_gap,
+                    (dy, dz),
+                )
         self.native_package_versions = {p: version(p) for p in ("mani_skill", "sapien")}
         if self.native_package_versions != {
             "mani_skill": "3.0.0b4",
@@ -184,6 +227,13 @@ class WMInsertionChargerEnvV2(PlugChargerEnv):
             self._attachment = None
 
     def reset(self, seed=None, options=None):
+        # Override BaseEnv's constructor-only seed=2022 once. Later unseeded resets
+        # advance the normal Gym RNG sequence instead of replaying the same episode.
+        if self._initial_reset_pending:
+            seed = self.default_seed
+            self._initial_reset_pending = False
+        elif seed is not None:
+            seed = validate_seed(seed)
         self._release_attachment()
         self._episode_record = self._zero_held_pose = self._initial_held_pose = None
         self._ik_planner = None
@@ -191,10 +241,16 @@ class WMInsertionChargerEnvV2(PlugChargerEnv):
         if "grasp_pitch_deg" in options:
             self._validate_pitch_override(options["grasp_pitch_deg"])
         if "hole_offset_yz_m" in options:
-            validate_hole_offset(options["hole_offset_yz_m"])
+            validate_hole_offset(
+                options["hole_offset_yz_m"], self.hole_offset_range_yz_m
+            )
+        if "grasp_position_m" in options:
+            self._validate_grasp_position_override(options["grasp_position_m"])
         options["reconfigure"] = True
         try:
-            return super().reset(seed=seed, options=options)
+            obs, info = super().reset(seed=seed, options=options)
+            info["charger_v2"] = self.audit()
+            return obs, info
         except BaseException:
             self._release_attachment()
             raise
@@ -202,9 +258,15 @@ class WMInsertionChargerEnvV2(PlugChargerEnv):
     def _load_scene(self, options):
         self._hole_offset_overridden = "hole_offset_yz_m" in options
         self._hole_offset_yz_m = (
-            validate_hole_offset(options["hole_offset_yz_m"])
+            validate_hole_offset(
+                options["hole_offset_yz_m"], self.hole_offset_range_yz_m
+            )
             if self._hole_offset_overridden
-            else sample_hole_offset(int(self._episode_seed), self.hole_offset_enabled)
+            else sample_hole_offset(
+                int(self._episode_seed),
+                self.hole_offset_enabled,
+                self.hole_offset_range_yz_m,
+            )
         )
         self.scene_builder = TableSceneBuilder(self, robot_init_qpos_noise=0.0)
         self.scene_builder.build()
@@ -266,7 +328,31 @@ class WMInsertionChargerEnvV2(PlugChargerEnv):
     def _sample_pitch(self, options: dict) -> float:
         if "grasp_pitch_deg" in options:
             return self._validate_pitch_override(options["grasp_pitch_deg"])
-        return sample_pitch(int(self._episode_seed), self.pitch_range_deg)
+        return sample_pitch(
+            int(self._episode_seed),
+            self.pitch_range_deg,
+            enabled=self.grasp_pitch_enabled,
+            fixed_deg=self.fixed_grasp_pitch_deg,
+        )
+
+    def _validate_grasp_position_override(self, value) -> float:
+        value = validate_grasp_position(value)
+        low, high = self.grasp_position_range_m
+        if not low <= value <= high:
+            raise ValueError(
+                f"grasp_position_m must lie inside configured range [{low},{high}]"
+            )
+        return value
+
+    def _sample_grasp_position(self, options) -> float:
+        if "grasp_position_m" in options:
+            return self._validate_grasp_position_override(options["grasp_position_m"])
+        return sample_grasp_position(
+            int(self._episode_seed),
+            self.grasp_position_range_m,
+            enabled=self.grasp_position_enabled,
+            fixed_m=self.fixed_grasp_position_m,
+        )
 
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
         if self.gpu_sim_enabled:
@@ -358,7 +444,9 @@ class WMInsertionChargerEnvV2(PlugChargerEnv):
             > 1e-6
         ):
             raise RuntimeError("Native grasp helper no longer selects housing middle")
-        center = (plug * sapien.Pose(GRIP_CENTER_IN_CHARGER_M)).p
+        grasp_position = self._sample_grasp_position(options)
+        grip_center = [grasp_position, 0.0, GRIP_VERTICAL_OFFSET_M]
+        center = (plug * sapien.Pose(grip_center)).p
         canonical = _sp(
             self.agent.build_grasp_pose(approaching, grasp["closing"], center)
         )
@@ -431,7 +519,7 @@ class WMInsertionChargerEnvV2(PlugChargerEnv):
             "env_id": FIXED_LINK_ENV_ID,
             "native_package_versions": dict(self.native_package_versions),
             "episode_seed": int(self._episode_seed),
-            "initialization": "fixed_tabletop_charger_preheld_housing_middle",
+            "initialization": "fixed_tabletop_charger_preheld_on_housing",
             "physical_pickup_executed": False,
             "reset_physics_steps": 0,
             "grasp_pitch_sampling": "continuous_uniform",
@@ -439,12 +527,12 @@ class WMInsertionChargerEnvV2(PlugChargerEnv):
             "local_tcp_y_command_deg": command,
             "calibration_angle_override": "grasp_pitch_deg" in options,
             "active_grasp_pitch_range_deg": list(ACTIVE_GRASP_PITCH_RANGE_DEG),
-            "future_candidate_grasp_pitch_range_deg": list(
-                FUTURE_GRASP_PITCH_RANGE_DEG
-            ),
-            "future_candidate_range_active": False,
-            "grip_center_in_charger_m": list(GRIP_CENTER_IN_CHARGER_M),
-            "grip_longitudinal_location": "housing_middle",
+            "grip_center_in_charger_m": grip_center,
+            "grip_longitudinal_location": "continuous_housing_x",
+            "grasp_position_m": grasp_position,
+            "grasp_position_enabled": self.grasp_position_enabled,
+            "grasp_position_range_m": list(self.grasp_position_range_m),
+            "calibration_grasp_position_override": "grasp_position_m" in options,
             "grip_vertical_offset_mm": 1.5,
             "spawn_layout": self.spawn_layout,
             "fixed_charger_pose": list(self.fixed_charger_pose),
@@ -527,16 +615,32 @@ class WMInsertionChargerEnvV2(PlugChargerEnv):
                 "env_id": ENV_ID,
                 "variant": "fixed_outer_board_random_grasp_and_aperture_pair",
                 "active_grasp_pitch_range_deg": list(self.pitch_range_deg),
-                "authorized_grasp_pitch_range_deg": list(ACTIVE_GRASP_PITCH_RANGE_DEG),
-                "grasp_pitch_sampling": "continuous_uniform_dedicated_episode_rng",
+                "default_grasp_pitch_range_deg": list(ACTIVE_GRASP_PITCH_RANGE_DEG),
+                "grasp_pitch_sampling": (
+                    "continuous_uniform_dedicated_episode_rng"
+                    if self.grasp_pitch_enabled
+                    else "fixed"
+                ),
+                "grasp_pitch_enabled": self.grasp_pitch_enabled,
+                "fixed_grasp_pitch_deg": self.fixed_grasp_pitch_deg,
+                "fixed_grasp_position_m": self.fixed_grasp_position_m,
+                "grasp_position_sampling": (
+                    "continuous_uniform_dedicated_episode_rng"
+                    if self.grasp_position_enabled
+                    else "fixed"
+                ),
+                "default_seed": self.default_seed,
                 "hole_offset_enabled": self.hole_offset_enabled,
                 "calibration_hole_offset_override": self._hole_offset_overridden,
                 "hole_offset_yz_m": [dy, dz],
                 "hole_offset_bounds_board_yz_m": [
-                    [-HOLE_OFFSET_LIMIT_M, HOLE_OFFSET_LIMIT_M]
-                ]
-                * 2,
-                "hole_offset_sampling": "independent_uniform_y_z_dedicated_episode_rng",
+                    list(row) for row in self.hole_offset_range_yz_m
+                ],
+                "hole_offset_sampling": (
+                    "independent_uniform_y_z_dedicated_episode_rng"
+                    if self.hole_offset_enabled
+                    else "fixed_zero_offset"
+                ),
                 "randomization_rng_namespace": RNG_NAMESPACE,
                 "randomization_factors_use_independent_rng_streams": True,
                 "hole_pair_center_board_m": [0.0, dy, dz],
@@ -580,10 +684,6 @@ class WMInsertionChargerEnvV2(PlugChargerEnv):
                 * 1000.0,
             }
         )
-        # The archived exploration range was never sampled and is no longer
-        # the active contract for this new variant.
-        self._episode_record.pop("future_candidate_grasp_pitch_range_deg", None)
-        self._episode_record.pop("future_candidate_range_active", None)
 
     def audit(self) -> dict[str, Any]:
         """Read achieved H and constraint drift without changing the scene."""

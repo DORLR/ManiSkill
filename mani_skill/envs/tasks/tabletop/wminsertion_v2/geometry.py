@@ -10,13 +10,19 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import json
 import math
+import operator
 import random
 from typing import Iterable
 
-ACTIVE_GRASP_PITCH_RANGE_DEG = (-45.0, -25.0)
+DEFAULT_SEED = 10043
+ACTIVE_GRASP_PITCH_RANGE_DEG = (-60.0, -20.0)
 NARROW_GRASP_PITCH_RANGE_DEG = (-37.0, -33.0)
-HOLE_OFFSET_LIMIT_M = 0.005
-RESET_IK_SEED = 9101
+FIXED_GRASP_PITCH_DEG = -35.0
+GRASP_POSITION_RANGE_M = (-0.030, -0.010)
+FIXED_GRASP_POSITION_M = -0.020
+HOLE_OFFSET_LIMIT_M = 0.020
+HOLE_OFFSET_RANGES_M = ((-0.020, 0.020), (-0.020, 0.020))
+RESET_IK_SEED = DEFAULT_SEED
 RNG_NAMESPACE = "wm_insertion_charger_randomized_v2_20261102"
 
 
@@ -30,22 +36,70 @@ def _finite_tuple(values: Iterable[float], length: int, name: str) -> tuple[floa
     return result
 
 
+def validate_seed(value) -> int:
+    try:
+        seed = operator.index(value)
+    except TypeError as error:
+        raise ValueError("seed must be an integer") from error
+    if isinstance(value, bool) or not 0 <= seed < 2**32:
+        raise ValueError("seed must be an integer in [0,2**32)")
+    return seed
+
+
 def validate_pitch_range(values: Iterable[float]) -> tuple[float, float]:
     low, high = _finite_tuple(values, 2, "pitch_range_deg")
-    if (
-        not ACTIVE_GRASP_PITCH_RANGE_DEG[0]
-        <= low
-        < high
-        <= ACTIVE_GRASP_PITCH_RANGE_DEG[1]
-    ):
-        raise ValueError("pitch_range_deg must be ordered inside [-45,-25] degrees")
+    if not -90.0 <= low < high <= 90.0:
+        raise ValueError("pitch_range_deg must be ordered inside [-90,90] degrees")
     return low, high
 
 
-def validate_hole_offset(values: Iterable[float]) -> tuple[float, float]:
+def validate_pitch(value: float) -> float:
+    value = float(value)
+    if not math.isfinite(value) or not -90.0 <= value <= 90.0:
+        raise ValueError("grasp pitch must be finite and inside [-90,90] degrees")
+    return value
+
+
+def validate_grasp_position_range(values) -> tuple[float, float]:
+    low, high = _finite_tuple(values, 2, "grasp_position_range_m")
+    if not -0.040 <= low < high <= 0.0:
+        raise ValueError(
+            "Grasp centers must lie on the housing, local X in [-.040,0] m"
+        )
+    return low, high
+
+
+def validate_grasp_position(value: float) -> float:
+    value = float(value)
+    if not math.isfinite(value) or not -0.040 <= value <= 0.0:
+        raise ValueError("Grasp center must lie on the housing, local X in [-.040,0] m")
+    return value
+
+
+def validate_hole_offset_ranges(
+    values,
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    values = tuple(values)
+    if len(values) != 2:
+        raise ValueError("hole_offset_range_yz_m must contain Y and Z ranges")
+    ranges = tuple(_finite_tuple(row, 2, "hole offset range") for row in values)
+    if any(low >= high for low, high in ranges):
+        raise ValueError("Each hole-offset range must have low < high")
+    return ranges
+
+
+def validate_hole_offset(
+    values: Iterable[float], ranges=HOLE_OFFSET_RANGES_M
+) -> tuple[float, float]:
     dy, dz = _finite_tuple(values, 2, "hole_offset_yz_m")
-    if max(abs(dy), abs(dz)) > HOLE_OFFSET_LIMIT_M:
-        raise ValueError("hole_offset_yz_m must lie inside [-.005,.005] m on each axis")
+    if ranges is not None:
+        bounds = validate_hole_offset_ranges(ranges)
+        if any(
+            not low <= value <= high for value, (low, high) in zip((dy, dz), bounds)
+        ):
+            raise ValueError(
+                f"hole_offset_yz_m must lie inside configured Y/Z ranges {bounds}"
+            )
     return dy, dz
 
 
@@ -56,20 +110,41 @@ def _factor_rng(episode_seed: int, factor: str) -> random.Random:
 
 
 def sample_pitch(
-    episode_seed: int, pitch_range_deg=ACTIVE_GRASP_PITCH_RANGE_DEG
+    episode_seed: int,
+    pitch_range_deg=ACTIVE_GRASP_PITCH_RANGE_DEG,
+    *,
+    enabled: bool = True,
+    fixed_deg: float = FIXED_GRASP_PITCH_DEG,
 ) -> float:
+    if not enabled:
+        return validate_pitch(fixed_deg)
     low, high = validate_pitch_range(pitch_range_deg)
     return _factor_rng(episode_seed, "pitch").uniform(low, high)
 
 
-def sample_hole_offset(episode_seed: int, enabled: bool = True) -> tuple[float, float]:
+def sample_grasp_position(
+    episode_seed: int,
+    position_range_m=GRASP_POSITION_RANGE_M,
+    *,
+    enabled: bool = True,
+    fixed_m: float = FIXED_GRASP_POSITION_M,
+) -> float:
+    if not enabled:
+        return validate_grasp_position(fixed_m)
+    low, high = validate_grasp_position_range(position_range_m)
+    return _factor_rng(episode_seed, "grasp_position").uniform(low, high)
+
+
+def sample_hole_offset(
+    episode_seed: int,
+    enabled: bool = True,
+    offset_ranges=HOLE_OFFSET_RANGES_M,
+) -> tuple[float, float]:
     if not enabled:
         return 0.0, 0.0
+    bounds = validate_hole_offset_ranges(offset_ranges)
     rng = _factor_rng(episode_seed, "hole_offset_yz")
-    return (
-        rng.uniform(-HOLE_OFFSET_LIMIT_M, HOLE_OFFSET_LIMIT_M),
-        rng.uniform(-HOLE_OFFSET_LIMIT_M, HOLE_OFFSET_LIMIT_M),
-    )
+    return tuple(rng.uniform(low, high) for low, high in bounds)
 
 
 @dataclass(frozen=True)
@@ -95,7 +170,8 @@ def partition_receptacle(
     px, py, pz = _finite_tuple(peg_size, 3, "peg_size")
     rx, ry, rz = _finite_tuple(receptacle_size, 3, "receptacle_size")
     gap = float(gap)
-    dy, dz = validate_hole_offset(hole_offset_yz_m)
+    # Geometry enforces physical board boundaries; sampling ranges are checked separately.
+    dy, dz = validate_hole_offset(hole_offset_yz_m, ranges=None)
     if not all(value > 0 for value in (px, py, pz, rx, ry, rz, gap)):
         raise ValueError("All native geometry dimensions must be positive")
     if not math.isfinite(gap) or gap <= py:
@@ -204,12 +280,15 @@ def mathematical_self_check() -> dict:
         )
         offset = sample_hole_offset(seed)
         assert wide == sample_pitch(seed) and offset == sample_hole_offset(seed)
-        assert -45.0 <= wide <= -25.0 and -37.0 <= narrow <= -33.0
+        low, high = ACTIVE_GRASP_PITCH_RANGE_DEG
+        assert low <= wide <= high and -37.0 <= narrow <= -33.0
         assert all(
             -HOLE_OFFSET_LIMIT_M <= value <= HOLE_OFFSET_LIMIT_M for value in offset
         )
         assert sample_hole_offset(seed, False) == (0.0, 0.0)
-        assert math.isclose((wide + 45.0) / 20.0, (narrow + 37.0) / 4.0, abs_tol=1e-14)
+        assert math.isclose(
+            (wide - low) / (high - low), (narrow + 37.0) / 4.0, abs_tol=1e-14
+        )
     return {
         "passed": True,
         "zero_offset_exact_native_boxes": True,
@@ -218,9 +297,11 @@ def mathematical_self_check() -> dict:
         "fixed_board_extents_and_exact_two_slot_complement": True,
         "max_solid_area_error_m2": max_area_error,
         "rng_repeat_and_paired_quantile_seeds_checked": 1000,
-        "seed_9101": {
-            "pitch_deg": sample_pitch(9101),
-            "hole_offset_yz_m": sample_hole_offset(9101),
+        "default_seed": DEFAULT_SEED,
+        "default_seed_sample": {
+            "pitch_deg": sample_pitch(DEFAULT_SEED),
+            "hole_offset_yz_m": sample_hole_offset(DEFAULT_SEED),
+            "grasp_position_m": sample_grasp_position(DEFAULT_SEED),
         },
         "native_socket_builder_peg_half_size_m": peg,
         "board_half_size_m": board,
