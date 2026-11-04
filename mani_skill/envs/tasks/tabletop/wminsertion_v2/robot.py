@@ -17,6 +17,7 @@ from mani_skill.agents.robots import PandaWristCam
 from mani_skill.utils import sapien_utils
 
 from .common import _pose_error, _raw, _sp
+from .ports import get_port_spec
 
 ROBOT_UID = "panda_wristcam_wminsertion_v2"
 CHARGER_LINK_NAME = "wm_charger"
@@ -26,9 +27,10 @@ MINIMUM_POSITION_SOLVER_ITERATIONS = 128
 
 @register_agent()
 class PandaWristCamFixedCharger(PandaWristCam):
-    """Native Panda and cameras, with the native charger as a fixed child."""
+    """Native Panda and cameras, with a geometry-specific fixed child."""
 
     uid = ROBOT_UID
+    port_spec = get_port_spec("A")
 
     def _load_articulation(self):
         # Match the installed b4 BaseAgent loader settings before parsing.
@@ -58,21 +60,23 @@ class PandaWristCamFixedCharger(PandaWristCam):
         child.set_name(CHARGER_LINK_NAME)
         child.set_joint_name(FIXED_JOINT_NAME)
         child.set_joint_properties("fixed", [], sapien.Pose(), sapien.Pose())
-        # Exactly the native task's three collision/visual boxes.  Density and
-        # mass/inertia construction retain the native builder defaults.
+        # Retain the native materials and builder mass/inertia defaults.
         metal = sapien.render.RenderMaterial()
         metal.set_base_color([1, 1, 1, 1])
         metal.metallic, metal.roughness, metal.specular = 1.0, 0.0, 1.0
-        for y in (0.007, -0.007):
-            pose = sapien.Pose([0.008, y, 0.0])
-            child.add_box_collision(pose, [0.008, 0.00075, 0.0032])
-            child.add_box_visual(pose, [0.008, 0.00075, 0.0032], material=metal)
+        for box in self.port_spec.pin_boxes:
+            pose = sapien.Pose(box.center_m)
+            half_size = list(box.half_size_m)
+            child.add_box_collision(pose, half_size)
+            child.add_box_visual(pose, half_size, material=metal)
         plastic = sapien.render.RenderMaterial()
         plastic.set_base_color([1, 1, 1, 1])
         plastic.metallic, plastic.roughness = 0.0, 0.1
-        pose = sapien.Pose([-0.020, 0.0, 0.0])
-        child.add_box_collision(pose, [0.020, 0.015, 0.012])
-        child.add_box_visual(pose, [0.020, 0.015, 0.012], material=plastic)
+        housing = self.port_spec.housing_box
+        pose = sapien.Pose(housing.center_m)
+        half_size = list(housing.half_size_m)
+        child.add_box_collision(pose, half_size)
+        child.add_box_visual(pose, half_size, material=plastic)
         self.robot = builder.build()
         # The fixed connection itself has no grasp DoF.  Extra position work is
         # needed for the unchanged finite-force finger/charger contact: the
@@ -111,6 +115,32 @@ class PandaWristCamFixedCharger(PandaWristCam):
         # BaseAgent compensates robot gravity by disabling it on every link.
         # The formerly independent native charger must still receive gravity.
         self.robot.links_map[CHARGER_LINK_NAME].disable_gravity = False
+
+
+@register_agent()
+class PandaWristCamFixedChargerB(PandaWristCamFixedCharger):
+    uid = f"{ROBOT_UID}_port_b"
+    port_spec = get_port_spec("B")
+
+
+@register_agent()
+class PandaWristCamFixedChargerC(PandaWristCamFixedCharger):
+    uid = f"{ROBOT_UID}_port_c"
+    port_spec = get_port_spec("C")
+
+
+@register_agent()
+class PandaWristCamFixedChargerD(PandaWristCamFixedCharger):
+    uid = f"{ROBOT_UID}_port_d"
+    port_spec = get_port_spec("D")
+
+
+ROBOT_UID_BY_PORT = {
+    "A": ROBOT_UID,
+    "B": PandaWristCamFixedChargerB.uid,
+    "C": PandaWristCamFixedChargerC.uid,
+    "D": PandaWristCamFixedChargerD.uid,
+}
 
 
 class FixedLinkGrasp:

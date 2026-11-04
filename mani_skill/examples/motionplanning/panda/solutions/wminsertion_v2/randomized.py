@@ -4,7 +4,6 @@ Accept the new environment ID and split the initial transport into a world-Z
 lift at the actual initial TCP XY, then a slow lateral move at safe standoff.
 Exact IK, command/actual guards, and later approach/insertion are inherited.
 """
-import itertools
 import time
 import numpy as np
 import sapien
@@ -101,16 +100,10 @@ class _RandomExecution(_ContinuousExecution):
             initial_tcp = _copy_pose(self.base.agent.tcp.pose)
             self.h = initial_tcp.inv() * _copy_pose(self.base.charger.pose)
             self.goal = _copy_pose(self.base.goal_pose)
-            half, self.pin_gap = np.asarray(self.base._peg_size, dtype=float), float(self.base._peg_gap)
-            self.slot_half_y, self.slot_half_z = float(half[1] + self.base._clearance), float(half[2] + self.base._clearance)
-            self.pin_corners = np.asarray([[half[0] + sx * half[0], y + sy * half[1], sz * half[2]]
-                for y in (-self.pin_gap, self.pin_gap) for sx, sy, sz in itertools.product((-1., 1.), repeat=3)])
+            self._initialize_pin_geometry()
             self._initialize_random(episode)
             self._initialize_command_guards()
-            self.result["noisy_command_guard"].update(
-                insertion_clearance_rule="physical partial-pin slot cross-section, not outside-wall2mm",
-                slot_half_y_mm=self.slot_half_y * 1000., slot_half_z_mm=self.slot_half_z * 1000.,
-                slot_clearance_mm=float(self.base._clearance) * 1000.)
+            self._record_slot_guards()
             near = self._outside_pose(self.config.target_tip_gap_m, np.zeros(2), np.array([1., 0., 0., 0.]))
             self.near = near
             safe = self._outside_pose(self.config.transport_tip_gap_m, np.zeros(2), np.array([1., 0., 0., 0.]))
