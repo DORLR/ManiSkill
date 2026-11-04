@@ -24,6 +24,8 @@ from tests.utils import (
 @pytest.mark.gpu_sim
 @pytest.mark.parametrize("env_id", ENV_IDS)
 def test_all_envs(env_id):
+    if env_id == "WMInsertionChargerRandomized-v2":
+        pytest.skip("Fixed-grasp v2 uses a single CPU-physics environment")
     sim_cfg = dict()
     if "Scene" not in env_id:
         sim_cfg = LOW_MEM_SIM_CFG
