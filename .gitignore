@@ -1,8 +1,7 @@
-__pycache__/
-*.pyc
 /data/
 /runs/
-/results/**/*.npz
-/results/**/*.pt
-/results/**/*.png
-*.log
+/logs/
+__pycache__/
+*.pyc
+/results/eval/
+/results/probe/
