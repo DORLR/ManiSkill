@@ -40,6 +40,10 @@ class ContinuousScriptedPolicyConfig(StochasticScriptedPolicyConfig):
     insertion_noise_correlation: float = .85
     insertion_noise_taper_distance_m: float = .001
     insertion_noise_final_scale: float = .10
+    tracking_bias_gain: float = .75
+    tracking_bias_filter: float = .15
+    tracking_bias_bound_rad: float = .003
+    terminal_condition: str = "insertion_geometry"
 
     def __post_init__(self):
         inherited = {f.name: getattr(self, f.name) for f in fields(StochasticScriptedPolicyConfig)}
@@ -67,6 +71,12 @@ class ContinuousScriptedPolicyConfig(StochasticScriptedPolicyConfig):
         for name in ("insertion_noise_correlation", "insertion_noise_final_scale"):
             if not np.isfinite(getattr(self, name)) or not 0 < getattr(self, name) < 1:
                 raise ValueError(f"{name} must be strictly between zero and one")
+        if not np.isfinite(self.tracking_bias_gain) or not 0. <= self.tracking_bias_gain <= 1.:
+            raise ValueError("tracking_bias_gain must be within [0,1]; zero restores the legacy teacher")
+        if not 0. < self.tracking_bias_filter <= 1. or not 0. < self.tracking_bias_bound_rad <= .003:
+            raise ValueError("Tracking filter must be in (0,1], bias bound in (0,.003] radians")
+        if self.terminal_condition not in {"insertion_geometry", "legacy_tcp"}:
+            raise ValueError("Unknown terminal_condition")
 
 
 class ContinuousScriptedPolicy(StochasticScriptedPolicy):
@@ -88,6 +98,9 @@ class _ContinuousExecution(_StochasticExecution):
         self.insertion_active = False
         self.insertion_noise_state = np.zeros(6)
         self.approach_residual = np.zeros(7)
+        self.drive_bias = np.zeros(7)
+        self.drive_bias_samples = 0
+        self.tracking_metadata = {}
         self.perturbation_seen = False
         super().__init__(policy, env, on_step)
         self.result.update(
@@ -100,6 +113,7 @@ class _ContinuousExecution(_StochasticExecution):
             actual_guard="policy pre/post20Hz endpoints; caller must retain independent all100Hz contact/partial-pin checks",
             bc_filter="bad approach actions excluded; guarded insertion target noise remains an executed valid expert action; failed episodes need external eligibility verdict",
             fixed_hold_steps=0, video_display_hold_steps=0,
+            tracking_compensation="filtered previous sent q minus measured q; bounded joint feedforward after IK; original guards unchanged",
         )
 
     def _begin(self, phase, target=None):
@@ -126,9 +140,9 @@ class _ContinuousExecution(_StochasticExecution):
         points = self.pin_corners @ transform[:3, :3].T + transform[:3, 3]
         minimum_margin, entering_margin = float("inf"), float("inf")
         any_entering = False
-        for group, center in zip(points.reshape(2, 8, 3), (-self.pin_gap, self.pin_gap)):
-            margins = np.minimum(self.slot_half_y - np.abs(group[:, 1] - center),
-                                 self.slot_half_z - np.abs(group[:, 2]))
+        for group, (cy, cz, hy, hz) in zip(points.reshape(-1, 8, 3), self.pin_slots):
+            margins = np.minimum(hy - np.abs(group[:, 1] - cy),
+                                 hz - np.abs(group[:, 2] - cz))
             minimum_margin = min(minimum_margin, float(margins.min()))
             # Conservatively require the WHOLE physical pin projection to fit
             # once any of its corners reaches the entrance plane.
@@ -140,6 +154,93 @@ class _ContinuousExecution(_StochasticExecution):
                 "pins_entering_plane": any_entering,
                 "partial_pin_slot_safe": bool(not any_entering or entering_margin >= 0.),
                 "minimum_entering_pin_slot_margin_mm": None if not any_entering else entering_margin * 1000.}
+
+    def _initialize_pin_geometry(self):
+        """Use each physical pin and its matching slot, including asymmetric D."""
+        from mani_skill.envs.tasks.tabletop.wminsertion_v2.ports import get_port_spec
+        # The archived fixed-link A environment predates the port_spec field.
+        spec = getattr(self.base, "port_spec", None) or get_port_spec("A")
+        self.port_spec = spec
+        self.pin_slots = [(pin.center_yz_m[0], pin.center_yz_m[1],
+                           pin.half_size_yz_m[0] + spec.clearance_m,
+                           pin.half_size_yz_m[1] + spec.clearance_m)
+                          for pin in spec.pins]
+        self.pin_corners = np.asarray([
+            [spec.pin_half_length_m + sx * spec.pin_half_length_m,
+             pin.center_yz_m[0] + sy * pin.half_size_yz_m[0],
+             pin.center_yz_m[1] + sz * pin.half_size_yz_m[1]]
+            for pin in spec.pins
+            for sx, sy, sz in itertools.product((-1., 1.), repeat=3)])
+        self.result.update(port_type=spec.port_type, port_geometry=spec.as_dict(),
+                           port_geometry_sha256=spec.sha256)
+
+    def _record_slot_guards(self):
+        self.result["noisy_command_guard"].update(
+            insertion_clearance_rule="each physical pin against its corresponding slot",
+            pin_slots_goal_frame_m=[list(slot) for slot in self.pin_slots],
+            slot_clearance_mm=self.port_spec.clearance_m * 1000.)
+
+    def _compensate_tracking(self, command):
+        """Estimate payload following error using joint feedback, never a pose write.
+
+        Only quiet, outside-wall alignment samples update the estimate. Every corrected
+        command still passes the same joint, FK aperture and clearance guards.
+        The uncompensated command remains an explicit admissible fallback.
+        """
+        c = self.config
+        if c.tracking_bias_gain == 0.:
+            self.tracking_metadata = {"tracking_estimate_updated": False, "tracking_applied_scale": 0.}
+            return command, np.zeros(7), None
+        qvel = np.asarray(self.base.agent.robot.get_qvel().cpu()).reshape(-1)[:7]
+        actual = self._qpos()[:7]
+        update = (self.last_sent_arm is not None
+                  and self.policy.phase in {"continuous_approach", "recovery_align"} and self.require_outside_wall
+                  and np.max(np.abs(qvel)) < .02
+                  and self.metrics.get("tcp_endpoint_linear_velocity_m_s", float("inf")) < .0003
+                  and self.metrics.get("tcp_endpoint_angular_velocity_deg_s", float("inf")) < .5
+                  and self.metrics.get("socket_contact_force_n", float("inf")) < 1.)
+        if update:
+            error = np.clip(self.last_sent_arm - actual, -c.tracking_bias_bound_rad, c.tracking_bias_bound_rad)
+            self.drive_bias = (1. - c.tracking_bias_filter) * self.drive_bias + c.tracking_bias_filter * error
+            self.drive_bias_samples += 1
+        elif self.require_outside_wall:
+            self.drive_bias_samples = 0
+        desired = c.tracking_bias_gain * self.drive_bias
+        self.tracking_metadata = {"q_actual_pre": actual.tolist(), "tracking_estimate_updated": update,
+            "tracking_calibration_samples": self.drive_bias_samples, "tracking_applied_scale": 0.,
+            "tracking_estimate_frozen_in_insertion": self.insertion_active}
+        if not np.any(desired):
+            return command, np.zeros(7), None
+        base_relative = self.goal.inv() * self._fk_tcp(command) * self.h
+        for scale in (1., .5, .25, .125, 0.):
+            candidate = command.copy()
+            candidate[:7] = (command[:7] + scale * desired).astype(np.float32).astype(float)
+            if scale and np.any(desired):
+                relative = self.goal.inv() * self._fk_tcp(candidate) * self.h
+                # Correct lateral/attitude following error only. Do not use a
+                # bias correction to advance the commanded insertion depth.
+                position = np.asarray(relative.p).copy()
+                position[0] = base_relative.p[0]
+                try:
+                    candidate = self._exact_ik(self._tcp(sapien.Pose(position, relative.q)), candidate)
+                except _PolicyFailure:
+                    continue
+                candidate[:7] = candidate[:7].astype(np.float32).astype(float)
+            if np.max(np.abs(candidate[:7] - command[:7])) > c.tracking_bias_bound_rad:
+                continue
+            if self.last_sent_arm is not None:
+                prior = self._qpos().copy()
+                prior[:7] = self.last_sent_arm
+                spacing = _pose_error(self._fk_tcp(prior), self._fk_tcp(candidate))
+                if spacing["translation_mm"] > c.axial_step_m * 1000. + 1e-6 or spacing["rotation_deg"] > c.se3_rotation_step_deg:
+                    continue
+            reason, diagnostics = self._validate_command(candidate)
+            if reason is None:
+                self.tracking_metadata = {"q_actual_pre": actual.tolist(), "tracking_estimate_updated": update,
+                    "tracking_calibration_samples": self.drive_bias_samples, "tracking_applied_scale": scale,
+                    "tracking_estimate_frozen_in_insertion": self.insertion_active}
+                return candidate, candidate[:7] - command[:7], diagnostics
+        raise _PolicyFailure("tracking_compensation_and_uncompensated_command_rejected")
 
     def _snapshot(self):
         data = super()._snapshot()
@@ -293,11 +394,18 @@ class _ContinuousExecution(_StochasticExecution):
         residual = sent[:7] - nominal[:7]
         if approach_noise:
             self.approach_residual = residual.copy()
+        noisy_command = sent.copy()
+        sent, tracking_offset, tracking_diagnostics = self._compensate_tracking(sent)
+        if tracking_diagnostics is not None:
+            diagnostics = tracking_diagnostics
         prior = self.last_relative
         spacing = None if prior is None else _pose_error(self._tcp(prior), self._tcp(sent_relative))
         self._set_command(sent_relative)
         self.action_metadata = {
-            "q_nominal": nominal[:7].tolist(), "q_noisy": sent[:7].tolist(), "q_sent": sent[:7].tolist(),
+            "q_nominal": nominal[:7].tolist(), "q_noisy": noisy_command[:7].tolist(), "q_sent": sent[:7].tolist(),
+            "tracking_bias_estimate_rad": self.drive_bias.tolist(),
+            "tracking_compensation_rad": tracking_offset.tolist(),
+            **self.tracking_metadata,
             "joint_noise_residual_rad": residual.tolist(), "noise_enabled": noisy,
             "noise_accepted": accepted, "noise_fallback_no_noise": noisy and not accepted,
             "noise_rejections": rejections, "insertion_target_noise_enabled": insertion_noise, "insertion_noise_enabled": insertion_noise,
@@ -378,7 +486,8 @@ class _ContinuousExecution(_StochasticExecution):
                   "all_pin_slot_fit": m["all_pin_slot_fit"],
                   "transverse_velocity": m["actual_transverse_velocity_m_s"] <= c.tcp_linear_velocity_tolerance_m_s,
                   "angular_velocity": m["tcp_endpoint_angular_velocity_deg_s"] <= c.tcp_angular_velocity_tolerance_deg_s,
-                  "axial_velocity": -c.tcp_linear_velocity_tolerance_m_s <= m["actual_axial_velocity_m_s"] <= c.insertion_speed_m_s}
+                  "axial_velocity": -c.tcp_linear_velocity_tolerance_m_s <= m["actual_axial_velocity_m_s"] <= c.insertion_speed_m_s,
+                  "tracking_bias_calibrated": c.tracking_bias_gain == 0. or self.drive_bias_samples >= c.settle_consecutive_steps}
         return all(checks.values()), {"checks": checks, "tcp_error_to_stopped_3mm_reference": error,
                                      "actual_tip_gap_mm": gap_mm,
                                      "admission_tip_gap_corridor_mm": [c.target_tip_gap_m * 1000., c.stochastic_end_tip_gap_m * 1000.],
@@ -423,6 +532,21 @@ class _ContinuousExecution(_StochasticExecution):
                     record["last_admission_evidence"] = evidence
                     raise _PolicyFailure("moving_actual_alignment_admission_timeout")
 
+    def _terminal_ready(self):
+        from mani_skill.envs.tasks.tabletop.wminsertion_v2.metrics import geometry_from_poses
+        c, m = self.config, self.metrics
+        geometry = geometry_from_poses(self.base.charger.pose, self.goal, self.port_spec)
+        checks = {"axial_depth": geometry["depth_ok"], "pin_slot_fit": geometry["pin_slot_fit"],
+                  "transverse_position": geometry["lateral_error_mm"] <= c.position_tolerance_mm,
+                  "orientation": geometry["angle_error_deg"] <= c.orientation_tolerance_deg,
+                  "tcp_velocity": m["tcp_endpoint_linear_velocity_m_s"] <= c.tcp_linear_velocity_tolerance_m_s,
+                  "angular_velocity": m["tcp_endpoint_angular_velocity_deg_s"] <= c.tcp_angular_velocity_tolerance_deg_s,
+                  "joint_velocity": m["arm_joint_velocity_rad_s"] <= c.arm_joint_velocity_tolerance_rad_s}
+        legacy = self._converged() and m["all_pin_slot_fit"]
+        ready = legacy if c.terminal_condition == "legacy_tcp" else all(checks.values())
+        return ready, {"checks": checks, "geometry": geometry,
+                       "strict_tcp_converged": legacy, "terminal_condition": c.terminal_condition}
+
     def _insert(self):
         c = self.config
         self.require_outside_wall, self.insertion_active = False, True
@@ -456,11 +580,14 @@ class _ContinuousExecution(_StochasticExecution):
         final = self._tcp(sapien.Pose())
         record = self._begin("final_verify", final)
         record.update(condition_based_only=True, consecutive_steps_required=c.settle_consecutive_steps,
-                      timeout_steps=c.settle_timeout_steps, noise_disabled_for_exact_final_G=True)
+                      timeout_steps=c.settle_timeout_steps, noise_disabled_for_exact_final_G=True,
+                      terminal_condition=c.terminal_condition)
         consecutive = 0
         for _ in range(c.settle_timeout_steps):
             self._send(sapien.Pose(), metadata={"terminal_verification": True})
-            consecutive = consecutive + 1 if self._converged() and self.metrics["all_pin_slot_fit"] else 0
+            ready, evidence = self._terminal_ready()
+            record["terminal_evidence"] = evidence
+            consecutive = consecutive + 1 if ready else 0
             if consecutive >= c.settle_consecutive_steps:
                 record["consecutive_converged_steps"] = consecutive
                 self._end()
@@ -481,16 +608,10 @@ class _ContinuousExecution(_StochasticExecution):
             initial_tcp = _copy_pose(self.base.agent.tcp.pose)
             self.h = initial_tcp.inv() * _copy_pose(self.base.charger.pose)
             self.goal = _copy_pose(self.base.goal_pose)
-            half, self.pin_gap = np.asarray(self.base._peg_size, dtype=float), float(self.base._peg_gap)
-            self.slot_half_y, self.slot_half_z = float(half[1] + self.base._clearance), float(half[2] + self.base._clearance)
-            self.pin_corners = np.asarray([[half[0] + sx * half[0], y + sy * half[1], sz * half[2]]
-                for y in (-self.pin_gap, self.pin_gap) for sx, sy, sz in itertools.product((-1., 1.), repeat=3)])
+            self._initialize_pin_geometry()
             self._initialize_random(episode)
             self._initialize_command_guards()
-            self.result["noisy_command_guard"].update(
-                insertion_clearance_rule="physical partial-pin slot cross-section, not outside-wall2mm",
-                slot_half_y_mm=self.slot_half_y * 1000., slot_half_z_mm=self.slot_half_z * 1000.,
-                slot_clearance_mm=float(self.base._clearance) * 1000.)
+            self._record_slot_guards()
             near = self._outside_pose(self.config.target_tip_gap_m, np.zeros(2), np.array([1., 0., 0., 0.]))
             self.near = near
             safe = self._outside_pose(self.config.transport_tip_gap_m, np.zeros(2), np.array([1., 0., 0., 0.]))

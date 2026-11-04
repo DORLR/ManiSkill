@@ -1,12 +1,13 @@
 """Preheld charger insertion with fixed grasp and wrist RGB/depth.
 
-Built on the original ManiSkill 3.0.0b4 PlugCharger-v1 task. Camera mount,
-native controls, pin dimensions and 0.5 mm per-side clearance are retained.
+Built on the original ManiSkill 3.0.0b4 PlugCharger-v1 task. Port A retains
+native geometry. Procedural B/C/D use the same camera and native controls.
 """
 
 from __future__ import annotations
 import copy
 import math
+from dataclasses import asdict
 from importlib.metadata import version
 from typing import Any
 import mplib
@@ -41,9 +42,9 @@ from .geometry import (
     validate_grasp_position_range,
     validate_grasp_position,
     validate_seed,
-    partition_receptacle,
 )
-from .robot import CHARGER_LINK_NAME, ROBOT_UID, FixedLinkGrasp
+from .ports import PortSpec, get_port_spec, partition_socket, socket_holes
+from .robot import CHARGER_LINK_NAME, ROBOT_UID_BY_PORT, FixedLinkGrasp
 
 ENV_ID = "WMInsertionChargerRandomized-v2"
 FIXED_LINK_ENV_ID = ENV_ID
@@ -57,25 +58,22 @@ FRONT_FIXED_SOCKET_POSE = (
     0.0,
     -0.997743546962738,
 )
-FRONT_FIXED_PIN_LENGTH_M = 0.016
 FRONT_FIXED_TIP_GAP_M = 0.012
-FRONT_FIXED_TABLETOP_Z_M = 0.012
 
 
-def _front_fixed_charger_pose() -> list[float]:
+def _front_fixed_charger_pose(port_spec: PortSpec) -> list[float]:
     """Place horizontal pins in front of the fixed socket, still on the table.
 
     G is the native insertion goal (socket * Rz(pi)); its x axis points into
-    the socket. The pin root is 28mm behind G in the tabletop XY projection,
-    giving the 16mm pin tips a 12mm projected wall gap and zero lateral offset.
-    Table height is independent of the elevated socket insertion height.
+    the socket. Place the pin root one pin length plus 12mm behind G in the
+    tabletop XY projection. The housing bottom rests on the table.
     """
     goal = _sp(FRONT_FIXED_SOCKET_POSE) * sapien.Pose(q=euler2quat(0, 0, np.pi))
     front = goal * sapien.Pose(
-        [-(FRONT_FIXED_PIN_LENGTH_M + FRONT_FIXED_TIP_GAP_M), 0.0, 0.0]
+        [-(port_spec.pin_length_m + FRONT_FIXED_TIP_GAP_M), 0.0, 0.0]
     )
     position = np.asarray(front.p, dtype=np.float64).copy()
-    position[2] = FRONT_FIXED_TABLETOP_Z_M
+    position[2] = port_spec.housing_half_size_m[2]
     return _raw(sapien.Pose(position, goal.q))
 
 
@@ -110,13 +108,15 @@ class WMInsertionChargerEnvV2(PlugChargerEnv):
     Default RGB-D is native millimetre depth plus RGB from hand_camera.
     Use obs_mode="rgb" for RGB only. Calibration overrides belong in reset
     options: grasp_pitch_deg, grasp_position_m and hole_offset_yz_m.
+    Select the native A or procedural B/C/D geometry with port_type.
     """
 
-    SUPPORTED_ROBOTS = [ROBOT_UID]
+    SUPPORTED_ROBOTS = list(ROBOT_UID_BY_PORT.values())
 
     def __init__(
         self,
         *,
+        port_type: str = "A",
         pitch_range_deg=ACTIVE_GRASP_PITCH_RANGE_DEG,
         grasp_pitch_enabled=True,
         fixed_grasp_pitch_deg=FIXED_GRASP_PITCH_DEG,
@@ -135,8 +135,13 @@ class WMInsertionChargerEnvV2(PlugChargerEnv):
             "auto",
         ):
             raise ValueError("WMInsertion-v2 requires one CPU physics environment")
-        if kwargs.get("robot_uids", ROBOT_UID) != ROBOT_UID:
-            raise ValueError("WMInsertion-v2 uses its fixed-child Panda")
+        self.port_spec = get_port_spec(port_type)
+        self.port_type = self.port_spec.port_type
+        robot_uid = ROBOT_UID_BY_PORT[self.port_type]
+        if kwargs.get("robot_uids", robot_uid) != robot_uid:
+            raise ValueError(f"Port {self.port_type} requires robot_uids={robot_uid!r}")
+        self._base_size = list(self.port_spec.housing_half_size_m)
+        self._receptacle_size = list(self.port_spec.socket_half_size_m)
         if kwargs.get("reconfiguration_freq", 1) != 1:
             raise ValueError("Translated hole geometry requires reconfiguration_freq=1")
         if float(robot_init_qpos_noise) != 0.0:
@@ -168,16 +173,7 @@ class WMInsertionChargerEnvV2(PlugChargerEnv):
         # Reject configured regions whose corners would put an opening outside the fixed board.
         for dy in self.hole_offset_range_yz_m[0]:
             for dz in self.hole_offset_range_yz_m[1]:
-                partition_receptacle(
-                    [
-                        self._peg_size[0],
-                        self._peg_size[1] + self._clearance,
-                        self._peg_size[2] + self._clearance,
-                    ],
-                    self._receptacle_size,
-                    self._peg_gap,
-                    (dy, dz),
-                )
+                partition_socket(self.port_spec, (dy, dz))
         self.native_package_versions = {p: version(p) for p in ("mani_skill", "sapien")}
         if self.native_package_versions != {
             "mani_skill": "3.0.0b4",
@@ -192,7 +188,7 @@ class WMInsertionChargerEnvV2(PlugChargerEnv):
             True,
         )
         self.fixed_socket_pose = _raw(FRONT_FIXED_SOCKET_POSE)
-        self.fixed_charger_pose = _front_fixed_charger_pose()
+        self.fixed_charger_pose = _front_fixed_charger_pose(self.port_spec)
         self.legacy_fixed_charger_pose = [
             -0.049560967832803726,
             0.1660775989294052,
@@ -209,7 +205,7 @@ class WMInsertionChargerEnvV2(PlugChargerEnv):
         self._hole_offset_overridden = False
         self._socket_partition = ()
         kwargs.update(
-            num_envs=1, sim_backend="cpu", robot_uids=ROBOT_UID, reconfiguration_freq=1
+            num_envs=1, sim_backend="cpu", robot_uids=robot_uid, reconfiguration_freq=1
         )
         kwargs.setdefault("obs_mode", "rgbd")
         kwargs.setdefault("control_mode", "pd_joint_pos")
@@ -271,20 +267,10 @@ class WMInsertionChargerEnvV2(PlugChargerEnv):
         self.scene_builder = TableSceneBuilder(self, robot_init_qpos_noise=0.0)
         self.scene_builder.build()
         self.charger = self.agent.robot.links_map[CHARGER_LINK_NAME]
-        self.receptacle = self._build_receptacle(
-            [
-                self._peg_size[0],
-                self._peg_size[1] + self._clearance,
-                self._peg_size[2] + self._clearance,
-            ],
-            self._receptacle_size,
-            self._peg_gap,
-        )
+        self.receptacle = self._build_receptacle()
 
-    def _build_receptacle(self, peg_size, receptacle_size, gap):
-        boxes = partition_receptacle(
-            peg_size, receptacle_size, gap, self._hole_offset_yz_m
-        )
+    def _build_receptacle(self):
+        boxes = partition_socket(self.port_spec, self._hole_offset_yz_m)
         self._socket_partition = boxes
         builder = self.scene.create_actor_builder()
         material = sapien.render.RenderMaterial()
@@ -394,7 +380,7 @@ class WMInsertionChargerEnvV2(PlugChargerEnv):
             self.agent.robot.set_pose(sapien.Pose([-0.615, 0.0, 0.0]))
             # Preserve native RNG consumption without ever setting a link pose.
             xy = randomization.uniform(
-                [-0.1, -0.2], [-0.01 - self._peg_size[0] * 2, 0.2], size=(b, 2)
+                [-0.1, -0.2], [-0.01 - self.port_spec.pin_length_m, 0.2], size=(b, 2)
             )
             pos = torch.zeros((b, 3))
             pos[:, :2] = xy
@@ -426,11 +412,10 @@ class WMInsertionChargerEnvV2(PlugChargerEnv):
             )
 
         plug = _sp(self.fixed_charger_pose)
+        housing_center = plug * sapien.Pose(self.port_spec.housing_box.center_m)
         obb = trimesh.primitives.Box(
             extents=np.asarray(self._base_size) * 2,
-            transform=(
-                plug * sapien.Pose([-0.020, 0.0, 0.0])
-            ).to_transformation_matrix(),
+            transform=housing_center.to_transformation_matrix(),
         )
         approaching = np.array([0.0, 0.0, -1.0])
         grasp = compute_grasp_info_by_obb(
@@ -439,10 +424,7 @@ class WMInsertionChargerEnvV2(PlugChargerEnv):
             target_closing=_sp(self.agent.tcp.pose).to_transformation_matrix()[:3, 1],
             depth=0.025,
         )
-        if (
-            np.linalg.norm(grasp["center"] - (plug * sapien.Pose([-0.020, 0.0, 0.0])).p)
-            > 1e-6
-        ):
+        if np.linalg.norm(grasp["center"] - housing_center.p) > 1e-6:
             raise RuntimeError("Native grasp helper no longer selects housing middle")
         grasp_position = self._sample_grasp_position(options)
         grip_center = [grasp_position, 0.0, GRIP_VERTICAL_OFFSET_M]
@@ -511,7 +493,7 @@ class WMInsertionChargerEnvV2(PlugChargerEnv):
         if abs(achieved - requested) > 0.2:
             raise RuntimeError("Achieved fixed-link reset pitch misses requested angle")
         self._zero_held_pose, self._initial_held_pose = zero_held, held
-        pin_length = float(self._peg_size[0]) * 2.0
+        pin_length = self.port_spec.pin_length_m
         pin_tip_in_goal = _sp(self.goal_pose).inv() * (
             _sp(self.charger.pose) * sapien.Pose([pin_length, 0.0, 0.0])
         )
@@ -530,6 +512,7 @@ class WMInsertionChargerEnvV2(PlugChargerEnv):
             "grip_center_in_charger_m": grip_center,
             "grip_longitudinal_location": "continuous_housing_x",
             "grasp_position_m": grasp_position,
+            "initial_achieved_grasp_position_m": float(held.inv().p[0]),
             "grasp_position_enabled": self.grasp_position_enabled,
             "grasp_position_range_m": list(self.grasp_position_range_m),
             "calibration_grasp_position_override": "grasp_position_m" in options,
@@ -605,15 +588,21 @@ class WMInsertionChargerEnvV2(PlugChargerEnv):
             * sapien.Pose([0.0, dy, dz])
             * sapien.Pose(q=euler2quat(0.0, 0.0, np.pi))
         )
-        pin_length = float(self._peg_size[0]) * 2.0
         pin_tip_in_goal = _sp(self.goal_pose).inv() * (
             _sp(self.charger.pose) * sapien.Pose([pin_length, 0.0, 0.0])
         )
-        gap, clearance = float(self._peg_gap), float(self._clearance)
+        holes = socket_holes(self.port_spec, self._hole_offset_yz_m)
         self._episode_record.update(
             {
                 "env_id": ENV_ID,
-                "variant": "fixed_outer_board_random_grasp_and_aperture_pair",
+                "variant": (
+                    "fixed_outer_board_random_grasp_and_aperture_pair"
+                    if self.port_type == "A"
+                    else "fixed_outer_board_random_grasp_and_aperture_offset"
+                ),
+                "port_type": self.port_type,
+                "port_geometry": self.port_spec.as_dict(),
+                "port_geometry_sha256": self.port_spec.sha256,
                 "active_grasp_pitch_range_deg": list(self.pitch_range_deg),
                 "default_grasp_pitch_range_deg": list(ACTIVE_GRASP_PITCH_RANGE_DEG),
                 "grasp_pitch_sampling": (
@@ -643,14 +632,10 @@ class WMInsertionChargerEnvV2(PlugChargerEnv):
                 ),
                 "randomization_rng_namespace": RNG_NAMESPACE,
                 "randomization_factors_use_independent_rng_streams": True,
-                "hole_pair_center_board_m": [0.0, dy, dz],
-                "hole_centers_board_m": [[0.0, dy - gap, dz], [0.0, dy + gap, dz]],
-                "hole_center_spacing_m": 2 * gap,
-                "hole_half_size_yz_m": [
-                    float(self._peg_size[1]) + clearance,
-                    float(self._peg_size[2]) + clearance,
-                ],
-                "hole_single_side_clearance_m": clearance,
+                "hole_offset_origin_board_m": [0.0, dy, dz],
+                "hole_centers_board_m": [[0.0, *hole.center_yz_m] for hole in holes],
+                "socket_holes": [hole.as_dict() for hole in holes],
+                "hole_single_side_clearance_m": self.port_spec.clearance_m,
                 "board_outer_half_size_m": [float(v) for v in self._receptacle_size],
                 "board_actor_pose_fixed_across_episodes": True,
                 "board_outer_boundary_fixed": True,
@@ -658,9 +643,13 @@ class WMInsertionChargerEnvV2(PlugChargerEnv):
                 "insertion_axis_board_m": [-1.0, 0.0, 0.0],
                 "aperture_insertion_axis_position_offset_m": 0.0,
                 "socket_collision_partition": [
-                    box.as_dict() for box in self._socket_partition
+                    asdict(box) for box in self._socket_partition
                 ],
-                "geometry_socket_collision": "native_fixed_exterior_five_box_shifted_slot_partition",
+                "geometry_socket_collision": (
+                    "native_fixed_exterior_five_box_shifted_slot_partition"
+                    if self.port_type == "A"
+                    else "fixed_exterior_rectangular_aperture_partition"
+                ),
                 "socket_visuals": "stable",
                 "socket_visual_boxes_match_collision_boxes": True,
                 "socket_coplanar_gold_decorations_removed": True,
@@ -669,7 +658,7 @@ class WMInsertionChargerEnvV2(PlugChargerEnv):
                 "reset_ik_seed_applied_immediately_inside_ik": True,
                 "scene_reconfiguration_frequency": 1,
                 "scene_reconfigured_for_aperture_geometry": True,
-                "native_goal_follows_aperture_pair": True,
+                "native_goal_follows_aperture_offset": True,
                 "native_goal_pose_fixed_across_episodes": not (
                     self.hole_offset_enabled or self._hole_offset_overridden
                 ),
@@ -684,6 +673,14 @@ class WMInsertionChargerEnvV2(PlugChargerEnv):
                 * 1000.0,
             }
         )
+        if self.port_type == "A":
+            # Legacy fields describe the native symmetric pair only.
+            self._episode_record.update(
+                hole_pair_center_board_m=[0.0, dy, dz],
+                hole_center_spacing_m=2 * self.port_spec.pins[0].center_yz_m[0],
+                hole_half_size_yz_m=list(holes[0].half_size_yz_m),
+                native_goal_follows_aperture_pair=True,
+            )
 
     def audit(self) -> dict[str, Any]:
         """Read achieved H and constraint drift without changing the scene."""
