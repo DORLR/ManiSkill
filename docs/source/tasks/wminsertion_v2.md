@@ -71,5 +71,34 @@ replays the same scene. Reset IK uses the constructor seed unless a separate
 
 The raw state modes and `info["charger_v2"]` contain simulator truth for auditing;
 RGB-D observations expose robot proprioception and wrist measurements. Native
-pose-only `info["success"]` is retained. Scripted policy, data collection and
-additional benchmark scoring remain separate changes.
+pose-only `info["success"]` is retained.
+
+## Scripted demonstrations
+
+Install the motion planning dependencies for the pinned runtime, then run:
+
+```bash
+python examples/collect_wminsertion_v2.py --output-dir demos/wminsertion-v2 \
+    --attempts 1 --seed 10043 --obs-mode rgbd
+```
+
+The expert reads the simulator socket goal and achieved grasp transform at
+reset. It lifts the preheld charger, moves laterally at a safe standoff,
+aligns outside the board and inserts through the native joint-position
+controller. It is a demonstration generator with access to simulator state.
+The default `clean` profile follows a nominal path; `--profile mixed` adds
+seeded perturbations and recovery.
+
+Collection assigns exactly `--attempts` consecutive seeds. The ManiSkill
+recorder writes `trajectory.h5` and its standard JSON metadata. The
+`attempts.jsonl` ledger records every assigned outcome, including reset
+failures and unsaved attempts. Each saved entry refers to its HDF5 group by
+`trajectory_id`; per-action phase, behavior-cloning mask and segment ID
+align with the HDF5 actions. In the HDF5, observation `t` is the input for
+action `t`; the last observation has no action.
+
+By default only trajectories that finish the expert's guarded motion and
+satisfy the final native pose flag are saved. `--save-failures` also keeps
+nonempty partial trajectories with complete action metadata. Simulator
+states in the HDF5 are for replay. Expert completion and native pose success
+do not substitute for a separate insertion-depth and stability benchmark.
