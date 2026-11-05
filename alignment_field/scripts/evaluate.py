@@ -38,8 +38,9 @@ def _work(spec):
         run = spec["run_dir"]
         pol = {"none": None}
         if {"field", "field_pc", "oracle"} & set(spec["methods"]):
-            base = FieldPolicy(run, estimate="hat")
-            pol.update(field=base, field_pc=FieldPolicy(run, estimate="pc", share_from=base),
+            base = FieldPolicy(run, estimate="hat", depth_noise=spec["depth_noise"], noise_seed=spec["seed"])
+            pol.update(field=base, field_pc=FieldPolicy(run, estimate="pc", share_from=base,
+                                                        depth_noise=spec["depth_noise"], noise_seed=spec["seed"] + 1),
                        oracle=FieldPolicy(run, estimate="hat", share_from=base))
         if "field_rgb" in spec["methods"]:
             pol["field_rgb"] = FieldPolicy(spec["rgb_run_dir"], estimate="rgb")
@@ -69,6 +70,7 @@ def main():
                     help="v3: one model (trained on generated shapes) evaluated on A-D, all unseen")
     ap.add_argument("--methods", nargs="+", default=["field", "field_pc", "oracle", "none"])
     ap.add_argument("--rgb-runs", default="runs_rgb", help="runs of the RGB-only ablation (method field_rgb)")
+    ap.add_argument("--depth-noise", default=None, help="sensor noise level applied to the method's depth (paf.noise)")
     args = ap.parse_args()
     specs = []
     folds = ["gen"] if args.single_run else args.folds
@@ -92,7 +94,7 @@ def main():
                                       pitch=pitch, grasp_pos=pos, n_starts=args.n_starts,
                                       run_dir=args.single_run or f"{args.runs}/fold_{fold}",
                                       methods=args.methods, path=str(path),
-                                      rgb_run_dir=f"{args.rgb_runs}/fold_{fold}"))
+                                      rgb_run_dir=f"{args.rgb_runs}/fold_{fold}", depth_noise=args.depth_noise))
     specs.sort(key=lambda s: (s["port"], s["fold"]))
     print(f"{len(specs)} test grasps, {args.workers} workers", flush=True)
     t0 = time.time()

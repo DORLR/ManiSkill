@@ -12,7 +12,7 @@ import numpy as np
 import torch
 
 from paf import config as C
-from paf.model import AlignNet
+from paf.model import AlignNet, RGBOnlyNet
 from paf.train import load_shards
 
 
@@ -43,10 +43,11 @@ def main():
     ap.add_argument("--runs", default="runs")
     ap.add_argument("--data", default="data/train/*.npz")
     ap.add_argument("--out", default="results/offline_check.json")
+    ap.add_argument("--rgb-only", action="store_true")
     args = ap.parse_args()
     report = {}
     for fold in C.PORTS:
-        model = AlignNet(pretrained=False).cuda().eval()
+        model = (RGBOnlyNet if args.rgb_only else AlignNet)(pretrained=False).cuda().eval()
         model.load_state_dict(torch.load(f"{args.runs}/fold_{fold}/model.pt", map_location="cuda"))
         D, _ = load_shards(args.data, [fold])
         summ = json.load(open(f"{args.runs}/fold_{fold}/summary.json"))
