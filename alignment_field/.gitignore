@@ -12,3 +12,7 @@ __pycache__/
 /runs_rgb/
 /runs_nested/
 /results/eval_v3_noise/
+/runs_v4/
+/runs_rel/
+/results/eval_v4/
+/data/

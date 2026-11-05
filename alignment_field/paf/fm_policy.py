@@ -125,6 +125,7 @@ def main():
     ap.add_argument("--epochs", type=int, default=40)
     ap.add_argument("--bs", type=int, default=256)
     ap.add_argument("--lr", type=float, default=3e-4)
+    ap.add_argument("--init", default=None, help="warm start from a previous model.pt")
     args = ap.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -133,11 +134,17 @@ def main():
     gen = list(generated_specs())
     tr_ports = [p for p in gen if p not in args.val_ports]
     R, P, Q, A, _ = load_demos(args.data, tr_ports)
-    Rv, Pv, Qv, Av, _ = load_demos(args.data, args.val_ports)
+    try:
+        Rv, Pv, Qv, Av, _ = load_demos(args.data, args.val_ports)
+    except ValueError:  # no validation-shape demos (smoke tests): hold out 5 % of frames
+        k = max(1, len(A) // 20)
+        R, Rv, P, Pv, Q, Qv, A, Av = R[k:], R[:k], P[k:], P[:k], Q[k:], Q[:k], A[k:], A[:k]
     print(f"demo frames: train {len(A)}, val {len(Av)}", flush=True)
     T = [torch.as_tensor(x).pin_memory() for x in (R, P, Q, A)]
     V = [torch.as_tensor(x) for x in (Rv, Pv, Qv, Av)]
     model = FMPolicy().to(dev)
+    if args.init:
+        model.load_state_dict(torch.load(args.init, map_location=dev))
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     spe = len(A) // args.bs
     total = args.epochs * spe

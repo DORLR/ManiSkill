@@ -101,6 +101,7 @@ def main():
     ap.add_argument("--no-dino", action="store_true")
     ap.add_argument("--max-steps", type=int, default=0, help="smoke test: stop after this many steps")
     ap.add_argument("--h", type=float, default=0.5)
+    ap.add_argument("--init", default=None, help="warm start from a previous model.pt")
     args = ap.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -117,6 +118,8 @@ def main():
     print(f"train views {len(tr)}, val views {len(va) if va else 0}, monitor views {len(mon) if mon else 0}",
           flush=True)
     model = RelNet(use_dino=not args.no_dino).to(dev)
+    if args.init:
+        model.load_state_dict(torch.load(args.init, map_location=dev))
     params = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(params, lr=args.lr, weight_decay=1e-4)
     total = args.epochs * len(tl)
@@ -163,12 +166,16 @@ def main():
         if args.max_steps and step >= args.max_steps:
             break
     # the field is unchanged: fit to the ID set (push successes of training shapes)
+    # straight-push ID set (v3 style); v4 has no push trials and fits its field to the
+    # insertion policy's measured successes instead (scripts/measure_id.py)
     s = tr.small
     sel = tr.idx[s["push"][tr.idx] == 1]
     M = s["u"][sel]
-    field, fit = fit_field(M, args.h, np.array([15.0, 10.0, 10.0, 8.0, 8.0, 8.0]), device=dev)
-    torch.save(field.state_dict(), out / "field.pt")
-    np.save(out / "id_set.npy", M)
+    fit = None
+    if len(M) >= 10:
+        field, fit = fit_field(M, args.h, np.array([15.0, 10.0, 10.0, 8.0, 8.0, 8.0]), device=dev)
+        torch.save(field.state_dict(), out / "field.pt")
+        np.save(out / "id_set.npy", M)
     (out / "summary.json").write_text(json.dumps({"history": hist, "n_id": int(len(M)), "field_fit": fit,
                                                   "args": vars(args)}, indent=1))
     print("done", json.dumps({"n_id": int(len(M)), "field_fit": fit}), flush=True)
