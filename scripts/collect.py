@@ -12,28 +12,34 @@ from pathlib import Path
 
 import numpy as np
 
-_ROBOT = {}
+_ROBOT = {}      # port -> Robot, or None if the environment cannot be built for it
+_ERROR = {}      # port -> construction error message
 
 
 def _work(spec):
+    """Never raises: any failure is written into the shard's meta and logged."""
     from paf.collect import safe_collect, save
     from paf.env_adapter import Robot
     port = spec["port"]
-    if port not in _ROBOT:
-        for r in _ROBOT.values():
-            if r is not None:
-                r.env.close()
-        _ROBOT.clear()
-        try:
-            _ROBOT[port] = Robot(port)
-        except Exception as exc:  # e.g. a generated shape the env cannot grasp at reset
-            _ROBOT[port] = None
-            _ROBOT["error"] = f"{type(exc).__name__}: {exc}"
-    if _ROBOT[port] is None:
-        data = {"meta": {**spec, "expert_ok": False, "failure": "env_construction: " + _ROBOT.get("error", "")}}
-    else:
-        data = safe_collect(_ROBOT[port], spec)
-    meta = save(spec["path"], data)
+    try:
+        if port not in _ROBOT:
+            for r in _ROBOT.values():
+                if r is not None:
+                    r.env.close()
+            _ROBOT.clear()
+            try:
+                _ROBOT[port] = Robot(port)
+            except Exception as exc:  # e.g. a generated shape the env cannot grasp at reset
+                _ROBOT[port] = None
+                _ERROR[port] = f"{type(exc).__name__}: {exc}"
+        if _ROBOT[port] is None:
+            data = {"meta": {**spec, "expert_ok": False, "failure": "env_construction: " + _ERROR[port]}}
+        else:
+            data = safe_collect(_ROBOT[port], spec)
+        meta = save(spec["path"], data)
+    except Exception as exc:
+        _ROBOT.pop(port, None)
+        return {"path": spec["path"], "expert_ok": False, "failure": f"worker: {type(exc).__name__}: {exc}"}
     return {k: meta.get(k) for k in ("path", "expert_ok", "n", "seconds", "failure", "expert_failure",
                                        "port_axis_error_deg")}
 
