@@ -33,6 +33,9 @@ from mani_skill.examples.motionplanning.panda.solutions.wminsertion_v2 import ( 
 )
 
 from .geometry import pose_to_T, T_to_pose, interpolate_T, pose_distance  # noqa: E402
+from .ports_ext import register_generated  # noqa: E402
+
+register_generated()  # adds G00..G49 in memory; A-D unchanged
 
 ENV_ID = "WMInsertionChargerRandomized-v2"
 
