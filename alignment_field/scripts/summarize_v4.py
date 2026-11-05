@@ -23,11 +23,11 @@ def wilson(k, n, z=1.96):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--eval", default="results/eval_v4")
+    ap.add_argument("--eval", nargs="+", default=["results/eval_v4"], help="one or more result directories")
     ap.add_argument("--out", default="results/summary_v4.json")
     args = ap.parse_args()
     cell, port_cell, skipped = defaultdict(list), defaultdict(list), defaultdict(int)
-    for f in glob.glob(f"{args.eval}/*.json"):
+    for f in [x for e in args.eval for x in glob.glob(f"{e}/*.json")]:
         r = json.load(open(f))
         if not r.get("expert_ok"):
             skipped[(r["role"], r["condition"])] += 1

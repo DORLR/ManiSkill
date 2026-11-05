@@ -51,7 +51,9 @@ def _work(spec):
                 _C["robot"].env.close()
             _C["robot"], _C["port"] = Robot(spec["port"]), spec["port"]
         if "pols" not in _C:
-            _C["pols"] = {n: (InsertionPolicy(spec["policies"][n]), FieldPolicy(spec["fieldrels"][n], estimate="rel"))
+            need_field = any(k in spec["kinds"] for k in ("field", "oracle"))
+            _C["pols"] = {n: (InsertionPolicy(spec["policies"][n]),
+                              FieldPolicy(spec["fieldrels"][n], estimate="rel") if need_field else None)
                           for n in spec["policies"]}
         robot = _C["robot"]
         rng = np.random.default_rng(spec["seed"])
@@ -65,7 +67,8 @@ def _work(spec):
             return res
         obs0 = robot.observe()
         for pol, fp in _C["pols"].values():
-            fp.begin_episode(obs0, rng)
+            if fp is not None:
+                fp.begin_episode(obs0, rng)
         for s in range(spec["n_starts"]):
             q0 = sample_ood_start(rng)
             qid = np.r_[-0.002, rng.uniform(-0.0005, 0.0005, 2), rng.uniform(-1, 1, 3) * np.radians(0.5)]
