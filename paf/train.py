@@ -80,7 +80,13 @@ def evaluate(model, T, idx, bs=512, dev="cuda"):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--held-out", required=True)
+    ap.add_argument("--held-out", default="none", help="test shape of a leave-one-out fold (v1/v2)")
+    ap.add_argument("--train-ports", nargs="+", default=None, help="v3: explicit training shapes")
+    ap.add_argument("--val-ports", nargs="+", default=[],
+                    help="v3: shapes used only for model selection (never trained on)")
+    ap.add_argument("--monitor-data", default=None, help="v3: data of the test shapes, logged every "
+                    "--monitor-every epochs for the record only")
+    ap.add_argument("--monitor-ports", nargs="+", default=["A", "B", "C", "D"])
     ap.add_argument("--data", default="data/train/*.npz")
     ap.add_argument("--out", required=True)
     ap.add_argument("--epochs", type=int, default=40)
@@ -104,12 +110,17 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
-    ports = [p for p in C.PORTS if p != args.held_out]
+    if args.train_ports:
+        ports = list(args.train_ports) + list(args.val_ports)
+    else:
+        ports = [p for p in C.PORTS if p != args.held_out]
     D, metas = load_shards(args.data, ports)
     u = (D["q"] / C.SIGMA).astype(np.float32)
     lab = id_labels(u, D["push"], D["kind"])
     n_cfg = len(metas)
-    if args.rotate:
+    if args.val_ports:
+        val_cfg = {i for i, m in enumerate(metas) if m["port"] in args.val_ports}
+    elif args.rotate:
         val_cfg = set()  # validation shape changes every epoch; the final epoch is the model
     elif args.val_port:
         val_cfg = {i for i, m in enumerate(metas) if m["port"] == args.val_port}
@@ -123,12 +134,14 @@ def main():
     port_of = np.array([metas[c]["port"] for c in D["cfg"]])
     tr_idx = np.nonzero(~is_val)[0]
     va_idx = np.nonzero(is_val)[0]
-    by_port = {p: tr_idx[port_of[tr_idx] == p] for p in ports if p != args.val_port}
+    by_port = {p: tr_idx[port_of[tr_idx] == p] for p in ports
+               if p != args.val_port and p not in args.val_ports}
     print(f"held-out {args.held_out}: {n_cfg} grasps, {len(tr_idx)} train / {len(va_idx)} val views"
           f"{' (rotating 2 train / 1 check shape per epoch)' if args.rotate else ''}", flush=True)
     mon = None
     if args.monitor_every:
-        Dm, _ = load_shards(args.data, [args.held_out])
+        Dm, _ = load_shards(args.monitor_data or args.data,
+                            args.monitor_ports if args.train_ports else [args.held_out])
         mon = {"rgb": torch.as_tensor(Dm["rgb"]), "pc": torch.as_tensor(Dm["pc"]),
                "u": torch.as_tensor((Dm["q"] / C.SIGMA).astype(np.float32))}
 

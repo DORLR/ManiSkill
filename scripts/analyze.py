@@ -78,6 +78,8 @@ def main():
     ap.add_argument("--eval", default="results/eval")
     ap.add_argument("--runs", default="runs")
     ap.add_argument("--out", default="results/summary.json")
+    ap.add_argument("--single-run", default=None, help="v3: run dir whose id_set.npy serves fold 'gen'")
+    ap.add_argument("--n-perm", type=int, default=200)
     args = ap.parse_args()
     rng = np.random.default_rng(0)
     cells = defaultdict(list)
@@ -96,9 +98,9 @@ def main():
         if by_m.get("field") and by_m.get("none"):
             grasp_pairs[(r["role"], r["condition"])].append(np.mean(by_m["field"]) - np.mean(by_m["none"]))
     M_by_fold = {}
-    for fold in "ABCD":
+    for fold in (["gen"] if args.single_run else list("ABCD")):
         try:
-            M = np.load(f"{args.runs}/fold_{fold}/id_set.npy")
+            M = np.load(f"{args.single_run}/id_set.npy" if fold == "gen" else f"{args.runs}/fold_{fold}/id_set.npy")
         except FileNotFoundError:
             continue
         nn = np.sort(np.sqrt(((M[:, None] - M[None]) ** 2).sum(-1)), 1)[:, 1]
@@ -126,8 +128,8 @@ def main():
             j = np.sqrt(((Uf[:, None] - M[None]) ** 2).sum(-1)).argmin(1)
             dist_t += np.linalg.norm(Uf[:, :3] - M[j, :3], axis=1).tolist()
             dist_r += np.linalg.norm(Uf[:, 3:] - M[j, 3:], axis=1).tolist()
-            mmd.append(mmd_test(Uf, M, rng))
-            mmd0.append(mmd_test(U0f, M, rng))
+            mmd.append(mmd_test(Uf, M, rng, n_perm=args.n_perm))
+            mmd0.append(mmd_test(U0f, M, rng, n_perm=args.n_perm))
         out[f"{role}|{cond}|{method}"] = {
             "n": len(eps), "push_success": p, "ci": [lo, hi],
             "in_id": float(np.mean(in_id)) if in_id else None,

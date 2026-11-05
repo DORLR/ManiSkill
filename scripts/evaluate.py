@@ -40,7 +40,7 @@ def _work(spec):
         _CACHE[key] = {"field": base, "field_pc": FieldPolicy(run, estimate="pc", share_from=base),
                        "oracle": FieldPolicy(run, estimate="hat", share_from=base), "none": None}
     try:
-        res = eval_grasp(_CACHE["robot"], _CACHE[key], spec)
+        res = eval_grasp(_CACHE["robot"], {m: p for m, p in _CACHE[key].items() if m in spec["methods"]}, spec)
     except Exception as exc:  # one bad grasp must not stop the whole evaluation
         return {"path": spec["path"], "error": f"{type(exc).__name__}: {exc}"}
     Path(spec["path"]).write_text(json.dumps(res))
@@ -60,11 +60,15 @@ def main():
     ap.add_argument("--n-seen", type=int, default=4)
     ap.add_argument("--n-starts", type=int, default=4)
     ap.add_argument("--roles", nargs="+", default=["seen", "unseen"])
+    ap.add_argument("--single-run", default=None,
+                    help="v3: one model (trained on generated shapes) evaluated on A-D, all unseen")
+    ap.add_argument("--methods", nargs="+", default=["field", "field_pc", "oracle", "none"])
     args = ap.parse_args()
     specs = []
-    for fi, fold in enumerate(args.folds):
+    folds = ["gen"] if args.single_run else args.folds
+    for fi, fold in enumerate(folds):
         for pi, port in enumerate(C.PORTS):
-            role = "unseen" if port == fold else "seen"
+            role = "unseen" if (port == fold or args.single_run) else "seen"
             if role not in args.roles:
                 continue
             n = args.n_unseen if role == "unseen" else args.n_seen
@@ -80,7 +84,8 @@ def main():
                     specs.append(dict(fold=fold, port=port, role=role, condition=cond, idx=i,
                                       seed=900000 + 100000 * fi + 10000 * pi + 100 * ci + i,
                                       pitch=pitch, grasp_pos=pos, n_starts=args.n_starts,
-                                      run_dir=f"{args.runs}/fold_{fold}", path=str(path)))
+                                      run_dir=args.single_run or f"{args.runs}/fold_{fold}",
+                                      methods=args.methods, path=str(path)))
     specs.sort(key=lambda s: (s["port"], s["fold"]))
     print(f"{len(specs)} test grasps, {args.workers} workers", flush=True)
     t0 = time.time()
