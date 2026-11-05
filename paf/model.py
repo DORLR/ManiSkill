@@ -77,3 +77,23 @@ class AlignNet(nn.Module):
         f = torch.cat(feats, -1)
         q_hat = q_pc + self.fine_head(torch.cat([f, q_pc.detach()], -1))
         return {"q_pc": q_pc, "q_hat": q_hat, "id_logit": self.id_head(f).squeeze(-1)}
+
+
+class RGBOnlyNet(nn.Module):
+    """Ablation without any depth: the RGB crop alone gives the 6D state and
+    the insertion axis in the hand frame (which replaces the board-plane fit
+    that defines the port axes). Outputs use AlignNet's keys so the training
+    and evaluation code is shared."""
+
+    def __init__(self, pretrained=True):
+        super().__init__()
+        self.rgb = RGBNet(pretrained)
+        self.head = mlp((self.rgb.out_dim, 512, 256, 9))
+        self.id_head = mlp((self.rgb.out_dim, 256, 1))
+
+    def forward(self, rgb, pts=None):
+        f = self.rgb(rgb)
+        o = self.head(f)
+        u = o[:, :6]
+        axis = torch.nn.functional.normalize(o[:, 6:].float(), dim=-1)
+        return {"q_pc": u, "q_hat": u, "axis_hand": axis, "id_logit": self.id_head(f).squeeze(-1)}

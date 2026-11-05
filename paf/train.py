@@ -17,14 +17,15 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
+from scipy.spatial.transform import Rotation
 
 from . import config as C
 from .field import fit_field
-from .model import AlignNet
+from .model import AlignNet, RGBOnlyNet
 
 
 def load_shards(pattern, ports):
-    rgb, pc, q, push, kind, cfg = [], [], [], [], [], []
+    rgb, pc, q, push, kind, cfg, axis = [], [], [], [], [], [], []
     metas = []
     for i, f in enumerate(sorted(glob.glob(pattern))):
         d = np.load(f, allow_pickle=False)
@@ -39,8 +40,14 @@ def load_shards(pattern, ports):
         push.append(d["push"])
         kind.append(d["kind"])
         cfg.append(np.full(n, len(metas) - 1))
+        # insertion axis seen from the hand: R_hand^T e_x, R_hand from q, H_pre, R_P (FK)
+        R_P, R_pre = d["R_P"], d["H_pre"][:3, :3]
+        Rr = Rotation.from_rotvec(d["q"][:, 3:]).as_matrix()
+        R_hand = R_P[None] @ Rr @ R_P.T[None] @ R_pre[None]
+        axis.append(np.einsum("nji,j->ni", R_hand, R_P[:, 0]).astype(np.float32))
     return dict(rgb=np.concatenate(rgb), pc=np.concatenate(pc), q=np.concatenate(q),
-                push=np.concatenate(push), kind=np.concatenate(kind), cfg=np.concatenate(cfg)), metas
+                push=np.concatenate(push), kind=np.concatenate(kind), cfg=np.concatenate(cfg),
+                axis=np.concatenate(axis)), metas
 
 
 def id_labels(u, push, kind):
@@ -103,6 +110,7 @@ def main():
                     help="log errors on the held-out test shape every N epochs (record only, never used "
                          "for selection; the final epoch is the model)")
     ap.add_argument("--strong-aug", action="store_true", help="colour jitter per channel + crop shift +-8 px")
+    ap.add_argument("--rgb-only", action="store_true", help="ablation: RGB crop only, no depth at all")
     ap.add_argument("--reg", action="store_true",
                     help="shape-generalisation regulariser: RGB feature dropout 0.5, crop shift, stronger colour jitter")
     args = ap.parse_args()
@@ -130,7 +138,7 @@ def main():
     dev = "cuda"
     # data stay in (pinned) CPU memory; batches are moved to the GPU per step
     T = {"rgb": torch.as_tensor(D["rgb"]).pin_memory(), "pc": torch.as_tensor(D["pc"]).pin_memory(),
-         "u": torch.as_tensor(u), "lab": torch.as_tensor(lab)}
+         "u": torch.as_tensor(u), "lab": torch.as_tensor(lab), "axis": torch.as_tensor(D["axis"])}
     port_of = np.array([metas[c]["port"] for c in D["cfg"]])
     tr_idx = np.nonzero(~is_val)[0]
     va_idx = np.nonzero(is_val)[0]
@@ -151,6 +159,7 @@ def main():
         pts = T["pc"][idx_t].to(dev, non_blocking=True).float()
         ub = T["u"][idx_t].to(dev, non_blocking=True)
         lb = T["lab"][idx_t].to(dev, non_blocking=True)
+        ax = T["axis"][idx_t].to(dev, non_blocking=True)
         if args.reg or args.strong_aug:
             g = torch.empty(len(idx), 1, 1, 3, device=dev).uniform_(0.7, 1.3)
             rgb = (rgb.float() * g + torch.randn(len(idx), 1, 1, 1, device=dev) * 10).clamp(0, 255)
@@ -160,16 +169,21 @@ def main():
             g = torch.empty(len(idx), 1, 1, 1, device=dev).uniform_(0.85, 1.15)
             rgb = (rgb.float() * g).clamp(0, 255).to(torch.uint8)
         pts[..., :3] += torch.randn_like(pts[..., :3]) * (0.0005 / 0.05)
-        return rgb, pts, ub, lb
+        return rgb, pts, ub, lb, ax
 
-    def loss_fn(o, ub, lb):
+    def loss_fn(o, ub, lb, ax):
         loss = F.smooth_l1_loss(o["q_pc"].float(), ub) + F.smooth_l1_loss(o["q_hat"].float(), ub)
+        if "axis_hand" in o:  # axis angle error in degrees (1 deg ~ 1 sigma), robust form
+            a = o["axis_hand"]
+            ang = torch.atan2(torch.linalg.cross(a, ax).norm(dim=-1), (a * ax).sum(-1)) * (180 / np.pi)
+            loss = loss + F.smooth_l1_loss(ang, torch.zeros_like(ang))
         m = lb >= 0
         if m.any():
             loss = loss + 0.2 * F.binary_cross_entropy_with_logits(o["id_logit"].float()[m], lb[m])
         return loss
 
-    model = AlignNet(pretrained=True, rgb_drop=0.5 if args.reg else 0.0).to(dev)
+    model = (RGBOnlyNet(pretrained=True) if args.rgb_only
+             else AlignNet(pretrained=True, rgb_drop=0.5 if args.reg else 0.0)).to(dev)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     steps_per_epoch = (len(tr_idx) * 2 // 3 if args.rotate else len(tr_idx)) // args.bs
     total = args.epochs * steps_per_epoch
@@ -188,9 +202,9 @@ def main():
         perm = np.random.permutation(pool)
         tot = 0.0
         for s in range(len(pool) // args.bs):
-            rgb, pts, ub, lb = batch(perm[s * args.bs:(s + 1) * args.bs])
+            rgb, pts, ub, lb, ax = batch(perm[s * args.bs:(s + 1) * args.bs])
             with torch.autocast("cuda", dtype=torch.bfloat16):
-                loss = loss_fn(model(rgb, pts), ub, lb)
+                loss = loss_fn(model(rgb, pts), ub, lb, ax)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
