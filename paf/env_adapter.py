@@ -155,8 +155,13 @@ class Robot:
             poses.append((phase, self.hand_pose()))
 
         cfg = ContinuousScriptedPolicyConfig(profile="clean")
+        # Note (2026-11-05): for port D at grasp pitch above about -33 deg the
+        # expert stalls in its axial push (hand stops moving; a larger step
+        # budget of 1600 did not help), so those grasps are not insertable
+        # here and are recorded as expert failures.
+        env = self.env
         # The randomized-board variant is the expert Chongyu's collector uses.
-        result = RandomContinuousScriptedPolicy(cfg).run(self.env, on_step=on_step)
+        result = RandomContinuousScriptedPolicy(cfg).run(env, on_step=on_step)
         return {"completed": bool(result.get("completed")), "failure": result.get("failure_reason"),
                 "steps": int(result.get("steps", 0)), "poses": poses}
 
