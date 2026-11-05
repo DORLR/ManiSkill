@@ -53,9 +53,10 @@ class RGBNet(nn.Module):
 
 
 class AlignNet(nn.Module):
-    def __init__(self, pretrained=True, use_rgb=True):
+    def __init__(self, pretrained=True, use_rgb=True, rgb_drop=0.0):
         super().__init__()
         self.use_rgb = use_rgb
+        self.rgb_drop = rgb_drop  # training only: drop the whole RGB feature per sample
         self.pc = PointNet()
         self.q_pc_head = mlp((self.pc.out_dim, 256, 6))
         self.rgb = RGBNet(pretrained) if use_rgb else None
@@ -66,7 +67,13 @@ class AlignNet(nn.Module):
     def forward(self, rgb, pts):
         f_pc = self.pc(pts)
         q_pc = self.q_pc_head(f_pc)
-        feats = [f_pc] + ([self.rgb(rgb)] if self.use_rgb else [])
+        feats = [f_pc]
+        if self.use_rgb:
+            f_rgb = self.rgb(rgb)
+            if self.training and self.rgb_drop > 0:
+                keep = (torch.rand(f_rgb.shape[0], 1, device=f_rgb.device) >= self.rgb_drop).to(f_rgb.dtype)
+                f_rgb = f_rgb * keep
+            feats.append(f_rgb)
         f = torch.cat(feats, -1)
         q_hat = q_pc + self.fine_head(torch.cat([f, q_pc.detach()], -1))
         return {"q_pc": q_pc, "q_hat": q_hat, "id_logit": self.id_head(f).squeeze(-1)}

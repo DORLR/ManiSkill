@@ -87,6 +87,10 @@ def main():
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--h", type=float, default=0.5, help="field bandwidth, sigma units")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--val-port", default=None,
+                    help="nested leave-one-shape-out: validate on this training shape (not trained on)")
+    ap.add_argument("--reg", action="store_true",
+                    help="shape-generalisation regulariser: RGB feature dropout 0.5, crop shift, stronger colour jitter")
     args = ap.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -97,7 +101,10 @@ def main():
     u = (D["q"] / C.SIGMA).astype(np.float32)
     lab = id_labels(u, D["push"], D["kind"])
     n_cfg = len(metas)
-    val_cfg = set(rng.choice(n_cfg, max(1, n_cfg // 10), replace=False).tolist())
+    if args.val_port:
+        val_cfg = {i for i, m in enumerate(metas) if m["port"] == args.val_port}
+    else:
+        val_cfg = set(rng.choice(n_cfg, max(1, n_cfg // 10), replace=False).tolist())
     is_val = np.array([c in val_cfg for c in D["cfg"]])
     dev = "cuda"
     T = {"rgb": torch.as_tensor(D["rgb"], device=dev), "pc": torch.as_tensor(D["pc"], device=dev),
@@ -106,7 +113,7 @@ def main():
     va_idx = torch.as_tensor(np.nonzero(is_val)[0], device=dev)
     print(f"held-out {args.held_out}: {n_cfg} grasps, {len(tr_idx)} train / {len(va_idx)} val views", flush=True)
 
-    model = AlignNet(pretrained=True).to(dev)
+    model = AlignNet(pretrained=True, rgb_drop=0.5 if args.reg else 0.0).to(dev)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     steps_per_epoch = len(tr_idx) // args.bs
     total = args.epochs * steps_per_epoch
@@ -122,8 +129,14 @@ def main():
             b = perm[s * args.bs:(s + 1) * args.bs]
             rgb = T["rgb"][b]
             # photometric jitter (brightness/contrast) and point jitter (0.5 mm)
-            g = torch.empty(len(b), 1, 1, 1, device=dev).uniform_(0.85, 1.15)
-            rgb = (rgb.float() * g).clamp(0, 255).to(torch.uint8)
+            if args.reg:
+                g = torch.empty(len(b), 1, 1, 3, device=dev).uniform_(0.7, 1.3)
+                rgb = (rgb.float() * g + torch.randn(len(b), 1, 1, 1, device=dev) * 10).clamp(0, 255)
+                sx, sy = np.random.randint(-8, 9, 2)
+                rgb = torch.roll(rgb, shifts=(int(sy), int(sx)), dims=(1, 2)).to(torch.uint8)
+            else:
+                g = torch.empty(len(b), 1, 1, 1, device=dev).uniform_(0.85, 1.15)
+                rgb = (rgb.float() * g).clamp(0, 255).to(torch.uint8)
             pts = T["pc"][b].float()
             pts[..., :3] += torch.randn_like(pts[..., :3]) * (0.0005 / 0.05)
             with torch.autocast("cuda", dtype=torch.bfloat16):
@@ -141,7 +154,8 @@ def main():
         res = evaluate(model, T, va_idx)
         res.update(epoch=ep, loss=float(tot) / steps_per_epoch, minutes=(time.time() - t0) / 60)
         history.append(res)
-        score = res["hat_near_t_med_mm"] + res["hat_near_r_med_deg"]
+        score = min(res["hat_near_t_med_mm"] + res["hat_near_r_med_deg"],
+                    res["pc_near_t_med_mm"] + res["pc_near_r_med_deg"])
         if best is None or score < best:
             best = score
             torch.save(model.state_dict(), out / "model.pt")
