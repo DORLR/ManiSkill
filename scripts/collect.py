@@ -21,10 +21,18 @@ def _work(spec):
     port = spec["port"]
     if port not in _ROBOT:
         for r in _ROBOT.values():
-            r.env.close()
+            if r is not None:
+                r.env.close()
         _ROBOT.clear()
-        _ROBOT[port] = Robot(port)
-    data = safe_collect(_ROBOT[port], spec)
+        try:
+            _ROBOT[port] = Robot(port)
+        except Exception as exc:  # e.g. a generated shape the env cannot grasp at reset
+            _ROBOT[port] = None
+            _ROBOT["error"] = f"{type(exc).__name__}: {exc}"
+    if _ROBOT[port] is None:
+        data = {"meta": {**spec, "expert_ok": False, "failure": "env_construction: " + _ROBOT.get("error", "")}}
+    else:
+        data = safe_collect(_ROBOT[port], spec)
     meta = save(spec["path"], data)
     return {k: meta.get(k) for k in ("path", "expert_ok", "n", "seconds", "failure", "expert_failure",
                                        "port_axis_error_deg")}
