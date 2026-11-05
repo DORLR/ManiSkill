@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from . import config as C
+from . import noise as N
 from .field import FieldNet, step_from_field
 from .geometry import apply_port_motion
 from .geometry import port_axes
@@ -19,8 +20,10 @@ from .perception import port_axes_from_obs, preprocess, rgb_crop
 
 
 class FieldPolicy:
-    def __init__(self, run_dir, device="cuda", estimate="hat", share_from=None):
+    def __init__(self, run_dir, device="cuda", estimate="hat", share_from=None, depth_noise=None, noise_seed=0):
         self.dev = device
+        self.depth_noise = depth_noise          # None or a level of paf.noise (sensor model)
+        self.noise_rng = np.random.default_rng(noise_seed)
         # "hat" (point cloud + RGB), "pc" (point cloud only) or "rgb" (RGB only, no depth)
         self.estimate = estimate
         if share_from is not None:  # same weights, one copy in GPU memory
@@ -36,6 +39,7 @@ class FieldPolicy:
     def begin_episode(self, obs, rng):
         """Port axes from the first view: board-plane RANSAC + gravity, or for
         the RGB-only variant the predicted insertion axis (hand frame) + gravity."""
+        obs = N.apply(obs, self.noise_rng, self.depth_noise)
         if self.estimate == "rgb":
             with torch.no_grad():
                 o = self.model(torch.as_tensor(rgb_crop(obs)[None], device=self.dev))
@@ -47,6 +51,7 @@ class FieldPolicy:
 
     @torch.no_grad()
     def estimate_state(self, obs, rng):
+        obs = N.apply(obs, self.noise_rng, self.depth_noise)
         if self.estimate == "rgb":
             o = self.model(torch.as_tensor(rgb_crop(obs)[None], device=self.dev))
         else:
