@@ -8,7 +8,7 @@ import json
 import math
 from collections import defaultdict
 
-METHODS = ("policy", "field+policy", "oracle+policy", "policy_id")
+METHODS = ("fm_id", "fm", "field+fm", "oracle+fm", "bc_id", "bc", "field+bc", "oracle+bc")
 
 
 def wilson(k, n, z=1.96):

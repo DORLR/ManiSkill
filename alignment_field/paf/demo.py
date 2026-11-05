@@ -57,7 +57,7 @@ def run_demo(robot, H_pre, R_P, R_P_est, q_start, rng):
     if not robot.move_to(pose_from_state(q_start, H_pre, R_P)):
         return None
     H0 = robot.hand_pose()
-    frames = {"rgb": [], "pc": [], "prop": [], "act": [], "u": []}
+    frames = {"rgb": [], "pc": [], "prop": [], "act": [], "u": [], "qpos": []}
     ok = False
     for _ in range(MAX_STEPS):
         obs = robot.observe()
@@ -72,6 +72,7 @@ def run_demo(robot, H_pre, R_P, R_P_est, q_start, rng):
         frames["prop"].append(proprio(obs.H, H0, R_P_est).astype(np.float32))
         frames["act"].append(a.astype(np.float32))
         frames["u"].append(u.astype(np.float32))
+        frames["qpos"].append(obs.qpos[:7].astype(np.float32))  # joint proprioception for the IL policy
         a_exec = a + rng.normal(size=6) * DART_NOISE
         if not robot.move_to(apply_port_motion(obs.H, a_exec * C.SIGMA, R_P), settle_steps=10):
             break
@@ -90,7 +91,7 @@ def rollout_policy(robot, policy, H_pre, R_P, rng, max_steps=MAX_STEPS):
         if inserted(u_true, stroke):
             return {"inserted": True, "steps": t, "u_end": u_true.tolist()}
         a = policy.act(obs, H0, rng)
-        if not robot.move_to(apply_port_motion(obs.H, a * C.SIGMA, policy.R_P), settle_steps=10):
+        if not robot.move_to(policy.target_pose(obs.H, a), settle_steps=10):
             break
     u_true = relative_state(robot.hand_pose(), H_pre, R_P) / C.SIGMA
     return {"inserted": bool(inserted(u_true, stroke)), "steps": max_steps, "u_end": u_true.tolist()}

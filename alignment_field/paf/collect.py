@@ -112,7 +112,7 @@ def collect_config(robot, spec: dict) -> dict:
             rec["push"].append(-1)
             rec["advanced_mm"].append(np.nan)
     # insertion demonstrations from near the pre-insertion pose (v4, learned insertion policy)
-    demo = {k: [] for k in ("demo_rgb", "demo_pc", "demo_prop", "demo_act", "demo_u", "demo_id")}
+    demo = {k: [] for k in ("demo_rgb", "demo_pc", "demo_prop", "demo_act", "demo_u", "demo_qpos", "demo_id")}
     demo_ok = []
     for k in range(spec.get("n_demo", 0)):
         q0 = np.r_[rng.uniform(-0.004, 0.0), rng.uniform(-0.0015, 0.0015, 2), rng.uniform(-1, 1, 3) * np.radians(1.5)]
@@ -122,7 +122,7 @@ def collect_config(robot, spec: dict) -> dict:
         fr, ok = res
         demo_ok.append(bool(ok))
         if ok and len(fr["act"]):
-            for key in ("rgb", "pc", "prop", "act", "u"):
+            for key in ("rgb", "pc", "prop", "act", "u", "qpos"):
                 demo["demo_" + key].append(fr[key])
             demo["demo_id"].append(np.full(len(fr["act"]), k))
         # back out straight along the axis before the next demonstration

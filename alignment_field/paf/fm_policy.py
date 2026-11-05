@@ -1,14 +1,17 @@
-"""Insertion policy: behaviour cloning with a conditional flow-matching action head
-(as in SID's execution policy and pi0-style flow policies).
+"""RGB-only insertion policy learned from demonstrations (behaviour cloning).
 
-Observation encoder: PointNet over the coloured point cloud + ResNet-18 over
-the RGB crop (ImageNet init) + proprio (hand motion since episode start).
-Action head: velocity field v(A_tau, tau | obs) over a chunk of H=4 actions;
-trained with  || v - (A - A0) ||^2,  A_tau = (1 - tau) A0 + tau A,  A0 ~ N(0, I)
-(conditional flow matching, Lipman et al. 2023); sampled with 10 Euler steps.
-Actions are hand steps in port axes, sigma units, scaled by 1/0.5.
+Inputs: the native-resolution RGB crop around the pin tips and holes (no depth,
+no point cloud) and joint proprioception (the 7 arm joint angles, radians). Encoder: ResNet-18 (ImageNet init). Output: a chunk of H=4 hand
+steps in the current hand frame (sigma units, scaled by 1/0.5); the first 2 are
+executed, then the policy re-plans.
+Heads:
+  fm  conditional flow matching: || v(A_tau, tau | obs) - (A - A0) ||^2 with
+      A_tau = (1 - tau) A0 + tau A, A0 ~ N(0, I) (Lipman et al. 2023); 10 Euler steps
+  bc  direct regression of the chunk (MSE)
+Demo actions were recorded in port axes and are converted to the hand frame
+with R_hand^T R_P (R_hand from FK), so the policy needs no port-axis estimate.
 
-python -m paf.fm_policy --data "data/v4_train/*.npz" --val-ports G46 G47 G48 --out runs_v4/policy
+python -m paf.fm_policy --data "data/v4_train/*.npz" --head fm --out runs_v4/policy
 """
 
 from __future__ import annotations
@@ -23,10 +26,11 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
+from scipy.spatial.transform import Rotation
 
-from .demo import proprio
-from .model import PointNet, RGBNet, mlp
-from .perception import port_axes_from_obs, preprocess
+from . import config as C
+from .model import RGBNet, mlp
+from .perception import rgb_crop
 
 H_CHUNK, EXEC = 4, 2
 ACT_SCALE = 0.5
@@ -38,30 +42,55 @@ def time_emb(tau, dim=64):
     return torch.cat([a.sin(), a.cos()], -1)
 
 
-class FMPolicy(nn.Module):
-    def __init__(self, pretrained=True):
-        super().__init__()
-        self.pc = PointNet()
-        self.rgb = RGBNet(pretrained)
-        self.cond = mlp((self.pc.out_dim + self.rgb.out_dim + 6, 512, 512), last_act=True)
-        self.vel = mlp((512 + H_CHUNK * 6 + 64, 512, 512, H_CHUNK * 6))
+def hand_proprio(H, H0):
+    """Hand motion since the episode start, in the start hand frame, sigma units (FK only)."""
+    t = H0[:3, :3].T @ (H[:3, 3] - H0[:3, 3])
+    r = Rotation.from_matrix(H0[:3, :3].T @ H[:3, :3]).as_rotvec()
+    return (np.r_[t, r] / C.SIGMA).astype(np.float32)
 
-    def encode(self, rgb, pts, prop):
-        return self.cond(torch.cat([self.pc(pts), self.rgb(rgb), prop], -1))
+
+def apply_hand_motion(H, a):
+    """Execute action a (sigma units) in the current hand frame."""
+    T = H.copy()
+    T[:3, 3] = H[:3, 3] + H[:3, :3] @ (a[:3] * C.SIGMA_T)
+    T[:3, :3] = H[:3, :3] @ Rotation.from_rotvec(a[3:] * C.SIGMA_R).as_matrix()
+    return T
+
+
+class InsertPolicyNet(nn.Module):
+    """RGB-only insertion policy: ResNet-18 on the RGB crop + proprio; action head
+    'fm' (conditional flow matching over a chunk) or 'bc' (direct regression)."""
+
+    def __init__(self, head="fm", pretrained=True):
+        super().__init__()
+        self.head = head
+        self.rgb = RGBNet(pretrained)
+        self.cond = mlp((self.rgb.out_dim + 7, 512, 512), last_act=True)
+        if head == "fm":
+            self.out = mlp((512 + H_CHUNK * 6 + 64, 512, 512, H_CHUNK * 6))
+        else:
+            self.out = mlp((512, 512, 512, H_CHUNK * 6))
+
+    def encode(self, rgb, prop):
+        return self.cond(torch.cat([self.rgb(rgb), prop], -1))
 
     def velocity(self, c, A, tau):
-        return self.vel(torch.cat([c, A.flatten(1), time_emb(tau)], -1)).view(-1, H_CHUNK, 6)
+        return self.out(torch.cat([c, A.flatten(1), time_emb(tau)], -1)).view(-1, H_CHUNK, 6)
 
-    def loss(self, rgb, pts, prop, A):
-        c = self.encode(rgb, pts, prop)
+    def loss(self, rgb, prop, A):
+        c = self.encode(rgb, prop)
+        if self.head == "bc":
+            return ((self.out(c).view(-1, H_CHUNK, 6) - A) ** 2).mean()
         tau = torch.rand(A.shape[0], device=A.device)
         A0 = torch.randn_like(A)
         At = (1 - tau)[:, None, None] * A0 + tau[:, None, None] * A
         return ((self.velocity(c, At, tau) - (A - A0)) ** 2).mean()
 
     @torch.no_grad()
-    def sample(self, rgb, pts, prop, steps=10):
-        c = self.encode(rgb, pts, prop)
+    def sample(self, rgb, prop, steps=10):
+        c = self.encode(rgb, prop)
+        if self.head == "bc":
+            return self.out(c).view(-1, H_CHUNK, 6)
         A = torch.randn(rgb.shape[0], H_CHUNK, 6, device=rgb.device)
         for k in range(steps):
             tau = torch.full((rgb.shape[0],), k / steps, device=rgb.device)
@@ -70,50 +99,58 @@ class FMPolicy(nn.Module):
 
 
 class InsertionPolicy:
-    """Closed-loop wrapper: port axes from the first view, then act every step."""
+    """Closed-loop wrapper. Sees only the RGB crop and the joint angles; acts in the hand frame."""
 
     def __init__(self, run_dir, device="cuda"):
         self.dev = device
-        self.model = FMPolicy(pretrained=False).to(device).eval()
+        cfg = json.loads(Path(f"{run_dir}/summary.json").read_text())["args"] if Path(f"{run_dir}/summary.json").exists() else {}
+        self.model = InsertPolicyNet(head=cfg.get("head", "fm"), pretrained=False).to(device).eval()
         self.model.load_state_dict(torch.load(f"{run_dir}/model.pt", map_location=device))
-        self.R_P, self.queue = None, []
+        self.queue = []
 
     def reset(self):
         self.queue = []
 
-    def set_axes_from(self, obs, rng):
-        self.R_P, _ = port_axes_from_obs(obs, rng)
-        return self.R_P is not None
+    def set_axes_from(self, obs, rng):  # kept for the evaluation API; RGB-only needs no port axes
+        return True
 
     def act(self, obs, H0, rng):
         if not self.queue:
-            crop, pc = preprocess(obs, self.R_P, rng)
             t = lambda x, dt=torch.float32: torch.as_tensor(np.asarray(x)[None], device=self.dev, dtype=dt)
             with torch.autocast("cuda", dtype=torch.bfloat16):
-                A = self.model.sample(t(crop, torch.uint8), t(pc), t(proprio(obs.H, H0, self.R_P)))
+                A = self.model.sample(t(rgb_crop(obs), torch.uint8), t(obs.qpos[:7]))
             self.queue = list(A[0].float().cpu().numpy()[:EXEC] * ACT_SCALE)
         return self.queue.pop(0)
 
+    def target_pose(self, H, a):
+        return apply_hand_motion(H, a)
+
 
 def load_demos(pattern, ports):
-    rgb, pc, prop, chunks, grasp = [], [], [], [], []
+    """Demo frames with actions and proprio converted to the hand frame (FK only):
+    the recorded port-axis action a maps to R_hand^T R_P a (translation and rotation vector)."""
+    rgb, prop, chunks, grasp = [], [], [], []
     for gi, f in enumerate(sorted(glob.glob(pattern))):
         d = np.load(f, allow_pickle=False)
         meta = json.loads(str(d["meta"]))
-        if meta.get("port") not in ports or "demo_act" not in d.files or len(d["demo_act"]) == 0:
-            continue
-        act, did = d["demo_act"], d["demo_id"]
+        if meta.get("port") not in ports or "demo_qpos" not in d.files or len(d["demo_act"]) == 0:
+            continue  # shards collected before joint angles were stored are not used for IL
+        R_P, H_pre = d["R_P"], d["H_pre"]
+        act, did, U = d["demo_act"], d["demo_id"], d["demo_u"].astype(np.float64)
+        q = U * C.SIGMA
+        R_hand = R_P[None] @ Rotation.from_rotvec(q[:, 3:]).as_matrix() @ R_P.T[None] @ H_pre[None, :3, :3]
+        p_hand = H_pre[None, :3, 3] + q[:, :3] @ R_P.T
+        M = np.transpose(R_hand, (0, 2, 1)) @ R_P[None]
+        a_hand = np.concatenate([np.einsum("nij,nj->ni", M, act[:, :3]), np.einsum("nij,nj->ni", M, act[:, 3:])], 1)
         for k in np.unique(did):
             idx = np.nonzero(did == k)[0]
-            a = act[idx]
+            a = a_hand[idx].astype(np.float32)
             pad = np.concatenate([a, np.zeros((H_CHUNK, 6), np.float32)])
             chunks.append(np.stack([pad[t:t + H_CHUNK] for t in range(len(idx))]))
             rgb.append(d["demo_rgb"][idx])
-            pc.append(d["demo_pc"][idx])
-            prop.append(d["demo_prop"][idx])
+            prop.append(d["demo_qpos"][idx].astype(np.float32))
             grasp.append(np.full(len(idx), gi))
-    return (np.concatenate(rgb), np.concatenate(pc), np.concatenate(prop),
-            np.concatenate(chunks) / ACT_SCALE, np.concatenate(grasp))
+    return (np.concatenate(rgb), np.concatenate(prop), np.concatenate(chunks) / ACT_SCALE, np.concatenate(grasp))
 
 
 def main():
@@ -126,6 +163,7 @@ def main():
     ap.add_argument("--bs", type=int, default=256)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--init", default=None, help="warm start from a previous model.pt")
+    ap.add_argument("--head", default="fm", choices=["fm", "bc"])
     args = ap.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -133,16 +171,16 @@ def main():
     torch.manual_seed(0)
     gen = list(generated_specs())
     tr_ports = [p for p in gen if p not in args.val_ports]
-    R, P, Q, A, _ = load_demos(args.data, tr_ports)
+    R, Q, A, _ = load_demos(args.data, tr_ports)
     try:
-        Rv, Pv, Qv, Av, _ = load_demos(args.data, args.val_ports)
+        Rv, Qv, Av, _ = load_demos(args.data, args.val_ports)
     except ValueError:  # no validation-shape demos (smoke tests): hold out 5 % of frames
         k = max(1, len(A) // 20)
-        R, Rv, P, Pv, Q, Qv, A, Av = R[k:], R[:k], P[k:], P[:k], Q[k:], Q[:k], A[k:], A[:k]
+        R, Rv, Q, Qv, A, Av = R[k:], R[:k], Q[k:], Q[:k], A[k:], A[:k]
     print(f"demo frames: train {len(A)}, val {len(Av)}", flush=True)
-    T = [torch.as_tensor(x).pin_memory() for x in (R, P, Q, A)]
-    V = [torch.as_tensor(x) for x in (Rv, Pv, Qv, Av)]
-    model = FMPolicy().to(dev)
+    T = [torch.as_tensor(x).pin_memory() for x in (R, Q, A)]
+    V = [torch.as_tensor(x) for x in (Rv, Qv, Av)]
+    model = InsertPolicyNet(head=args.head).to(dev)
     if args.init:
         model.load_state_dict(torch.load(args.init, map_location=dev))
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
@@ -156,13 +194,11 @@ def main():
         tot = 0.0
         for s in range(spe):
             b = perm[s * args.bs:(s + 1) * args.bs]
-            rgb, pts, prop, act = [x[b].to(dev, non_blocking=True) for x in T]
+            rgb, prop, act = [x[b].to(dev, non_blocking=True) for x in T]
             g = torch.empty(len(b), 1, 1, 3, device=dev).uniform_(0.8, 1.2)
             rgb = (rgb.float() * g).clamp(0, 255).to(torch.uint8)
-            pts = pts.float()
-            pts[..., :3] += torch.randn_like(pts[..., :3]) * (0.0005 / 0.05)
             with torch.autocast("cuda", dtype=torch.bfloat16):
-                loss = model.loss(rgb, pts, prop.float(), act.float())
+                loss = model.loss(rgb, prop.float(), act.float())
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
@@ -171,8 +207,8 @@ def main():
         model.eval()
         with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
             idx = torch.randperm(len(Av))[:2048]
-            rgb, pts, prop, act = [x[idx].to(dev) for x in V]
-            pred = model.sample(rgb, pts.float(), prop.float())[:, 0].float()
+            rgb, prop, act = [x[idx].to(dev) for x in V]
+            pred = model.sample(rgb, prop.float())[:, 0].float()
             err = ((pred - act[:, 0].float()) * ACT_SCALE).abs().mean(0).cpu().numpy()
         model.train()
         res = {"epoch": ep, "loss": tot / max(1, spe), "val_first_action_abs_err_sigma": err.round(4).tolist(),

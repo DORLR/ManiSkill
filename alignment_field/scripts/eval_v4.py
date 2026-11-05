@@ -1,13 +1,15 @@
 """v4 closed loop: does the alignment field extend a learned insertion policy?
 
-python scripts/eval_v4.py --policy runs_v4/policy --fieldrel runs_v4/fieldrel --out results/eval_v4
+python scripts/eval_v4.py --policies fm=runs_v4/policy bc=runs_v4/policy_bc \
+    --fieldrels fm=runs_v4/fieldrel_fm bc=runs_v4/fieldrel_bc --out results/eval_v4
 Per test grasp (one insertion gives H_pre, R_P by FK: used ONLY to place starts
 and to score), from the same OOD starts:
-  policy          FM insertion policy alone
-  field+policy    relational-net estimate -> field until it stops -> policy
-  oracle+policy   true state -> same field -> policy (upper bound for the field)
+for each IL policy P in {fm, bc} (RGB + joint angles, learned from demonstrations):
+  P               the policy alone
+  field+P         relational-net estimate -> P's field until it stops -> P
+  oracle+P        true state -> same field -> P (upper bound for the field)
 and, as the policy's own reference on this shape/grasp:
-  policy_id       policy from a start inside its training distribution
+  P_id            P from a start inside its training distribution
 Cells: A-D (never trained on) x {train, pitch_extrap, pos_extrap, combined};
 training shapes x {pitch_extrap, pos_extrap, combined}.
 """
@@ -48,10 +50,10 @@ def _work(spec):
             if "robot" in _C:
                 _C["robot"].env.close()
             _C["robot"], _C["port"] = Robot(spec["port"]), spec["port"]
-        if "pol" not in _C:
-            _C["pol"] = InsertionPolicy(spec["policy"])
-            _C["field"] = FieldPolicy(spec["fieldrel"], estimate="rel")
-        robot, pol, fp = _C["robot"], _C["pol"], _C["field"]
+        if "pols" not in _C:
+            _C["pols"] = {n: (InsertionPolicy(spec["policies"][n]), FieldPolicy(spec["fieldrels"][n], estimate="rel"))
+                          for n in spec["policies"]}
+        robot = _C["robot"]
         rng = np.random.default_rng(spec["seed"])
         for attempt in range(3):
             robot.reset(spec["seed"] + 7919 * attempt, spec["pitch"], spec["grasp_pos"])
@@ -62,21 +64,23 @@ def _work(spec):
         if H_pre is None:
             return res
         obs0 = robot.observe()
-        pol.set_axes_from(obs0, rng)
-        fp.begin_episode(obs0, rng)
+        for pol, fp in _C["pols"].values():
+            fp.begin_episode(obs0, rng)
         for s in range(spec["n_starts"]):
             q0 = sample_ood_start(rng)
             qid = np.r_[-0.002, rng.uniform(-0.0005, 0.0005, 2), rng.uniform(-1, 1, 3) * np.radians(0.5)]
-            for method in ("policy", "field+policy", "oracle+policy", "policy_id"):
-                ep = {"start": s, "method": method}
-                start = qid if method == "policy_id" else q0
+            for name, (pol, fp), kind in [(n, _C["pols"][n], k) for n in _C["pols"]
+                                          for k in ("alone", "field", "oracle", "id")]:
+                method = {"alone": name, "field": f"field+{name}", "oracle": f"oracle+{name}", "id": f"{name}_id"}[kind]
+                ep = {"start": s, "method": method, "policy": name, "kind": kind}
+                start = qid if kind == "id" else q0
                 if not robot.move_to(pose_from_state(start, H_pre, R_P)):
                     ep["failure"] = "start_ik"
                     res["episodes"].append(ep)
                     continue
                 ep["u0"] = (relative_state(robot.hand_pose(), H_pre, R_P) / C.SIGMA).tolist()
-                if method in ("field+policy", "oracle+policy"):
-                    tr = run_loop(robot, fp, H_pre, R_P, "oracle" if method.startswith("oracle") else "field", rng)
+                if kind in ("field", "oracle"):
+                    tr = run_loop(robot, fp, H_pre, R_P, kind, rng)
                     ep["field_iters"] = len(tr)
                     ep["u_after_field"] = (relative_state(robot.hand_pose(), H_pre, R_P) / C.SIGMA).tolist()
                     if tr:
@@ -94,8 +98,8 @@ def main():
     from paf import config as C
     from paf.ports_ext import generated_specs
     ap = argparse.ArgumentParser()
-    ap.add_argument("--policy", required=True)
-    ap.add_argument("--fieldrel", required=True)
+    ap.add_argument("--policies", nargs="+", required=True, help="name=run_dir, e.g. fm=runs_v4/policy")
+    ap.add_argument("--fieldrels", nargs="+", required=True, help="name=dir with RelNet model.pt + that policy's field.pt")
     ap.add_argument("--out", required=True)
     ap.add_argument("--n-grasps", type=int, default=6)
     ap.add_argument("--n-starts", type=int, default=4)
@@ -122,7 +126,8 @@ def main():
                                   seed=810000 + 1000 * ci + i))
     todo = []
     for s in specs:
-        s.update(n_starts=args.n_starts, policy=args.policy, fieldrel=args.fieldrel,
+        s.update(n_starts=args.n_starts, policies=dict(x.split("=") for x in args.policies),
+                 fieldrels=dict(x.split("=") for x in args.fieldrels),
                  path=str(out / f"{s['role']}_{s['port']}_{s['condition']}_{s['idx']}.json"))
         if not Path(s["path"]).exists():
             todo.append(s)
@@ -134,8 +139,9 @@ def main():
     with mp.get_context("spawn").Pool(args.workers) as pool:
         for k, r in enumerate(pool.imap_unordered(_work, todo)):
             Path(r["path"]).write_text(json.dumps(r))
-            ins = {m: sum(e.get("inserted", False) for e in r.get("episodes", []) if e["method"] == m)
-                   for m in ("policy", "field+policy", "oracle+policy", "policy_id")}
+            ins = {}
+            for e in r.get("episodes", []):
+                ins[e["method"]] = ins.get(e["method"], 0) + int(e.get("inserted", False))
             print(f"[{k + 1}/{len(todo)} {time.time() - t0:.0f}s] {r['role']} {r['port']} {r['condition']} "
                   f"{ins} {r.get('error', '')}", flush=True)
 

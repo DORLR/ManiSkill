@@ -58,3 +58,17 @@ def test_method_modules_do_not_touch_truth():
         code = re.sub(r'"""[\s\S]*?"""', "", code)
         for pat in FORBIDDEN:
             assert not re.search(pat, code), f"{mod} references {pat}"
+
+
+def test_hand_frame_action_matches_port_action():
+    """A port-axis step a equals the hand-frame step R_hand^T R_P a (used to convert demos)."""
+    from paf.fm_policy import apply_hand_motion
+    from paf import config as C
+    rng = np.random.default_rng(3)
+    for _ in range(30):
+        H = _rand_T(rng)
+        R_P = port_axes(rng.normal(size=3))
+        a = rng.normal(size=6) * 0.3
+        M = H[:3, :3].T @ R_P
+        a_h = np.r_[M @ a[:3], M @ a[3:]]
+        assert np.allclose(apply_port_motion(H, a * C.SIGMA, R_P), apply_hand_motion(H, a_h), atol=1e-9)
