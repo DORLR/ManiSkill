@@ -6,6 +6,15 @@ source /root/autodl-tmp/port_align_field/scripts/env.sh
 stamp() { echo "[$(date +%T)] $*"; }
 while [ "$(ps -eo cmd | grep -c "[c]ollect_v4.sh")" -gt 0 ]; do sleep 30; done
 while [ "$(ps -eo cmd | grep -c "[p]retrain_partial_v4.sh")" -gt 0 ]; do sleep 30; done
+# Baseline first (user request): the IL policies trained on the first half of the
+# data, without the field, on unseen interfaces and grasps; then the full training.
+nice -n 10 python scripts/eval_v4.py --policies fm=runs_v4/policy_partial bc=runs_v4/policy_bc_partial \
+  --fieldrels fm=runs_v4/fr_dummy bc=runs_v4/fr_dummy --out results/eval_v4_il_baseline --kinds id alone \
+  --conditions train pitch_extrap pos_extrap combined --n-grasps 3 --n-starts 3 --seen-grasps 3 \
+  --workers 11 > logs/eval_v4_il_baseline.log 2>&1
+python scripts/summarize_v4.py --eval results/eval_v4_il_baseline --out results/summary_v4_il_baseline.json \
+  > results/summary_v4_il_baseline.txt 2>&1
+stamp "IL baseline (half-data policies, no field) evaluated"
 REL_INIT=""; POL_INIT=""; REL_EP=20; POL_EP=40
 [ -f runs_v4/rel_partial/model.pt ] && REL_INIT="--init runs_v4/rel_partial/model.pt" && REL_EP=8
 [ -f runs_v4/policy_partial/model.pt ] && POL_INIT="--init runs_v4/policy_partial/model.pt" && POL_EP=15

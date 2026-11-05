@@ -70,7 +70,7 @@ def _work(spec):
             q0 = sample_ood_start(rng)
             qid = np.r_[-0.002, rng.uniform(-0.0005, 0.0005, 2), rng.uniform(-1, 1, 3) * np.radians(0.5)]
             for name, (pol, fp), kind in [(n, _C["pols"][n], k) for n in _C["pols"]
-                                          for k in ("alone", "field", "oracle", "id")]:
+                                          for k in spec["kinds"]]:
                 method = {"alone": name, "field": f"field+{name}", "oracle": f"oracle+{name}", "id": f"{name}_id"}[kind]
                 ep = {"start": s, "method": method, "policy": name, "kind": kind}
                 start = qid if kind == "id" else q0
@@ -105,28 +105,35 @@ def main():
     ap.add_argument("--n-starts", type=int, default=3)
     ap.add_argument("--workers", type=int, default=10)
     ap.add_argument("--limit", type=int, default=0, help="smoke test: only the first N grasps")
+    ap.add_argument("--kinds", nargs="+", default=["alone", "field", "oracle", "id"],
+                    help="which of: alone (OOD start), field, oracle, id (start inside the policy's distribution)")
+    ap.add_argument("--conditions", nargs="+", default=list(COND))
+    ap.add_argument("--seen-grasps", type=int, default=None, help="grasps per seen-shape cell (default n-grasps)")
     args = ap.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     train_shapes = [p for p in generated_specs() if p not in ("G19", "G42", "G45", "G46", "G47", "G48", "G49")]
     specs = []
     for ci, (cond, (pk, xk)) in enumerate(COND.items()):
+        if cond not in args.conditions:
+            continue
         for pi, port in enumerate(["A", "B", "C", "D"]):
             rng = np.random.default_rng(700000 + 100 * ci + pi)
             for i in range(args.n_grasps):
                 pitch, pos = C.sample_grasp(rng, pk, xk)
                 specs.append(dict(role="unseen_shape", port=port, condition=cond, idx=i, pitch=pitch, grasp_pos=pos,
                                   seed=710000 + 1000 * ci + 100 * pi + i))
-        if cond != "train":
+        n_seen = args.seen_grasps if args.seen_grasps is not None else args.n_grasps
+        if cond != "train" or args.seen_grasps:
             rng = np.random.default_rng(800000 + ci)
-            for i in range(args.n_grasps):
+            for i in range(n_seen):
                 pitch, pos = C.sample_grasp(rng, pk, xk)
                 port = train_shapes[int(rng.integers(len(train_shapes)))]
                 specs.append(dict(role="seen_shape", port=port, condition=cond, idx=i, pitch=pitch, grasp_pos=pos,
                                   seed=810000 + 1000 * ci + i))
     todo = []
     for s in specs:
-        s.update(n_starts=args.n_starts, policies=dict(x.split("=") for x in args.policies),
+        s.update(n_starts=args.n_starts, kinds=args.kinds, policies=dict(x.split("=") for x in args.policies),
                  fieldrels=dict(x.split("=") for x in args.fieldrels),
                  path=str(out / f"{s['role']}_{s['port']}_{s['condition']}_{s['idx']}.json"))
         if not Path(s["path"]).exists():
