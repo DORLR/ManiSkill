@@ -28,12 +28,13 @@ import torch
 import torch.nn as nn
 from scipy.spatial.transform import Rotation
 
-from . import config as C
+from . import config as C  # noqa: F401
 from .model import RGBNet, mlp
 from .perception import rgb_crop
 
-H_CHUNK, EXEC = 4, 2
-ACT_SCALE = 0.5
+H_CHUNK, EXEC, ACT_DIM = 8, 4, 7     # 8 future joint targets, execute 4, re-plan
+STRIDE = 2                            # control ticks per chunk element (paf.expert_demo)
+ACT_SCALE = 0.01                      # rad; labels are divided by this
 
 
 def time_emb(tau, dim=64):
@@ -67,20 +68,20 @@ class InsertPolicyNet(nn.Module):
         self.rgb = RGBNet(pretrained)
         self.cond = mlp((self.rgb.out_dim + 7, 512, 512), last_act=True)
         if head == "fm":
-            self.out = mlp((512 + H_CHUNK * 6 + 64, 512, 512, H_CHUNK * 6))
+            self.out = mlp((512 + H_CHUNK * ACT_DIM + 64, 512, 512, H_CHUNK * ACT_DIM))
         else:
-            self.out = mlp((512, 512, 512, H_CHUNK * 6))
+            self.out = mlp((512, 512, 512, H_CHUNK * ACT_DIM))
 
     def encode(self, rgb, prop):
         return self.cond(torch.cat([self.rgb(rgb), prop], -1))
 
     def velocity(self, c, A, tau):
-        return self.out(torch.cat([c, A.flatten(1), time_emb(tau)], -1)).view(-1, H_CHUNK, 6)
+        return self.out(torch.cat([c, A.flatten(1), time_emb(tau)], -1)).view(-1, H_CHUNK, ACT_DIM)
 
     def loss(self, rgb, prop, A):
         c = self.encode(rgb, prop)
         if self.head == "bc":
-            return ((self.out(c).view(-1, H_CHUNK, 6) - A) ** 2).mean()
+            return ((self.out(c).view(-1, H_CHUNK, ACT_DIM) - A) ** 2).mean()
         tau = torch.rand(A.shape[0], device=A.device)
         A0 = torch.randn_like(A)
         At = (1 - tau)[:, None, None] * A0 + tau[:, None, None] * A
@@ -90,8 +91,8 @@ class InsertPolicyNet(nn.Module):
     def sample(self, rgb, prop, steps=10):
         c = self.encode(rgb, prop)
         if self.head == "bc":
-            return self.out(c).view(-1, H_CHUNK, 6)
-        A = torch.randn(rgb.shape[0], H_CHUNK, 6, device=rgb.device)
+            return self.out(c).view(-1, H_CHUNK, ACT_DIM)
+        A = torch.randn(rgb.shape[0], H_CHUNK, ACT_DIM, device=rgb.device)
         for k in range(steps):
             tau = torch.full((rgb.shape[0],), k / steps, device=rgb.device)
             A = A + self.velocity(c, A, tau) / steps
@@ -99,38 +100,35 @@ class InsertPolicyNet(nn.Module):
 
 
 class InsertionPolicy:
-    """Closed-loop wrapper. Sees only the RGB crop and the joint angles; acts in the hand frame."""
+    """Closed-loop wrapper: sees the RGB crop and joint angles, outputs joint targets."""
 
     def __init__(self, run_dir, device="cuda"):
         self.dev = device
-        cfg = json.loads(Path(f"{run_dir}/summary.json").read_text())["args"] if Path(f"{run_dir}/summary.json").exists() else {}
+        p = Path(f"{run_dir}/summary.json")
+        cfg = json.loads(p.read_text())["args"] if p.exists() else {}
         self.model = InsertPolicyNet(head=cfg.get("head", "fm"), pretrained=False).to(device).eval()
         self.model.load_state_dict(torch.load(f"{run_dir}/model.pt", map_location=device))
-        self.queue = []
 
     def reset(self):
-        self.queue = []
+        pass
 
-    def set_axes_from(self, obs, rng):  # kept for the evaluation API; RGB-only needs no port axes
+    def set_axes_from(self, obs, rng):  # evaluation API; the IL policy needs no port axes
         return True
 
-    def act(self, obs, H0, rng):
-        if not self.queue:
-            t = lambda x, dt=torch.float32: torch.as_tensor(np.asarray(x)[None], device=self.dev, dtype=dt)
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                A = self.model.sample(t(rgb_crop(obs), torch.uint8), t(obs.qpos[:7]))
-            self.queue = list(A[0].float().cpu().numpy()[:EXEC] * ACT_SCALE)
-        return self.queue.pop(0)
-
-    def target_pose(self, H, a):
-        return apply_hand_motion(H, a)
+    def plan(self, obs):
+        """Chunk of absolute joint targets (H_CHUNK, 7) for the next H_CHUNK*STRIDE ticks."""
+        t = lambda x, dt=torch.float32: torch.as_tensor(np.asarray(x)[None], device=self.dev, dtype=dt)
+        q = obs.qpos[:7].astype(np.float32)
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            A = self.model.sample(t(rgb_crop(obs), torch.uint8), t(q))
+        return q[None] + A[0].float().cpu().numpy() * ACT_SCALE
 
 
 def main():
     from .il_data import load_demos
     from .ports_ext import generated_specs
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", required=True)
+    ap.add_argument("--data", required=True, help="expert demonstrations (scripts/collect_expert_demos.py)")
     ap.add_argument("--val-ports", nargs="+", default=["G46", "G47", "G48"])
     ap.add_argument("--out", required=True)
     ap.add_argument("--epochs", type=int, default=40)
@@ -183,9 +181,9 @@ def main():
             idx = torch.randperm(len(Av))[:2048]
             rgb, prop, act = [x[idx].to(dev) for x in V]
             pred = model.sample(rgb, prop.float())[:, 0].float()
-            err = ((pred - act[:, 0].float()) * ACT_SCALE).abs().mean(0).cpu().numpy()
+            err = ((pred - act[:, 0].float()) * ACT_SCALE * 1000).abs().mean(0).cpu().numpy()  # mrad
         model.train()
-        res = {"epoch": ep, "loss": tot / max(1, spe), "val_first_action_abs_err_sigma": err.round(4).tolist(),
+        res = {"epoch": ep, "loss": tot / max(1, spe), "val_first_target_abs_err_mrad": err.round(4).tolist(),
                "minutes": (time.time() - t0) / 60}
         hist.append(res)
         torch.save(model.state_dict(), out / "model.pt")

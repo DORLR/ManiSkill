@@ -1,0 +1,594 @@
+{
+ "seen_shape|train|fm_id": {
+  "n": 9,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.2991527535509594
+  ]
+ },
+ "seen_shape|train|fm": {
+  "n": 9,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.2991527535509594
+  ]
+ },
+ "seen_shape|train|field+fm": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|train|oracle+fm": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|train|bc_id": {
+  "n": 9,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.2991527535509594
+  ]
+ },
+ "seen_shape|train|bc": {
+  "n": 9,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.2991527535509594
+  ]
+ },
+ "seen_shape|train|field+bc": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|train|oracle+bc": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|pitch_extrap|fm_id": {
+  "n": 9,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.2991527535509594
+  ]
+ },
+ "seen_shape|pitch_extrap|fm": {
+  "n": 9,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.2991527535509594
+  ]
+ },
+ "seen_shape|pitch_extrap|field+fm": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|pitch_extrap|oracle+fm": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|pitch_extrap|bc_id": {
+  "n": 9,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.2991527535509594
+  ]
+ },
+ "seen_shape|pitch_extrap|bc": {
+  "n": 9,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.2991527535509594
+  ]
+ },
+ "seen_shape|pitch_extrap|field+bc": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|pitch_extrap|oracle+bc": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|pos_extrap|fm_id": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|pos_extrap|fm": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|pos_extrap|field+fm": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|pos_extrap|oracle+fm": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|pos_extrap|bc_id": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|pos_extrap|bc": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|pos_extrap|field+bc": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|pos_extrap|oracle+bc": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|combined|fm_id": {
+  "n": 6,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.3903430336530645
+  ]
+ },
+ "seen_shape|combined|fm": {
+  "n": 6,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.3903430336530645
+  ]
+ },
+ "seen_shape|combined|field+fm": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|combined|oracle+fm": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|combined|bc_id": {
+  "n": 6,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.3903430336530645
+  ]
+ },
+ "seen_shape|combined|bc": {
+  "n": 6,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.3903430336530645
+  ]
+ },
+ "seen_shape|combined|field+bc": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|combined|oracle+bc": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "unseen_shape|train|fm_id": {
+  "n": 35,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.09890426758938868
+  ]
+ },
+ "unseen_shape|train|fm": {
+  "n": 36,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.09642183044857634
+  ]
+ },
+ "unseen_shape|train|field+fm": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "unseen_shape|train|oracle+fm": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "unseen_shape|train|bc_id": {
+  "n": 36,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.09642183044857634
+  ]
+ },
+ "unseen_shape|train|bc": {
+  "n": 36,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.09642183044857634
+  ]
+ },
+ "unseen_shape|train|field+bc": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "unseen_shape|train|oracle+bc": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "unseen_shape|pitch_extrap|fm_id": {
+  "n": 24,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.13798057582897535
+  ]
+ },
+ "unseen_shape|pitch_extrap|fm": {
+  "n": 24,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.13798057582897535
+  ]
+ },
+ "unseen_shape|pitch_extrap|field+fm": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "unseen_shape|pitch_extrap|oracle+fm": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "unseen_shape|pitch_extrap|bc_id": {
+  "n": 24,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.13798057582897535
+  ]
+ },
+ "unseen_shape|pitch_extrap|bc": {
+  "n": 24,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.13798057582897535
+  ]
+ },
+ "unseen_shape|pitch_extrap|field+bc": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "unseen_shape|pitch_extrap|oracle+bc": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "unseen_shape|pos_extrap|fm_id": {
+  "n": 12,
+  "rate": 0.16666666666666666,
+  "ci": [
+   0.04696414761482223,
+   0.44803635738467273
+  ]
+ },
+ "unseen_shape|pos_extrap|fm": {
+  "n": 12,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.2425007574992425
+  ]
+ },
+ "unseen_shape|pos_extrap|field+fm": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "unseen_shape|pos_extrap|oracle+fm": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "unseen_shape|pos_extrap|bc_id": {
+  "n": 12,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.2425007574992425
+  ]
+ },
+ "unseen_shape|pos_extrap|bc": {
+  "n": 12,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.2425007574992425
+  ]
+ },
+ "unseen_shape|pos_extrap|field+bc": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "unseen_shape|pos_extrap|oracle+bc": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "unseen_shape|combined|fm_id": {
+  "n": 12,
+  "rate": 0.16666666666666666,
+  "ci": [
+   0.04696414761482223,
+   0.44803635738467273
+  ]
+ },
+ "unseen_shape|combined|fm": {
+  "n": 11,
+  "rate": 0.0,
+  "ci": [
+   2.7755575615628914e-17,
+   0.2588400172488141
+  ]
+ },
+ "unseen_shape|combined|field+fm": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "unseen_shape|combined|oracle+fm": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "unseen_shape|combined|bc_id": {
+  "n": 12,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.2425007574992425
+  ]
+ },
+ "unseen_shape|combined|bc": {
+  "n": 11,
+  "rate": 0.0,
+  "ci": [
+   2.7755575615628914e-17,
+   0.2588400172488141
+  ]
+ },
+ "unseen_shape|combined|field+bc": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "unseen_shape|combined|oracle+bc": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "port|seen_shape|gen|bc": {
+  "n": 24,
+  "rate": 0.0
+ },
+ "port|seen_shape|gen|bc_id": {
+  "n": 24,
+  "rate": 0.0
+ },
+ "port|seen_shape|gen|fm": {
+  "n": 24,
+  "rate": 0.0
+ },
+ "port|seen_shape|gen|fm_id": {
+  "n": 24,
+  "rate": 0.0
+ },
+ "port|unseen_shape|A|bc": {
+  "n": 23,
+  "rate": 0.0
+ },
+ "port|unseen_shape|A|bc_id": {
+  "n": 24,
+  "rate": 0.0
+ },
+ "port|unseen_shape|A|fm": {
+  "n": 23,
+  "rate": 0.0
+ },
+ "port|unseen_shape|A|fm_id": {
+  "n": 24,
+  "rate": 0.08333333333333333
+ },
+ "port|unseen_shape|B|bc": {
+  "n": 21,
+  "rate": 0.0
+ },
+ "port|unseen_shape|B|bc_id": {
+  "n": 21,
+  "rate": 0.0
+ },
+ "port|unseen_shape|B|fm": {
+  "n": 21,
+  "rate": 0.0
+ },
+ "port|unseen_shape|B|fm_id": {
+  "n": 21,
+  "rate": 0.09523809523809523
+ },
+ "port|unseen_shape|C|bc": {
+  "n": 27,
+  "rate": 0.0
+ },
+ "port|unseen_shape|C|bc_id": {
+  "n": 27,
+  "rate": 0.0
+ },
+ "port|unseen_shape|C|fm": {
+  "n": 27,
+  "rate": 0.0
+ },
+ "port|unseen_shape|C|fm_id": {
+  "n": 27,
+  "rate": 0.0
+ },
+ "port|unseen_shape|D|bc": {
+  "n": 12,
+  "rate": 0.0
+ },
+ "port|unseen_shape|D|bc_id": {
+  "n": 12,
+  "rate": 0.0
+ },
+ "port|unseen_shape|D|fm": {
+  "n": 12,
+  "rate": 0.0
+ },
+ "port|unseen_shape|D|fm_id": {
+  "n": 11,
+  "rate": 0.0
+ }
+}

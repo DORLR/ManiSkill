@@ -22,19 +22,23 @@ from .geometry import apply_port_motion, relative_state
 from .perception import preprocess
 
 STEP_LAT, STEP_ROT, STEP_ADV = 0.3, 0.3, 0.5   # sigma units per step (mm / deg)
-ALIGN_TOL_LAT, ALIGN_TOL_ROT = 0.15, 0.15
-MAX_STEPS = 80
-DART_NOISE = 0.08                                 # sigma units, executed only
+ALIGN_TOL_LAT, ALIGN_TOL_ROT = 0.3, 0.3           # straight pushes insert within about +-0.5 mm
+MAX_STEPS = 120
+DART_NOISE = 0.05                                 # sigma units, executed only
+SETTLE = 40                                       # control steps allowed to reach each step's target
 
 
 def demo_action(u, stroke_sigma):
     """Clean demonstrator action for true state u (sigma units)."""
     a = np.zeros(6)
+    if u[0] > 0.5:  # pins entering the holes: push straight, no sideways correction
+        a[0] = min(STEP_ADV, stroke_sigma - u[0])
+        return a
     lat, rot = u[1:3], u[3:]
     a[1:3] = np.clip(-lat, -STEP_LAT, STEP_LAT)
     a[3:] = np.clip(-rot, -STEP_ROT, STEP_ROT)
     aligned = np.all(np.abs(lat) < ALIGN_TOL_LAT) and np.all(np.abs(rot) < ALIGN_TOL_ROT)
-    if aligned or u[0] > 0.5:  # once the pins are entering, keep pushing while correcting
+    if aligned:
         a[0] = min(STEP_ADV, stroke_sigma - u[0])
     elif u[0] < -0.5:
         a[0] = min(STEP_ADV, -u[0] - 0.5)  # approach to just outside the board while aligning
@@ -48,6 +52,14 @@ def proprio(H, H0, R_P):
 
 def inserted(u, stroke_sigma):
     return u[0] >= stroke_sigma - 1.0
+
+
+def _move(robot, H, a, R_P):
+    """Execute one step; if IK fails, retry with half the step (twice)."""
+    for scale in (1.0, 0.5, 0.25):
+        if robot.move_to(apply_port_motion(H, a * scale * C.SIGMA, R_P), settle_steps=SETTLE):
+            return True
+    return False
 
 
 def run_demo(robot, H_pre, R_P, R_P_est, q_start, rng):
@@ -74,24 +86,27 @@ def run_demo(robot, H_pre, R_P, R_P_est, q_start, rng):
         frames["u"].append(u.astype(np.float32))
         frames["qpos"].append(obs.qpos[:7].astype(np.float32))  # joint proprioception for the IL policy
         a_exec = a + rng.normal(size=6) * DART_NOISE
-        if not robot.move_to(apply_port_motion(obs.H, a_exec * C.SIGMA, R_P), settle_steps=10):
+        if u[0] > 0.5:
+            a_exec[1:] = 0.0  # no noise sideways while the pins are in the holes
+        if not _move(robot, obs.H, a_exec, R_P):
             break
     return {k: np.asarray(v) for k, v in frames.items()}, ok
 
 
-def rollout_policy(robot, policy, H_pre, R_P, rng, max_steps=MAX_STEPS):
-    """Run a learned insertion policy from the current hand pose. H_pre and R_P are
-    used ONLY to score (insertion depth); the policy sees images + proprio."""
+def rollout_policy(robot, policy, H_pre, R_P, rng, max_plans=80):
+    """Run an IL policy from the current pose: each plan is a chunk of joint targets,
+    the first EXEC are sent for STRIDE control ticks each, then it re-plans.
+    H_pre and R_P are used ONLY to score insertion depth (FK)."""
+    from .fm_policy import EXEC, STRIDE
     stroke = (robot.port_spec.pin_length_m + C.GAP0) / C.SIGMA_T
-    H0 = robot.hand_pose()
     policy.reset()
-    for t in range(max_steps):
+    for t in range(max_plans):
         obs = robot.observe()
         u_true = relative_state(obs.H, H_pre, R_P) / C.SIGMA
         if inserted(u_true, stroke):
             return {"inserted": True, "steps": t, "u_end": u_true.tolist()}
-        a = policy.act(obs, H0, rng)
-        if not robot.move_to(policy.target_pose(obs.H, a), settle_steps=10):
-            break
+        Q = policy.plan(obs)
+        for k in range(EXEC):
+            robot._command(Q[k], STRIDE)
     u_true = relative_state(robot.hand_pose(), H_pre, R_P) / C.SIGMA
-    return {"inserted": bool(inserted(u_true, stroke)), "steps": max_steps, "u_end": u_true.tolist()}
+    return {"inserted": bool(inserted(u_true, stroke)), "steps": max_plans, "u_end": u_true.tolist()}

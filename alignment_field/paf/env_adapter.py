@@ -119,7 +119,7 @@ class Robot:
         local = self.planner._transform_goal_to_wrt_base(mplib.Pose(p, q))
         sol = None
         # Same threshold as Chongyu's expert first; widen the search only if needed.
-        for n_init, thr in ((1, 1e-5), (20, 1e-5), (20, 1e-4)):
+        for n_init, thr in ((1, 1e-5), (20, 1e-5), (20, 1e-4), (50, 1e-3)):
             status, sol = self.planner.IK(local, seed_q, n_init_qpos=n_init, threshold=thr)
             if sol is not None:
                 break
