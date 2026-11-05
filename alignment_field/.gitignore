@@ -1,0 +1,13 @@
+/data/
+/runs/
+/logs/
+__pycache__/
+*.pyc
+/results/eval/
+/results/probe/
+/results/eval_rgb/
+/results/eval_v3/
+/runs_v2/
+/runs_v3/
+/runs_rgb/
+/runs_nested/
