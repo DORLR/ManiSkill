@@ -52,7 +52,10 @@ FORBIDDEN = [r"\.charger\b", r"goal_pose", r"receptacle", r"charger_v2", r"\.aud
 
 
 def test_method_modules_do_not_touch_truth():
-    for mod in ("paf/policy.py", "paf/perception.py", "paf/model.py", "paf/field.py"):
+    # method modules: only images, camera parameters, joint angles / FK and CAD may be used.
+    # paf/demo.py is excluded on purpose: its demonstrator knows H_pre, like a teleoperator.
+    for mod in ("paf/policy.py", "paf/perception.py", "paf/model.py", "paf/field.py",
+                "paf/relnet.py", "paf/fm_policy.py"):
         src = (ROOT / mod).read_text()
         code = "\n".join(line.split("#")[0] for line in src.splitlines())
         code = re.sub(r'"""[\s\S]*?"""', "", code)

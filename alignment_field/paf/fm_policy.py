@@ -126,34 +126,8 @@ class InsertionPolicy:
         return apply_hand_motion(H, a)
 
 
-def load_demos(pattern, ports):
-    """Demo frames with actions and proprio converted to the hand frame (FK only):
-    the recorded port-axis action a maps to R_hand^T R_P a (translation and rotation vector)."""
-    rgb, prop, chunks, grasp = [], [], [], []
-    for gi, f in enumerate(sorted(glob.glob(pattern))):
-        d = np.load(f, allow_pickle=False)
-        meta = json.loads(str(d["meta"]))
-        if meta.get("port") not in ports or "demo_qpos" not in d.files or len(d["demo_act"]) == 0:
-            continue  # shards collected before joint angles were stored are not used for IL
-        R_P, H_pre = d["R_P"], d["H_pre"]
-        act, did, U = d["demo_act"], d["demo_id"], d["demo_u"].astype(np.float64)
-        q = U * C.SIGMA
-        R_hand = R_P[None] @ Rotation.from_rotvec(q[:, 3:]).as_matrix() @ R_P.T[None] @ H_pre[None, :3, :3]
-        p_hand = H_pre[None, :3, 3] + q[:, :3] @ R_P.T
-        M = np.transpose(R_hand, (0, 2, 1)) @ R_P[None]
-        a_hand = np.concatenate([np.einsum("nij,nj->ni", M, act[:, :3]), np.einsum("nij,nj->ni", M, act[:, 3:])], 1)
-        for k in np.unique(did):
-            idx = np.nonzero(did == k)[0]
-            a = a_hand[idx].astype(np.float32)
-            pad = np.concatenate([a, np.zeros((H_CHUNK, 6), np.float32)])
-            chunks.append(np.stack([pad[t:t + H_CHUNK] for t in range(len(idx))]))
-            rgb.append(d["demo_rgb"][idx])
-            prop.append(d["demo_qpos"][idx].astype(np.float32))
-            grasp.append(np.full(len(idx), gi))
-    return (np.concatenate(rgb), np.concatenate(prop), np.concatenate(chunks) / ACT_SCALE, np.concatenate(grasp))
-
-
 def main():
+    from .il_data import load_demos
     from .ports_ext import generated_specs
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True)

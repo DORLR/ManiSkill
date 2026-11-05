@@ -79,9 +79,21 @@ class Robot:
         return _np(self.base.agent.robot.get_qpos())[0].astype(np.float64)
 
     def hand_pose(self) -> np.ndarray:
-        # The simulator's TCP link pose is the forward kinematics of the
-        # measured joint angles (rigid articulation); checked against MPlib FK
-        # in tests/test_geometry.py.
+        """Hand (TCP) pose from forward kinematics of the measured joint angles,
+        as on a real robot: MPlib/Pinocchio FK of qpos, then the robot base pose
+        (fixed, known from installation). Equals the simulator's TCP link pose
+        to numerical precision (scripts/check_fk.py)."""
+        planner = self.base._planner()
+        pm = planner.pinocchio_model
+        pm.compute_forward_kinematics(self.qpos())
+        idx = planner.user_link_names.index("panda_hand_tcp")
+        local = pm.get_link_pose(idx)
+        T_local = pose_to_T(np.asarray(local.p), np.asarray(local.q))
+        base = self.base.agent.robot.pose
+        return pose_to_T(_np(base.p)[0], _np(base.q)[0]) @ T_local
+
+    def hand_pose_sim(self) -> np.ndarray:
+        """Simulator TCP link pose; only for checking hand_pose()."""
         pose = self.base.agent.tcp.pose
         return pose_to_T(_np(pose.p)[0], _np(pose.q)[0])
 
