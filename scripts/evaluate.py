@@ -55,11 +55,14 @@ def main():
     ap.add_argument("--n-unseen", type=int, default=8)
     ap.add_argument("--n-seen", type=int, default=4)
     ap.add_argument("--n-starts", type=int, default=4)
+    ap.add_argument("--roles", nargs="+", default=["seen", "unseen"])
     args = ap.parse_args()
     specs = []
     for fi, fold in enumerate(args.folds):
         for pi, port in enumerate(C.PORTS):
             role = "unseen" if port == fold else "seen"
+            if role not in args.roles:
+                continue
             n = args.n_unseen if role == "unseen" else args.n_seen
             for ci, (cond, (pk, xk)) in enumerate(CONDITIONS.items()):
                 rng = np.random.default_rng(900000 + 10000 * fi + 1000 * pi + ci)
