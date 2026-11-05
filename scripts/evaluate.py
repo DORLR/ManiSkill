@@ -36,9 +36,14 @@ def _work(spec):
     key = ("pol", spec["fold"])
     if key not in _CACHE:
         run = spec["run_dir"]
-        base = FieldPolicy(run, estimate="hat")
-        _CACHE[key] = {"field": base, "field_pc": FieldPolicy(run, estimate="pc", share_from=base),
-                       "oracle": FieldPolicy(run, estimate="hat", share_from=base), "none": None}
+        pol = {"none": None}
+        if {"field", "field_pc", "oracle"} & set(spec["methods"]):
+            base = FieldPolicy(run, estimate="hat")
+            pol.update(field=base, field_pc=FieldPolicy(run, estimate="pc", share_from=base),
+                       oracle=FieldPolicy(run, estimate="hat", share_from=base))
+        if "field_rgb" in spec["methods"]:
+            pol["field_rgb"] = FieldPolicy(spec["rgb_run_dir"], estimate="rgb")
+        _CACHE[key] = pol
     try:
         res = eval_grasp(_CACHE["robot"], {m: p for m, p in _CACHE[key].items() if m in spec["methods"]}, spec)
     except Exception as exc:  # one bad grasp must not stop the whole evaluation
@@ -63,6 +68,7 @@ def main():
     ap.add_argument("--single-run", default=None,
                     help="v3: one model (trained on generated shapes) evaluated on A-D, all unseen")
     ap.add_argument("--methods", nargs="+", default=["field", "field_pc", "oracle", "none"])
+    ap.add_argument("--rgb-runs", default="runs_rgb", help="runs of the RGB-only ablation (method field_rgb)")
     args = ap.parse_args()
     specs = []
     folds = ["gen"] if args.single_run else args.folds
@@ -85,7 +91,8 @@ def main():
                                       seed=900000 + 100000 * fi + 10000 * pi + 100 * ci + i,
                                       pitch=pitch, grasp_pos=pos, n_starts=args.n_starts,
                                       run_dir=args.single_run or f"{args.runs}/fold_{fold}",
-                                      methods=args.methods, path=str(path)))
+                                      methods=args.methods, path=str(path),
+                                      rgb_run_dir=f"{args.rgb_runs}/fold_{fold}"))
     specs.sort(key=lambda s: (s["port"], s["fold"]))
     print(f"{len(specs)} test grasps, {args.workers} workers", flush=True)
     t0 = time.time()

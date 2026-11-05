@@ -13,34 +13,47 @@ import torch
 from . import config as C
 from .field import FieldNet, step_from_field
 from .geometry import apply_port_motion
-from .model import AlignNet
-from .perception import port_axes_from_obs, preprocess
+from .geometry import port_axes
+from .model import AlignNet, RGBOnlyNet
+from .perception import port_axes_from_obs, preprocess, rgb_crop
 
 
 class FieldPolicy:
     def __init__(self, run_dir, device="cuda", estimate="hat", share_from=None):
         self.dev = device
-        self.estimate = estimate  # "hat" (point cloud + RGB) or "pc" (point cloud only)
+        # "hat" (point cloud + RGB), "pc" (point cloud only) or "rgb" (RGB only, no depth)
+        self.estimate = estimate
         if share_from is not None:  # same weights, one copy in GPU memory
             self.model, self.field = share_from.model, share_from.field
         else:
-            self.model = AlignNet(pretrained=False).to(device).eval()
+            net = RGBOnlyNet if estimate == "rgb" else AlignNet
+            self.model = net(pretrained=False).to(device).eval()
             self.model.load_state_dict(torch.load(f"{run_dir}/model.pt", map_location=device))
             self.field = FieldNet().to(device).eval()
             self.field.load_state_dict(torch.load(f"{run_dir}/field.pt", map_location=device))
         self.R_P = None
 
     def begin_episode(self, obs, rng):
-        """Port axes from the first view (board-plane RANSAC + gravity)."""
+        """Port axes from the first view: board-plane RANSAC + gravity, or for
+        the RGB-only variant the predicted insertion axis (hand frame) + gravity."""
+        if self.estimate == "rgb":
+            with torch.no_grad():
+                o = self.model(torch.as_tensor(rgb_crop(obs)[None], device=self.dev))
+            axis_hand = o["axis_hand"][0].float().cpu().numpy()
+            self.R_P = port_axes(obs.H[:3, :3] @ axis_hand)
+            return True
         self.R_P, _ = port_axes_from_obs(obs, rng)
         return self.R_P is not None
 
     @torch.no_grad()
     def estimate_state(self, obs, rng):
-        crop, pc = preprocess(obs, self.R_P, rng)
-        rgb = torch.as_tensor(crop[None], device=self.dev)
-        pts = torch.as_tensor(pc[None], device=self.dev, dtype=torch.float32)
-        o = self.model(rgb, pts)
+        if self.estimate == "rgb":
+            o = self.model(torch.as_tensor(rgb_crop(obs)[None], device=self.dev))
+        else:
+            crop, pc = preprocess(obs, self.R_P, rng)
+            rgb = torch.as_tensor(crop[None], device=self.dev)
+            pts = torch.as_tensor(pc[None], device=self.dev, dtype=torch.float32)
+            o = self.model(rgb, pts)
         u = o["q_pc" if self.estimate == "pc" else "q_hat"][0].float().cpu().numpy()
         return u, float(torch.sigmoid(o["id_logit"][0]).item())
 
