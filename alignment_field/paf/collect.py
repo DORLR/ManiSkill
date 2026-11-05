@@ -82,6 +82,9 @@ def collect_config(robot, spec: dict) -> dict:
     kinds += ["push"] * spec["n_push"]
     rng.shuffle(kinds)
     rec = {k: [] for k in ("rgb", "pc", "q", "q_cmd", "kind", "push", "advanced_mm")}
+    raw = spec.get("store_raw", False)  # full RGB-D + camera/hand poses for the relational net
+    if raw:
+        rec.update({k: [] for k in ("rgb_full", "depth_full", "K", "cam_T_world", "H")})
     stroke = robot.port_spec.pin_length_m + C.GAP0
     for kind in kinds:
         q_cmd = _sample_q(rng, kind)
@@ -94,6 +97,12 @@ def collect_config(robot, spec: dict) -> dict:
         rec["q"].append(relative_state(obs.H, H_pre, R_P))
         rec["q_cmd"].append(q_cmd)
         rec["kind"].append({"near": 0, "wide": 1, "push": 2}[kind])
+        if raw:
+            rec["rgb_full"].append(obs.rgb[..., :3])
+            rec["depth_full"].append(obs.depth_mm)
+            rec["K"].append(obs.K.astype(np.float32))
+            rec["cam_T_world"].append(obs.cam_T_world.astype(np.float32))
+            rec["H"].append(obs.H.astype(np.float32))
         if kind == "push":
             res = robot.push_along(R_P[:, 0], stroke, C.PUSH_STEP, C.PUSH_JAM_LAG, C.PUSH_SUCCESS_MARGIN)
             rec["push"].append(int(res["success"]))

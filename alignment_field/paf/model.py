@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-import torchvision
 
 
 def mlp(sizes, last_act=False):
@@ -39,6 +38,7 @@ class PointNet(nn.Module):
 class RGBNet(nn.Module):
     def __init__(self, pretrained=True):
         super().__init__()
+        import torchvision  # only the ResNet models need it
         w = torchvision.models.ResNet18_Weights.IMAGENET1K_V1 if pretrained else None
         net = torchvision.models.resnet18(weights=w)
         net.fc = nn.Identity()

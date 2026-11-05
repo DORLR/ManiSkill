@@ -52,6 +52,9 @@ def main():
     ap.add_argument("--workers", type=int, default=14)
     ap.add_argument("--ports", nargs="+", default=list(C.PORTS))
     ap.add_argument("--seed0", type=int, default=100000)
+    ap.add_argument("--store-raw", action="store_true", help="also save full RGB-D and camera/hand poses")
+    ap.add_argument("--n-sweep", type=int, default=None)
+    ap.add_argument("--n-push", type=int, default=None)
     args = ap.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -64,7 +67,8 @@ def main():
             if path.exists():
                 continue
             specs.append(dict(port=port, idx=i, seed=args.seed0 + 1000 * pi + i, pitch=pitch, grasp_pos=pos,
-                              n_sweep=C.N_SWEEP, n_push=C.N_PUSH, path=str(path)))
+                              n_sweep=args.n_sweep or C.N_SWEEP, n_push=args.n_push or C.N_PUSH,
+                              store_raw=args.store_raw, path=str(path)))
     print(f"{len(specs)} grasps to collect with {args.workers} workers", flush=True)
     t0 = time.time()
     ctx = mp.get_context("spawn")

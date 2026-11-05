@@ -16,6 +16,7 @@ from .field import FieldNet, step_from_field
 from .geometry import apply_port_motion
 from .geometry import port_axes
 from .model import AlignNet, RGBOnlyNet
+from .relnet import RelNet
 from .perception import port_axes_from_obs, preprocess, rgb_crop
 
 
@@ -29,8 +30,11 @@ class FieldPolicy:
         if share_from is not None:  # same weights, one copy in GPU memory
             self.model, self.field = share_from.model, share_from.field
         else:
-            net = RGBOnlyNet if estimate == "rgb" else AlignNet
-            self.model = net(pretrained=False).to(device).eval()
+            if estimate == "rel":
+                self.model = RelNet().to(device).eval()
+            else:
+                net = RGBOnlyNet if estimate == "rgb" else AlignNet
+                self.model = net(pretrained=False).to(device).eval()
             self.model.load_state_dict(torch.load(f"{run_dir}/model.pt", map_location=device))
             self.field = FieldNet().to(device).eval()
             self.field.load_state_dict(torch.load(f"{run_dir}/field.pt", map_location=device))
@@ -54,6 +58,10 @@ class FieldPolicy:
         obs = N.apply(obs, self.noise_rng, self.depth_noise)
         if self.estimate == "rgb":
             o = self.model(torch.as_tensor(rgb_crop(obs)[None], device=self.dev))
+        elif self.estimate == "rel":
+            t = lambda a, dt=torch.float32: torch.as_tensor(np.asarray(a)[None], device=self.dev, dtype=dt)
+            o = self.model(t(obs.rgb[..., :3], torch.uint8), t(obs.depth_mm, torch.int16), t(obs.K),
+                           t(obs.cam_T_world), t(obs.H), t(self.R_P))
         else:
             crop, pc = preprocess(obs, self.R_P, rng)
             rgb = torch.as_tensor(crop[None], device=self.dev)
