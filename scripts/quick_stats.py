@@ -13,6 +13,17 @@ from collections import defaultdict
 import numpy as np
 
 
+PIN_LENGTH_MM = {"A": 16.0, "B": 18.0, "C": 20.0, "D": 14.0}  # full pin length per port (docs)
+
+
+def inserted(e, port):
+    """Insertion depth reached, relative to H_pre: start depth (t_x before the
+    push, mm) + hand advance >= pin length + 3 mm - 1 mm. The raw push flag only
+    checked the advance, which is also met when the push starts so far back that
+    the pins never reach the board (bug found 2026-11-05)."""
+    return e["u_final_true"][0] + e["advanced_mm"] >= PIN_LENGTH_MM[port] + 3.0 - 1.0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--eval", default="results/eval")
@@ -30,7 +41,7 @@ def main():
             k = (r["role"], e["method"])
             st[k]["crash"].append("failure" in e)
             if "push_success" in e:
-                st[k]["push"].append(e["push_success"])
+                st[k]["push"].append(inserted(e, r["port"]))
                 st[k]["end"].append(np.linalg.norm(e["u_final_true"]))
                 st[k]["start"].append(np.linalg.norm(e["u0_true"]))
             tr = e.get("traj", [])

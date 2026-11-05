@@ -23,6 +23,17 @@ from collections import defaultdict
 import numpy as np
 
 
+PIN_LENGTH_MM = {"A": 16.0, "B": 18.0, "C": 20.0, "D": 14.0}  # full pin length per port (docs)
+
+
+def inserted(e, port):
+    """Insertion depth reached, relative to H_pre: start depth (t_x before the
+    push, mm) + hand advance >= pin length + 3 mm - 1 mm. The raw push flag only
+    checked the advance, which is also met when the push starts so far back that
+    the pins never reach the board (bug found 2026-11-05)."""
+    return e["u_final_true"][0] + e["advanced_mm"] >= PIN_LENGTH_MM[port] + 3.0 - 1.0
+
+
 def wilson(k, n, z=1.96):
     if n == 0:
         return (float("nan"),) * 3
@@ -79,8 +90,9 @@ def main():
         for e in r["episodes"]:
             if "u_final_true" not in e:
                 continue
+            e["inserted"] = inserted(e, r["port"])
             cells[(r["fold"], r["role"], r["condition"], e["method"])].append(e)
-            by_m[e["method"]].append(e["push_success"])
+            by_m[e["method"]].append(inserted(e, r["port"]))
         if by_m.get("field") and by_m.get("none"):
             grasp_pairs[(r["role"], r["condition"])].append(np.mean(by_m["field"]) - np.mean(by_m["none"]))
     M_by_fold = {}
@@ -98,7 +110,7 @@ def main():
     out = {}
     for (role, cond, method), d in sorted(table.items()):
         eps = d["eps"]
-        k = sum(e["push_success"] for _, e in eps)
+        k = sum(e["inserted"] for _, e in eps)
         p, lo, hi = wilson(k, len(eps))
         U = np.array([e["u_final_true"] for _, e in eps])
         U0 = np.array([e["u0_true"] for _, e in eps])
