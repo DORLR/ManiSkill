@@ -90,11 +90,9 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--val-port", default=None,
                     help="nested leave-one-shape-out: validate on this training shape (not trained on)")
-    ap.add_argument("--mldg", action="store_true",
-                    help="episodic domain generalisation (Li et al. 2018, first-order MLDG): each step, "
-                         "meta-train on two training shapes, meta-test on the third")
-    ap.add_argument("--mldg-alpha", type=float, default=1e-3)
-    ap.add_argument("--mldg-beta", type=float, default=1.0)
+    ap.add_argument("--rotate", action="store_true",
+                    help="each epoch: pick one training shape at random, train on the other two, "
+                         "then measure errors on the picked one")
     ap.add_argument("--monitor-every", type=int, default=0,
                     help="log errors on the held-out test shape every N epochs (record only, never used "
                          "for selection; the final epoch is the model)")
@@ -111,8 +109,8 @@ def main():
     u = (D["q"] / C.SIGMA).astype(np.float32)
     lab = id_labels(u, D["push"], D["kind"])
     n_cfg = len(metas)
-    if args.mldg:
-        val_cfg = set()  # all three training shapes are used; the final epoch is the model
+    if args.rotate:
+        val_cfg = set()  # validation shape changes every epoch; the final epoch is the model
     elif args.val_port:
         val_cfg = {i for i, m in enumerate(metas) if m["port"] == args.val_port}
     else:
@@ -127,7 +125,7 @@ def main():
     va_idx = np.nonzero(is_val)[0]
     by_port = {p: tr_idx[port_of[tr_idx] == p] for p in ports if p != args.val_port}
     print(f"held-out {args.held_out}: {n_cfg} grasps, {len(tr_idx)} train / {len(va_idx)} val views"
-          f"{' (MLDG)' if args.mldg else ''}", flush=True)
+          f"{' (rotating 2 train / 1 check shape per epoch)' if args.rotate else ''}", flush=True)
     mon = None
     if args.monitor_every:
         Dm, _ = load_shards(args.data, [args.held_out])
@@ -160,51 +158,36 @@ def main():
 
     model = AlignNet(pretrained=True, rgb_drop=0.5 if args.reg else 0.0).to(dev)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    steps_per_epoch = len(tr_idx) // args.bs
+    steps_per_epoch = (len(tr_idx) * 2 // 3 if args.rotate else len(tr_idx)) // args.bs
     total = args.epochs * steps_per_epoch
     warm = max(1, total // 20)
     sched = torch.optim.lr_scheduler.LambdaLR(
         opt, lambda k: min(1.0, (k + 1) / warm) * 0.5 * (1 + np.cos(np.pi * min(k, total) / total)))
-    names = [n for n, _ in model.named_parameters()]
     history, best = [], None
     t0 = time.time()
     for ep in range(args.epochs):
-        perm = np.random.permutation(tr_idx)
-        tot, tot_te = 0.0, 0.0
-        for s in range(steps_per_epoch):
-            if args.mldg:
-                # first-order MLDG: theta' = theta - alpha * grad L_tr(theta);
-                # minimise L_tr(theta) + beta * L_te(theta'), gradient of
-                # theta' w.r.t. theta taken as identity (first order)
-                doms = list(by_port)
-                te_dom = doms[np.random.randint(len(doms))]
-                tr_pool = np.concatenate([by_port[d] for d in doms if d != te_dom])
-                rgb, pts, ub, lb = batch(np.random.choice(tr_pool, args.bs))
-                with torch.autocast("cuda", dtype=torch.bfloat16):
-                    l_tr = loss_fn(model(rgb, pts), ub, lb)
-                params = [p for p in model.parameters()]
-                grads = torch.autograd.grad(l_tr, params, retain_graph=True, allow_unused=True)
-                virt = {n: (p - args.mldg_alpha * g.detach()) if g is not None else p
-                        for n, p, g in zip(names, params, grads)}
-                bufs = dict(model.named_buffers())
-                rgb2, pts2, ub2, lb2 = batch(np.random.choice(by_port[te_dom], args.bs))
-                with torch.autocast("cuda", dtype=torch.bfloat16):
-                    o2 = torch.func.functional_call(model, (virt, bufs), (rgb2, pts2))
-                    l_te = loss_fn(o2, ub2, lb2)
-                loss = l_tr + args.mldg_beta * l_te
-                tot_te += l_te.detach()
-            else:
-                rgb, pts, ub, lb = batch(perm[s * args.bs:(s + 1) * args.bs])
-                with torch.autocast("cuda", dtype=torch.bfloat16):
-                    loss = loss_fn(model(rgb, pts), ub, lb)
+        check_dom = None
+        pool = tr_idx
+        if args.rotate:
+            doms = list(by_port)
+            check_dom = doms[np.random.randint(len(doms))]
+            pool = np.concatenate([by_port[d] for d in doms if d != check_dom])
+        perm = np.random.permutation(pool)
+        tot = 0.0
+        for s in range(len(pool) // args.bs):
+            rgb, pts, ub, lb = batch(perm[s * args.bs:(s + 1) * args.bs])
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                loss = loss_fn(model(rgb, pts), ub, lb)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
             sched.step()
             tot += loss.detach()
-        res = {"epoch": ep, "loss": float(tot) / steps_per_epoch, "minutes": (time.time() - t0) / 60}
-        if args.mldg:
-            res["meta_test_loss"] = float(tot_te) / steps_per_epoch
+        res = {"epoch": ep, "loss": float(tot) / max(1, len(pool) // args.bs), "minutes": (time.time() - t0) / 60}
+        if check_dom is not None:
+            sub = np.random.choice(by_port[check_dom], min(3000, len(by_port[check_dom])), replace=False)
+            res["check_shape"] = check_dom
+            res.update({f"check_{k}": v for k, v in evaluate(model, T, sub).items()})
         if len(va_idx):
             res.update(evaluate(model, T, va_idx))
             score = min(res["hat_near_t_med_mm"] + res["hat_near_r_med_deg"],
