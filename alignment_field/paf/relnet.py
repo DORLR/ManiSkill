@@ -62,7 +62,12 @@ class DinoFeatures(nn.Module):
 
     def __init__(self):
         super().__init__()
-        self.net = torch.hub.load("facebookresearch/dinov2", "dinov2_vits14", verbose=False)
+        import os
+        local = os.path.expanduser("~/.cache/torch/hub/facebookresearch_dinov2_main")
+        if os.path.isdir(local):  # no network access needed once cached
+            self.net = torch.hub.load(local, "dinov2_vits14", source="local", verbose=False)
+        else:
+            self.net = torch.hub.load("facebookresearch/dinov2", "dinov2_vits14", verbose=False)
         for p in self.net.parameters():
             p.requires_grad_(False)
         self.net.eval()
