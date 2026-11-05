@@ -36,9 +36,13 @@ def _work(spec):
     key = ("pol", spec["fold"])
     if key not in _CACHE:
         run = spec["run_dir"]
-        _CACHE[key] = {"field": FieldPolicy(run, estimate="hat"), "field_pc": FieldPolicy(run, estimate="pc"),
-                       "oracle": FieldPolicy(run, estimate="hat"), "none": None}
-    res = eval_grasp(_CACHE["robot"], _CACHE[key], spec)
+        base = FieldPolicy(run, estimate="hat")
+        _CACHE[key] = {"field": base, "field_pc": FieldPolicy(run, estimate="pc", share_from=base),
+                       "oracle": FieldPolicy(run, estimate="hat", share_from=base), "none": None}
+    try:
+        res = eval_grasp(_CACHE["robot"], _CACHE[key], spec)
+    except Exception as exc:  # one bad grasp must not stop the whole evaluation
+        return {"path": spec["path"], "error": f"{type(exc).__name__}: {exc}"}
     Path(spec["path"]).write_text(json.dumps(res))
     ok = [e.get("push_success") for e in res["episodes"]]
     return {"path": spec["path"], "expert_ok": res["expert_ok"], "seconds": res.get("seconds"),

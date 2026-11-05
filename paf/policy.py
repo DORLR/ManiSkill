@@ -18,13 +18,16 @@ from .perception import port_axes_from_obs, preprocess
 
 
 class FieldPolicy:
-    def __init__(self, run_dir, device="cuda", estimate="hat"):
+    def __init__(self, run_dir, device="cuda", estimate="hat", share_from=None):
         self.dev = device
         self.estimate = estimate  # "hat" (point cloud + RGB) or "pc" (point cloud only)
-        self.model = AlignNet(pretrained=False).to(device).eval()
-        self.model.load_state_dict(torch.load(f"{run_dir}/model.pt", map_location=device))
-        self.field = FieldNet().to(device).eval()
-        self.field.load_state_dict(torch.load(f"{run_dir}/field.pt", map_location=device))
+        if share_from is not None:  # same weights, one copy in GPU memory
+            self.model, self.field = share_from.model, share_from.field
+        else:
+            self.model = AlignNet(pretrained=False).to(device).eval()
+            self.model.load_state_dict(torch.load(f"{run_dir}/model.pt", map_location=device))
+            self.field = FieldNet().to(device).eval()
+            self.field.load_state_dict(torch.load(f"{run_dir}/field.pt", map_location=device))
         self.R_P = None
 
     def begin_episode(self, obs, rng):

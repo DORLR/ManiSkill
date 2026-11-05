@@ -53,15 +53,16 @@ def id_labels(u, push, kind):
     return lab
 
 
-def evaluate(model, T, idx, bs=512):
+def evaluate(model, T, idx, bs=512, dev="cuda"):
     model.eval()
     out_pc, out_hat = [], []
+    idx = torch.as_tensor(np.asarray(idx))
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
         for s in range(0, len(idx), bs):
             b = idx[s:s + bs]
-            o = model(T["rgb"][b], T["pc"][b].float())
-            out_pc.append(o["q_pc"].float())
-            out_hat.append(o["q_hat"].float())
+            o = model(T["rgb"][b].to(dev), T["pc"][b].to(dev).float())
+            out_pc.append(o["q_pc"].float().cpu())
+            out_hat.append(o["q_hat"].float().cpu())
     model.train()
     u = T["u"][idx]
     e_pc = (torch.cat(out_pc) - u).abs()
@@ -89,6 +90,15 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--val-port", default=None,
                     help="nested leave-one-shape-out: validate on this training shape (not trained on)")
+    ap.add_argument("--mldg", action="store_true",
+                    help="episodic domain generalisation (Li et al. 2018, first-order MLDG): each step, "
+                         "meta-train on two training shapes, meta-test on the third")
+    ap.add_argument("--mldg-alpha", type=float, default=1e-3)
+    ap.add_argument("--mldg-beta", type=float, default=1.0)
+    ap.add_argument("--monitor-every", type=int, default=0,
+                    help="log errors on the held-out test shape every N epochs (record only, never used "
+                         "for selection; the final epoch is the model)")
+    ap.add_argument("--strong-aug", action="store_true", help="colour jitter per channel + crop shift +-8 px")
     ap.add_argument("--reg", action="store_true",
                     help="shape-generalisation regulariser: RGB feature dropout 0.5, crop shift, stronger colour jitter")
     args = ap.parse_args()
@@ -101,17 +111,52 @@ def main():
     u = (D["q"] / C.SIGMA).astype(np.float32)
     lab = id_labels(u, D["push"], D["kind"])
     n_cfg = len(metas)
-    if args.val_port:
+    if args.mldg:
+        val_cfg = set()  # all three training shapes are used; the final epoch is the model
+    elif args.val_port:
         val_cfg = {i for i, m in enumerate(metas) if m["port"] == args.val_port}
     else:
         val_cfg = set(rng.choice(n_cfg, max(1, n_cfg // 10), replace=False).tolist())
     is_val = np.array([c in val_cfg for c in D["cfg"]])
     dev = "cuda"
-    T = {"rgb": torch.as_tensor(D["rgb"], device=dev), "pc": torch.as_tensor(D["pc"], device=dev),
-         "u": torch.as_tensor(u, device=dev), "lab": torch.as_tensor(lab, device=dev)}
-    tr_idx = torch.as_tensor(np.nonzero(~is_val)[0], device=dev)
-    va_idx = torch.as_tensor(np.nonzero(is_val)[0], device=dev)
-    print(f"held-out {args.held_out}: {n_cfg} grasps, {len(tr_idx)} train / {len(va_idx)} val views", flush=True)
+    # data stay in (pinned) CPU memory; batches are moved to the GPU per step
+    T = {"rgb": torch.as_tensor(D["rgb"]).pin_memory(), "pc": torch.as_tensor(D["pc"]).pin_memory(),
+         "u": torch.as_tensor(u), "lab": torch.as_tensor(lab)}
+    port_of = np.array([metas[c]["port"] for c in D["cfg"]])
+    tr_idx = np.nonzero(~is_val)[0]
+    va_idx = np.nonzero(is_val)[0]
+    by_port = {p: tr_idx[port_of[tr_idx] == p] for p in ports if p != args.val_port}
+    print(f"held-out {args.held_out}: {n_cfg} grasps, {len(tr_idx)} train / {len(va_idx)} val views"
+          f"{' (MLDG)' if args.mldg else ''}", flush=True)
+    mon = None
+    if args.monitor_every:
+        Dm, _ = load_shards(args.data, [args.held_out])
+        mon = {"rgb": torch.as_tensor(Dm["rgb"]), "pc": torch.as_tensor(Dm["pc"]),
+               "u": torch.as_tensor((Dm["q"] / C.SIGMA).astype(np.float32))}
+
+    def batch(idx):
+        idx_t = torch.as_tensor(idx)
+        rgb = T["rgb"][idx_t].to(dev, non_blocking=True)
+        pts = T["pc"][idx_t].to(dev, non_blocking=True).float()
+        ub = T["u"][idx_t].to(dev, non_blocking=True)
+        lb = T["lab"][idx_t].to(dev, non_blocking=True)
+        if args.reg or args.strong_aug:
+            g = torch.empty(len(idx), 1, 1, 3, device=dev).uniform_(0.7, 1.3)
+            rgb = (rgb.float() * g + torch.randn(len(idx), 1, 1, 1, device=dev) * 10).clamp(0, 255)
+            sx, sy = np.random.randint(-8, 9, 2)
+            rgb = torch.roll(rgb, shifts=(int(sy), int(sx)), dims=(1, 2)).to(torch.uint8)
+        else:
+            g = torch.empty(len(idx), 1, 1, 1, device=dev).uniform_(0.85, 1.15)
+            rgb = (rgb.float() * g).clamp(0, 255).to(torch.uint8)
+        pts[..., :3] += torch.randn_like(pts[..., :3]) * (0.0005 / 0.05)
+        return rgb, pts, ub, lb
+
+    def loss_fn(o, ub, lb):
+        loss = F.smooth_l1_loss(o["q_pc"].float(), ub) + F.smooth_l1_loss(o["q_hat"].float(), ub)
+        m = lb >= 0
+        if m.any():
+            loss = loss + 0.2 * F.binary_cross_entropy_with_logits(o["id_logit"].float()[m], lb[m])
+        return loss
 
     model = AlignNet(pretrained=True, rgb_drop=0.5 if args.reg else 0.0).to(dev)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
@@ -120,45 +165,60 @@ def main():
     warm = max(1, total // 20)
     sched = torch.optim.lr_scheduler.LambdaLR(
         opt, lambda k: min(1.0, (k + 1) / warm) * 0.5 * (1 + np.cos(np.pi * min(k, total) / total)))
+    names = [n for n, _ in model.named_parameters()]
     history, best = [], None
     t0 = time.time()
     for ep in range(args.epochs):
-        perm = tr_idx[torch.randperm(len(tr_idx), device=dev)]
-        tot = 0.0
+        perm = np.random.permutation(tr_idx)
+        tot, tot_te = 0.0, 0.0
         for s in range(steps_per_epoch):
-            b = perm[s * args.bs:(s + 1) * args.bs]
-            rgb = T["rgb"][b]
-            # photometric jitter (brightness/contrast) and point jitter (0.5 mm)
-            if args.reg:
-                g = torch.empty(len(b), 1, 1, 3, device=dev).uniform_(0.7, 1.3)
-                rgb = (rgb.float() * g + torch.randn(len(b), 1, 1, 1, device=dev) * 10).clamp(0, 255)
-                sx, sy = np.random.randint(-8, 9, 2)
-                rgb = torch.roll(rgb, shifts=(int(sy), int(sx)), dims=(1, 2)).to(torch.uint8)
+            if args.mldg:
+                # first-order MLDG: theta' = theta - alpha * grad L_tr(theta);
+                # minimise L_tr(theta) + beta * L_te(theta'), gradient of
+                # theta' w.r.t. theta taken as identity (first order)
+                doms = list(by_port)
+                te_dom = doms[np.random.randint(len(doms))]
+                tr_pool = np.concatenate([by_port[d] for d in doms if d != te_dom])
+                rgb, pts, ub, lb = batch(np.random.choice(tr_pool, args.bs))
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    l_tr = loss_fn(model(rgb, pts), ub, lb)
+                params = [p for p in model.parameters()]
+                grads = torch.autograd.grad(l_tr, params, retain_graph=True, allow_unused=True)
+                virt = {n: (p - args.mldg_alpha * g.detach()) if g is not None else p
+                        for n, p, g in zip(names, params, grads)}
+                bufs = dict(model.named_buffers())
+                rgb2, pts2, ub2, lb2 = batch(np.random.choice(by_port[te_dom], args.bs))
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    o2 = torch.func.functional_call(model, (virt, bufs), (rgb2, pts2))
+                    l_te = loss_fn(o2, ub2, lb2)
+                loss = l_tr + args.mldg_beta * l_te
+                tot_te += l_te.detach()
             else:
-                g = torch.empty(len(b), 1, 1, 1, device=dev).uniform_(0.85, 1.15)
-                rgb = (rgb.float() * g).clamp(0, 255).to(torch.uint8)
-            pts = T["pc"][b].float()
-            pts[..., :3] += torch.randn_like(pts[..., :3]) * (0.0005 / 0.05)
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                o = model(rgb, pts)
-            ub, lb = T["u"][b], T["lab"][b]
-            loss = F.smooth_l1_loss(o["q_pc"].float(), ub) + F.smooth_l1_loss(o["q_hat"].float(), ub)
-            m = lb >= 0
-            if m.any():
-                loss = loss + 0.2 * F.binary_cross_entropy_with_logits(o["id_logit"].float()[m], lb[m])
+                rgb, pts, ub, lb = batch(perm[s * args.bs:(s + 1) * args.bs])
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    loss = loss_fn(model(rgb, pts), ub, lb)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
             sched.step()
             tot += loss.detach()
-        res = evaluate(model, T, va_idx)
-        res.update(epoch=ep, loss=float(tot) / steps_per_epoch, minutes=(time.time() - t0) / 60)
+        res = {"epoch": ep, "loss": float(tot) / steps_per_epoch, "minutes": (time.time() - t0) / 60}
+        if args.mldg:
+            res["meta_test_loss"] = float(tot_te) / steps_per_epoch
+        if len(va_idx):
+            res.update(evaluate(model, T, va_idx))
+            score = min(res["hat_near_t_med_mm"] + res["hat_near_r_med_deg"],
+                        res["pc_near_t_med_mm"] + res["pc_near_r_med_deg"])
+            if best is None or score < best:
+                best = score
+                torch.save(model.state_dict(), out / "model.pt")
+        else:
+            torch.save(model.state_dict(), out / "model.pt")  # final epoch is the model
+        if mon is not None and ((ep + 1) % args.monitor_every == 0 or ep + 1 == args.epochs):
+            res.update({f"MONITOR_test_shape_{k}": v for k, v in
+                        evaluate(model, mon, np.arange(len(mon["u"]))).items()})
+            torch.save(model.state_dict(), out / f"model_ep{ep + 1}.pt")
         history.append(res)
-        score = min(res["hat_near_t_med_mm"] + res["hat_near_r_med_deg"],
-                    res["pc_near_t_med_mm"] + res["pc_near_r_med_deg"])
-        if best is None or score < best:
-            best = score
-            torch.save(model.state_dict(), out / "model.pt")
         print(json.dumps({k: round(v, 4) if isinstance(v, float) else v for k, v in res.items()}), flush=True)
 
     # ---------------------------------------------------------------- field
