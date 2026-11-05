@@ -22,6 +22,7 @@ import numpy as np
 
 from . import config as C
 from .geometry import make_T, port_axes, pose_from_state, relative_state
+from .demo import run_demo
 from .perception import port_axes_from_obs, preprocess
 
 
@@ -110,10 +111,30 @@ def collect_config(robot, spec: dict) -> dict:
         else:
             rec["push"].append(-1)
             rec["advanced_mm"].append(np.nan)
+    # insertion demonstrations from near the pre-insertion pose (v4, learned insertion policy)
+    demo = {k: [] for k in ("demo_rgb", "demo_pc", "demo_prop", "demo_act", "demo_u", "demo_id")}
+    demo_ok = []
+    for k in range(spec.get("n_demo", 0)):
+        q0 = np.r_[rng.uniform(-0.004, 0.0), rng.uniform(-0.0015, 0.0015, 2), rng.uniform(-1, 1, 3) * np.radians(1.5)]
+        res = run_demo(robot, H_pre, R_P, R_P_est, q0, rng)
+        if res is None:
+            continue
+        fr, ok = res
+        demo_ok.append(bool(ok))
+        if ok and len(fr["act"]):
+            for key in ("rgb", "pc", "prop", "act", "u"):
+                demo["demo_" + key].append(fr[key])
+            demo["demo_id"].append(np.full(len(fr["act"]), k))
+        # back out straight along the axis before the next demonstration
+        u = relative_state(robot.hand_pose(), H_pre, R_P)
+        u[0] = -0.003
+        robot.move_to(pose_from_state(u, H_pre, R_P))
+    meta["demo_ok"] = demo_ok
     meta["n"] = len(rec["q"])
     meta["seconds"] = time.time() - t_start
     out = {"meta": meta, "H_pre": H_pre, "R_P": R_P, "R_P_est": R_P_est}
     out.update({k: np.asarray(v) for k, v in rec.items()})
+    out.update({k: np.concatenate(v) for k, v in demo.items() if v})
     return out
 
 
