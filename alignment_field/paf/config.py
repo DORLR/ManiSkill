@@ -47,6 +47,7 @@ OOD_T = (0.003, 0.010)      # |t_y|, |t_z| of OOD starts
 OOD_TX = (-0.015, -0.003)
 OOD_R = np.radians(6.0)
 LOOP_MAX_ITERS = 25
+FIELD_STOP = 0.5   # stop when two consecutive field steps are shorter than this (sigma units)
 STEP_MAX = 3.0               # max field step per iteration, in sigma units
 
 

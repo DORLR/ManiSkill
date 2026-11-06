@@ -1,0 +1,34 @@
+== runs_v6/rel on data/packed_v6 --ports G46 G47 G48
+G46  n 396 lateral err med 1.41 p90 2.31 mm | mean bias y +0.62 z +1.16 mm | t_x err med 0.34 | rot err med 2.21 deg
+G47  n 477 lateral err med 0.72 p90 1.40 mm | mean bias y +0.08 z +0.18 mm | t_x err med 0.33 | rot err med 1.30 deg
+G48  n 477 lateral err med 1.14 p90 2.51 mm | mean bias y -0.12 z -0.67 mm | t_x err med 0.59 | rot err med 1.24 deg
+per axis (mean bias / median |err|): t_x +0.35/0.39  t_y +0.17/0.48  t_z +0.17/0.77  r_x +0.01/0.29  r_y +0.96/1.26  r_z -0.27/0.33
+  t_z: estimate = 0.91 x truth + +0.13; truth spread (std) 3.22
+  r_y: estimate = 0.86 x truth + +0.97; truth spread (std) 1.67
+ALL  n1350 lateral err med 1.07 p90 2.20 mm, rot med 1.45 deg, t_x med 0.39 mm
+== runs_v6/rel on data/packed_v6_abcd
+A    n 629 lateral err med 1.93 p90 3.31 mm | mean bias y +0.42 z +1.39 mm | t_x err med 0.51 | rot err med 3.08 deg
+B    n 623 lateral err med 1.45 p90 4.08 mm | mean bias y +0.46 z +1.16 mm | t_x err med 0.35 | rot err med 2.27 deg
+C    n 638 lateral err med 1.27 p90 2.46 mm | mean bias y +0.58 z -0.18 mm | t_x err med 0.65 | rot err med 1.20 deg
+D    n 556 lateral err med 1.54 p90 4.64 mm | mean bias y -0.07 z +0.48 mm | t_x err med 0.62 | rot err med 1.57 deg
+per axis (mean bias / median |err|): t_x -0.24/0.52  t_y +0.36/0.55  t_z +0.72/1.14  r_x -0.02/0.34  r_y +1.51/1.54  r_z -0.10/0.31
+  t_z: estimate = 0.94 x truth + +0.70; truth spread (std) 3.23
+  r_y: estimate = 0.55 x truth + +1.52; truth spread (std) 1.67
+ALL  n2446 lateral err med 1.48 p90 3.49 mm, rot med 1.77 deg, t_x med 0.52 mm
+== runs_v7/rel_143 on data/packed_v6 --ports G46 G47 G48
+G46  n 396 lateral err med 1.03 p90 1.70 mm | mean bias y -0.26 z +0.89 mm | t_x err med 0.25 | rot err med 1.65 deg
+G47  n 477 lateral err med 0.62 p90 1.31 mm | mean bias y -0.18 z +0.20 mm | t_x err med 0.32 | rot err med 1.29 deg
+G48  n 477 lateral err med 0.85 p90 1.81 mm | mean bias y -0.42 z -0.03 mm | t_x err med 0.34 | rot err med 1.49 deg
+per axis (mean bias / median |err|): t_x +0.19/0.30  t_y -0.29/0.35  t_z +0.33/0.61  r_x -0.13/0.20  r_y +1.26/1.36  r_z +0.31/0.34
+  t_z: estimate = 0.93 x truth + +0.30; truth spread (std) 3.22
+  r_y: estimate = 0.88 x truth + +1.27; truth spread (std) 1.67
+ALL  n1350 lateral err med 0.82 p90 1.61 mm, rot med 1.44 deg, t_x med 0.30 mm
+== runs_v7/rel_143 on data/packed_v6_abcd
+A    n 629 lateral err med 1.17 p90 2.44 mm | mean bias y -0.20 z +1.02 mm | t_x err med 0.39 | rot err med 1.98 deg
+B    n 623 lateral err med 1.11 p90 2.10 mm | mean bias y -0.32 z -0.42 mm | t_x err med 0.28 | rot err med 1.20 deg
+C    n 638 lateral err med 0.74 p90 1.56 mm | mean bias y -0.38 z -0.03 mm | t_x err med 0.33 | rot err med 2.02 deg
+D    n 556 lateral err med 1.33 p90 5.33 mm | mean bias y -0.48 z +1.51 mm | t_x err med 0.37 | rot err med 1.40 deg
+per axis (mean bias / median |err|): t_x -0.09/0.33  t_y -0.34/0.40  t_z +0.49/0.82  r_x -0.15/0.24  r_y +1.06/1.47  r_z +0.33/0.34
+  t_z: estimate = 0.95 x truth + +0.48; truth spread (std) 3.23
+  r_y: estimate = 0.76 x truth + +1.06; truth spread (std) 1.67
+ALL  n2446 lateral err med 1.04 p90 2.49 mm, rot med 1.59 deg, t_x med 0.33 mm

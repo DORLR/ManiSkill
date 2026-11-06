@@ -71,6 +71,13 @@ def _work(spec):
                 _C["latent"] = {n: LatentField(spec["latents"][n], _C["pols"][n][0].model)
                                 for n in spec["policies"]}
         robot = _C["robot"]
+        if spec.get("field_stop") is not None:
+            for n in _C["pols"]:
+                if _C["pols"][n][1] is not None:
+                    _C["pols"][n][1].stop = spec["field_stop"]
+            for key in ("fused", "plugged"):
+                for f in _C.get(key, {}).values():
+                    f.stop = spec["field_stop"]
         rng = np.random.default_rng(spec["seed"])
         for attempt in range(3):
             robot.reset(spec["seed"] + 7919 * attempt, spec["pitch"], spec["grasp_pos"])
@@ -143,6 +150,8 @@ def main():
     ap.add_argument("--n-starts", type=int, default=3)
     ap.add_argument("--workers", type=int, default=10)
     ap.add_argument("--limit", type=int, default=0, help="smoke test: only the first N grasps")
+    ap.add_argument("--first-grasp", type=int, default=0, help="only grasps with index >= this (extend a test set)")
+    ap.add_argument("--field-stop", type=float, default=None, help="field stop threshold (default paf.config.FIELD_STOP)")
     ap.add_argument("--kinds", nargs="+", default=["alone", "field", "oracle", "id"],
                     help="which of: alone (OOD start), field, oracle, id (start inside the policy's distribution)")
     ap.add_argument("--conditions", nargs="+", default=list(COND))
@@ -169,11 +178,13 @@ def main():
                 port = train_shapes[int(rng.integers(len(train_shapes)))]
                 specs.append(dict(role="seen_shape", port=port, condition=cond, idx=i, pitch=pitch, grasp_pos=pos,
                                   seed=810000 + 1000 * ci + i))
+    specs = [s for s in specs if s["idx"] >= args.first_grasp]
     todo = []
     for s in specs:
         s.update(n_starts=args.n_starts, kinds=args.kinds, policies=dict(x.split("=") for x in args.policies),
                  fieldrels=dict(x.split("=") for x in args.fieldrels),
                  latents=dict(x.split("=") for x in args.latents), plug_dir=args.plug_dir, plug_fuse=args.plug_fuse,
+                 field_stop=args.field_stop,
                  path=str(out / f"{s['role']}_{s['port']}_{s['condition']}_{s['idx']}.json"))
         if not Path(s["path"]).exists():
             todo.append(s)

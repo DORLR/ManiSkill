@@ -57,7 +57,7 @@ def run_loop(robot, policy, H_pre, R_P, method, rng):
         target = apply_port_motion(obs.H, du * C.SIGMA, R_P) if oracle else policy.target_pose(obs, du)
         traj.append({"it": it, "u_true": u_true.tolist(), "u_est": u_est.tolist(), "p_id": p_id,
                      "v_norm": float(np.linalg.norm(v)), "step_norm": float(np.linalg.norm(du))})
-        small = small + 1 if np.linalg.norm(du) < 0.5 else 0
+        small = small + 1 if np.linalg.norm(du) < getattr(policy, "stop", C.FIELD_STOP) else 0
         if small >= 2:
             break
         # Safety clamp, identical for all methods: never command the hand more
