@@ -23,7 +23,7 @@ import numpy as np
 from . import config as C
 from .geometry import make_T, port_axes, pose_from_state, relative_state
 from .demo import run_demo
-from .perception import port_axes_from_obs, preprocess
+from .perception import port_axes_from_obs, preprocess, rel_view
 
 
 def establish_reference(robot):
@@ -49,6 +49,16 @@ def _sample_q(rng, kind):
     elif kind == "wide":
         t = [rng.uniform(-C.WIDE_TX, 0), rng.uniform(-C.WIDE_T, C.WIDE_T), rng.uniform(-C.WIDE_T, C.WIDE_T)]
         r = rng.uniform(-C.WIDE_R, C.WIDE_R, 3)
+    elif kind == "wide_v6":  # wide sweep, same ranges as "wide"
+        t = [rng.uniform(-C.WIDE_TX, 0), rng.uniform(-C.WIDE_T, C.WIDE_T), rng.uniform(-C.WIDE_T, C.WIDE_T)]
+        r = rng.uniform(-C.WIDE_R, C.WIDE_R, 3)
+    elif kind == "handoff":  # around the hand-over region of the IL (t_x = -2 mm, +-0.5 mm, +-0.5 deg), widened
+        t = [rng.uniform(-0.0035, -0.0005), rng.uniform(-0.0015, 0.0015), rng.uniform(-0.0015, 0.0015)]
+        r = rng.uniform(-1, 1, 3) * np.radians(1.5)
+    elif kind == "approach":  # between the OOD starts and the hand-over region; small offsets well represented
+        d = rng.normal(size=2)
+        t = [rng.uniform(-0.015, 0.0), *(d / np.linalg.norm(d) * rng.uniform(0, 0.010))]
+        r = rng.uniform(-1, 1, 3) * np.radians(6.0) * rng.uniform()
     else:  # push
         t = [0.0, rng.uniform(-C.PUSH_T, C.PUSH_T), rng.uniform(-C.PUSH_T, C.PUSH_T)]
         r = rng.uniform(-C.PUSH_R, C.PUSH_R, 3)
@@ -79,8 +89,11 @@ def collect_config(robot, spec: dict) -> dict:
         return {"meta": meta}
     meta["ransac_inlier_frac"] = frac
     meta["port_axis_error_deg"] = float(np.degrees(np.arccos(np.clip(R_P_est[:, 0] @ R_P[:, 0], -1, 1))))
-    kinds = ["near"] * int(0.3 * spec["n_sweep"]) + ["wide"] * (spec["n_sweep"] - int(0.3 * spec["n_sweep"]))
-    kinds += ["push"] * spec["n_push"]
+    if spec.get("mix"):  # e.g. {"handoff": 30, "approach": 50}
+        kinds = [k for k, n in spec["mix"].items() for _ in range(n)]
+    else:
+        kinds = ["near"] * int(0.3 * spec["n_sweep"]) + ["wide"] * (spec["n_sweep"] - int(0.3 * spec["n_sweep"]))
+        kinds += ["push"] * spec["n_push"]
     rng.shuffle(kinds)
     rec = {k: [] for k in ("rgb", "pc", "q", "q_cmd", "kind", "push", "advanced_mm")}
     raw = spec.get("store_raw", False)  # full RGB-D + camera/hand poses for the relational net
@@ -97,11 +110,12 @@ def collect_config(robot, spec: dict) -> dict:
         rec["pc"].append(pc.astype(np.float16))
         rec["q"].append(relative_state(obs.H, H_pre, R_P))
         rec["q_cmd"].append(q_cmd)
-        rec["kind"].append({"near": 0, "wide": 1, "push": 2}[kind])
+        rec["kind"].append({"near": 0, "wide": 1, "push": 2, "handoff": 3, "approach": 4, "wide_v6": 1}[kind])
         if raw:
-            rec["rgb_full"].append(obs.rgb[..., :3])
-            rec["depth_full"].append(obs.depth_mm)
-            rec["K"].append(obs.K.astype(np.float32))
+            rgb_w, depth_w, K_w = rel_view(obs)
+            rec["rgb_full"].append(rgb_w)
+            rec["depth_full"].append(depth_w)
+            rec["K"].append(K_w)
             rec["cam_T_world"].append(obs.cam_T_world.astype(np.float32))
             rec["H"].append(obs.H.astype(np.float32))
         if kind == "push":

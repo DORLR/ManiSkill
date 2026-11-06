@@ -17,7 +17,7 @@ from .geometry import apply_port_motion
 from .geometry import port_axes
 from .model import AlignNet, RGBOnlyNet
 from .relnet import RelNet
-from .perception import port_axes_from_obs, preprocess, rgb_crop
+from .perception import port_axes_from_obs, preprocess, rel_view, rgb_crop
 
 
 class FieldPolicy:
@@ -60,7 +60,8 @@ class FieldPolicy:
             o = self.model(torch.as_tensor(rgb_crop(obs)[None], device=self.dev))
         elif self.estimate == "rel":
             t = lambda a, dt=torch.float32: torch.as_tensor(np.asarray(a)[None], device=self.dev, dtype=dt)
-            o = self.model(t(obs.rgb[..., :3], torch.uint8), t(obs.depth_mm, torch.int16), t(obs.K),
+            rgb, depth, K = rel_view(obs)
+            o = self.model(t(rgb, torch.uint8), t(depth, torch.int16), t(K),
                            t(obs.cam_T_world), t(obs.H), t(self.R_P))
         else:
             crop, pc = preprocess(obs, self.R_P, rng)
@@ -73,6 +74,11 @@ class FieldPolicy:
     @torch.no_grad()
     def field_step(self, u):
         v = self.field(torch.as_tensor(u[None], device=self.dev, dtype=torch.float32))[0].cpu().numpy()
+        return v, step_from_field(v, C.STEP_MAX)
+
+    def point_step(self, u, u_target):
+        """Control baseline: straight to one fixed relative state (no field)."""
+        v = np.asarray(u_target, float) - u
         return v, step_from_field(v, C.STEP_MAX)
 
     def target_pose(self, obs, du):

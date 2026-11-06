@@ -31,7 +31,14 @@ PUSH_JAM_LAG = 0.0015   # stop a push when the hand lags the command by 1.5 mm
 PUSH_SUCCESS_MARGIN = 0.001  # inserted if the hand advanced >= stroke - 1 mm
 
 # ------------------------------------------------------------- perception
-CROP = (72, 200, 88, 216)   # rows r0:r1, cols c0:c1 of the 256x256 wrist image
+# Wrist camera: Intel RealSense D405 at the Trossen Stationary AI default stream
+# (640x480, 87 deg horizontal FOV, square pixels), mounted where Chongyu's env
+# mounts it. Depth closer than the D405 minimum range is invalid (0), as on the
+# real sensor.
+CAM_W, CAM_H, CAM_HFOV_DEG = 640, 480, 87.0
+DEPTH_MIN_MM = 70
+CROP = (200, 456, 256, 512)      # IL policy input: rows r0:r1, cols c0:c1 (256x256) around pins and holes
+REL_CROP = (160, 480, 224, 544)  # relational net input (320x320); K is shifted accordingly
 N_POINTS = 1024
 PC_BOX = ((-0.02, 0.12), (-0.06, 0.06), (-0.06, 0.06))  # hand-centred port axes, m
 

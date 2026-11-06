@@ -36,7 +36,7 @@ def _work(spec):
             out["demo"].append(np.full(len(d["act"]), k))
         meta = {**spec, "demos": metas}
         if out["act"]:
-            np.savez(spec["path"], meta=json.dumps(meta), **{k: np.concatenate(v) for k, v in out.items()})
+            np.savez_compressed(spec["path"], meta=json.dumps(meta), **{k: np.concatenate(v) for k, v in out.items()})
         else:
             np.savez(spec["path"], meta=json.dumps(meta))
         return {"path": spec["path"], "ok": sum(m["completed"] for m in metas), "frames": sum(len(a) for a in out["act"])}

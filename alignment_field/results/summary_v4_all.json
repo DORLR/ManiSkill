@@ -1,0 +1,1106 @@
+{
+ "seen_shape|train|fm_id": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|train|fm": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|train|field+fm": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|train|oracle+fm": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|train|point+fm": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|train|pointoracle+fm": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|train|latent+fm": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|train|bc_id": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|train|bc": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|train|field+bc": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|train|oracle+bc": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|train|point+bc": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|train|pointoracle+bc": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|train|latent+bc": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|pitch_extrap|fm_id": {
+  "n": 11,
+  "rate": 0.2727272727272727,
+  "ci": [
+   0.09745880573921467,
+   0.5656502930102463
+  ]
+ },
+ "seen_shape|pitch_extrap|fm": {
+  "n": 11,
+  "rate": 0.09090909090909091,
+  "ci": [
+   0.01623175226282597,
+   0.3773646254862038
+  ]
+ },
+ "seen_shape|pitch_extrap|field+fm": {
+  "n": 12,
+  "rate": 0.5,
+  "ci": [
+   0.2537781703934222,
+   0.7462218296065778
+  ]
+ },
+ "seen_shape|pitch_extrap|oracle+fm": {
+  "n": 12,
+  "rate": 0.16666666666666666,
+  "ci": [
+   0.04696414761482223,
+   0.44803635738467273
+  ]
+ },
+ "seen_shape|pitch_extrap|point+fm": {
+  "n": 12,
+  "rate": 0.25,
+  "ci": [
+   0.08894003962896138,
+   0.53231033912066
+  ]
+ },
+ "seen_shape|pitch_extrap|pointoracle+fm": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|pitch_extrap|latent+fm": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|pitch_extrap|bc_id": {
+  "n": 10,
+  "rate": 0.4,
+  "ci": [
+   0.16817758120350967,
+   0.6873304525498135
+  ]
+ },
+ "seen_shape|pitch_extrap|bc": {
+  "n": 10,
+  "rate": 0.0,
+  "ci": [
+   -2.7755575615628914e-17,
+   0.2775401687666166
+  ]
+ },
+ "seen_shape|pitch_extrap|field+bc": {
+  "n": 12,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.2425007574992425
+  ]
+ },
+ "seen_shape|pitch_extrap|oracle+bc": {
+  "n": 12,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.2425007574992425
+  ]
+ },
+ "seen_shape|pitch_extrap|point+bc": {
+  "n": 12,
+  "rate": 0.25,
+  "ci": [
+   0.08894003962896138,
+   0.53231033912066
+  ]
+ },
+ "seen_shape|pitch_extrap|pointoracle+bc": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|pitch_extrap|latent+bc": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|pos_extrap|fm_id": {
+  "n": 3,
+  "rate": 0.3333333333333333,
+  "ci": [
+   0.0614903152761605,
+   0.7923450448735121
+  ]
+ },
+ "seen_shape|pos_extrap|fm": {
+  "n": 3,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.5615060804490177
+  ]
+ },
+ "seen_shape|pos_extrap|field+fm": {
+  "n": 3,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.5615060804490177
+  ]
+ },
+ "seen_shape|pos_extrap|oracle+fm": {
+  "n": 3,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.5615060804490177
+  ]
+ },
+ "seen_shape|pos_extrap|point+fm": {
+  "n": 3,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.5615060804490177
+  ]
+ },
+ "seen_shape|pos_extrap|pointoracle+fm": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|pos_extrap|latent+fm": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|pos_extrap|bc_id": {
+  "n": 3,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.5615060804490177
+  ]
+ },
+ "seen_shape|pos_extrap|bc": {
+  "n": 3,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.5615060804490177
+  ]
+ },
+ "seen_shape|pos_extrap|field+bc": {
+  "n": 3,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.5615060804490177
+  ]
+ },
+ "seen_shape|pos_extrap|oracle+bc": {
+  "n": 3,
+  "rate": 0.3333333333333333,
+  "ci": [
+   0.0614903152761605,
+   0.7923450448735121
+  ]
+ },
+ "seen_shape|pos_extrap|point+bc": {
+  "n": 3,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.5615060804490177
+  ]
+ },
+ "seen_shape|pos_extrap|pointoracle+bc": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|pos_extrap|latent+bc": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|combined|fm_id": {
+  "n": 12,
+  "rate": 0.5833333333333334,
+  "ci": [
+   0.3195073356553728,
+   0.8067425380947535
+  ]
+ },
+ "seen_shape|combined|fm": {
+  "n": 12,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.2425007574992425
+  ]
+ },
+ "seen_shape|combined|field+fm": {
+  "n": 12,
+  "rate": 0.08333333333333333,
+  "ci": [
+   0.014864709450773478,
+   0.35388592179859524
+  ]
+ },
+ "seen_shape|combined|oracle+fm": {
+  "n": 12,
+  "rate": 0.25,
+  "ci": [
+   0.08894003962896138,
+   0.53231033912066
+  ]
+ },
+ "seen_shape|combined|point+fm": {
+  "n": 12,
+  "rate": 0.16666666666666666,
+  "ci": [
+   0.04696414761482223,
+   0.44803635738467273
+  ]
+ },
+ "seen_shape|combined|pointoracle+fm": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|combined|latent+fm": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|combined|bc_id": {
+  "n": 12,
+  "rate": 0.5,
+  "ci": [
+   0.2537781703934222,
+   0.7462218296065778
+  ]
+ },
+ "seen_shape|combined|bc": {
+  "n": 12,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.2425007574992425
+  ]
+ },
+ "seen_shape|combined|field+bc": {
+  "n": 11,
+  "rate": 0.0,
+  "ci": [
+   2.7755575615628914e-17,
+   0.2588400172488141
+  ]
+ },
+ "seen_shape|combined|oracle+bc": {
+  "n": 11,
+  "rate": 0.09090909090909091,
+  "ci": [
+   0.01623175226282597,
+   0.3773646254862038
+  ]
+ },
+ "seen_shape|combined|point+bc": {
+  "n": 11,
+  "rate": 0.2727272727272727,
+  "ci": [
+   0.09745880573921467,
+   0.5656502930102463
+  ]
+ },
+ "seen_shape|combined|pointoracle+bc": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "seen_shape|combined|latent+bc": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "unseen_shape|train|fm_id": {
+  "n": 50,
+  "rate": 0.58,
+  "ci": [
+   0.4423319668777783,
+   0.7062520276543307
+  ]
+ },
+ "unseen_shape|train|fm": {
+  "n": 51,
+  "rate": 0.0392156862745098,
+  "ci": [
+   0.010820856268751206,
+   0.13216548986265267
+  ]
+ },
+ "unseen_shape|train|field+fm": {
+  "n": 50,
+  "rate": 0.22,
+  "ci": [
+   0.12753786224302288,
+   0.35241815689459555
+  ]
+ },
+ "unseen_shape|train|oracle+fm": {
+  "n": 50,
+  "rate": 0.26,
+  "ci": [
+   0.15871379651367384,
+   0.3955342198899992
+  ]
+ },
+ "unseen_shape|train|point+fm": {
+  "n": 50,
+  "rate": 0.3,
+  "ci": [
+   0.1910338908960936,
+   0.4375061227736339
+  ]
+ },
+ "unseen_shape|train|pointoracle+fm": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "unseen_shape|train|latent+fm": {
+  "n": 14,
+  "rate": 0.07142857142857142,
+  "ci": [
+   0.012721886112291636,
+   0.3146926955395781
+  ]
+ },
+ "unseen_shape|train|bc_id": {
+  "n": 53,
+  "rate": 0.49056603773584906,
+  "ci": [
+   0.36124029356039444,
+   0.6211669574670219
+  ]
+ },
+ "unseen_shape|train|bc": {
+  "n": 51,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.07004901388726806
+  ]
+ },
+ "unseen_shape|train|field+bc": {
+  "n": 50,
+  "rate": 0.16,
+  "ci": [
+   0.08337321362087696,
+   0.2851448096176598
+  ]
+ },
+ "unseen_shape|train|oracle+bc": {
+  "n": 50,
+  "rate": 0.18,
+  "ci": [
+   0.0977008273245379,
+   0.3079631945470261
+  ]
+ },
+ "unseen_shape|train|point+bc": {
+  "n": 50,
+  "rate": 0.34,
+  "ci": [
+   0.2243676963506106,
+   0.47846431458517147
+  ]
+ },
+ "unseen_shape|train|pointoracle+bc": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "unseen_shape|train|latent+bc": {
+  "n": 14,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.21531701192718142
+  ]
+ },
+ "unseen_shape|pitch_extrap|fm_id": {
+  "n": 43,
+  "rate": 0.3488372093023256,
+  "ci": [
+   0.22418398748963103,
+   0.49828492902901905
+  ]
+ },
+ "unseen_shape|pitch_extrap|fm": {
+  "n": 44,
+  "rate": 0.06818181818181818,
+  "ci": [
+   0.023458970172840127,
+   0.1822532133661719
+  ]
+ },
+ "unseen_shape|pitch_extrap|field+fm": {
+  "n": 43,
+  "rate": 0.18604651162790697,
+  "ci": [
+   0.0974163558010598,
+   0.3261729323530596
+  ]
+ },
+ "unseen_shape|pitch_extrap|oracle+fm": {
+  "n": 43,
+  "rate": 0.16279069767441862,
+  "ci": [
+   0.08116524502857546,
+   0.2997269533591824
+  ]
+ },
+ "unseen_shape|pitch_extrap|point+fm": {
+  "n": 43,
+  "rate": 0.06976744186046512,
+  "ci": [
+   0.024011153791962503,
+   0.18609268553034927
+  ]
+ },
+ "unseen_shape|pitch_extrap|pointoracle+fm": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "unseen_shape|pitch_extrap|latent+fm": {
+  "n": 14,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.21531701192718142
+  ]
+ },
+ "unseen_shape|pitch_extrap|bc_id": {
+  "n": 44,
+  "rate": 0.4090909090909091,
+  "ci": [
+   0.2768764387900683,
+   0.5559050735339343
+  ]
+ },
+ "unseen_shape|pitch_extrap|bc": {
+  "n": 45,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.07865426194064076
+  ]
+ },
+ "unseen_shape|pitch_extrap|field+bc": {
+  "n": 43,
+  "rate": 0.16279069767441862,
+  "ci": [
+   0.08116524502857546,
+   0.2997269533591824
+  ]
+ },
+ "unseen_shape|pitch_extrap|oracle+bc": {
+  "n": 43,
+  "rate": 0.06976744186046512,
+  "ci": [
+   0.024011153791962503,
+   0.18609268553034927
+  ]
+ },
+ "unseen_shape|pitch_extrap|point+bc": {
+  "n": 43,
+  "rate": 0.27906976744186046,
+  "ci": [
+   0.16746451821827157,
+   0.42691312900129397
+  ]
+ },
+ "unseen_shape|pitch_extrap|pointoracle+bc": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "unseen_shape|pitch_extrap|latent+bc": {
+  "n": 14,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.21531701192718142
+  ]
+ },
+ "unseen_shape|pos_extrap|fm_id": {
+  "n": 24,
+  "rate": 0.4583333333333333,
+  "ci": [
+   0.2789105835168143,
+   0.6492544644689336
+  ]
+ },
+ "unseen_shape|pos_extrap|fm": {
+  "n": 24,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.13798057582897535
+  ]
+ },
+ "unseen_shape|pos_extrap|field+fm": {
+  "n": 24,
+  "rate": 0.125,
+  "ci": [
+   0.04344255039315584,
+   0.3100428814785757
+  ]
+ },
+ "unseen_shape|pos_extrap|oracle+fm": {
+  "n": 24,
+  "rate": 0.20833333333333334,
+  "ci": [
+   0.0924468910478809,
+   0.40470844485235474
+  ]
+ },
+ "unseen_shape|pos_extrap|point+fm": {
+  "n": 24,
+  "rate": 0.2916666666666667,
+  "ci": [
+   0.14914460334164278,
+   0.49168063658709704
+  ]
+ },
+ "unseen_shape|pos_extrap|pointoracle+fm": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "unseen_shape|pos_extrap|latent+fm": {
+  "n": 3,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.5615060804490177
+  ]
+ },
+ "unseen_shape|pos_extrap|bc_id": {
+  "n": 24,
+  "rate": 0.5,
+  "ci": [
+   0.31427131627763083,
+   0.6857286837223692
+  ]
+ },
+ "unseen_shape|pos_extrap|bc": {
+  "n": 24,
+  "rate": 0.041666666666666664,
+  "ci": [
+   0.007393265354805126,
+   0.20242226248842232
+  ]
+ },
+ "unseen_shape|pos_extrap|field+bc": {
+  "n": 24,
+  "rate": 0.16666666666666666,
+  "ci": [
+   0.06678568000728924,
+   0.3585347038786943
+  ]
+ },
+ "unseen_shape|pos_extrap|oracle+bc": {
+  "n": 24,
+  "rate": 0.125,
+  "ci": [
+   0.04344255039315584,
+   0.3100428814785757
+  ]
+ },
+ "unseen_shape|pos_extrap|point+bc": {
+  "n": 24,
+  "rate": 0.375,
+  "ci": [
+   0.21159133433631458,
+   0.5729038096209293
+  ]
+ },
+ "unseen_shape|pos_extrap|pointoracle+bc": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "unseen_shape|pos_extrap|latent+bc": {
+  "n": 3,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.5615060804490177
+  ]
+ },
+ "unseen_shape|combined|fm_id": {
+  "n": 20,
+  "rate": 0.4,
+  "ci": [
+   0.21880396741419272,
+   0.613422057684794
+  ]
+ },
+ "unseen_shape|combined|fm": {
+  "n": 21,
+  "rate": 0.09523809523809523,
+  "ci": [
+   0.026518208796947246,
+   0.2891458386074067
+  ]
+ },
+ "unseen_shape|combined|field+fm": {
+  "n": 20,
+  "rate": 0.2,
+  "ci": [
+   0.0806563532712,
+   0.41602172202575993
+  ]
+ },
+ "unseen_shape|combined|oracle+fm": {
+  "n": 20,
+  "rate": 0.3,
+  "ci": [
+   0.14547527396899385,
+   0.5189767762289793
+  ]
+ },
+ "unseen_shape|combined|point+fm": {
+  "n": 20,
+  "rate": 0.4,
+  "ci": [
+   0.21880396741419272,
+   0.613422057684794
+  ]
+ },
+ "unseen_shape|combined|pointoracle+fm": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "unseen_shape|combined|latent+fm": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "unseen_shape|combined|bc_id": {
+  "n": 20,
+  "rate": 0.45,
+  "ci": [
+   0.25819502085709295,
+   0.6579179916924003
+  ]
+ },
+ "unseen_shape|combined|bc": {
+  "n": 21,
+  "rate": 0.0,
+  "ci": [
+   0.0,
+   0.15464382326420195
+  ]
+ },
+ "unseen_shape|combined|field+bc": {
+  "n": 19,
+  "rate": 0.15789473684210525,
+  "ci": [
+   0.055203710399278266,
+   0.3756592764317668
+  ]
+ },
+ "unseen_shape|combined|oracle+bc": {
+  "n": 19,
+  "rate": 0.10526315789473684,
+  "ci": [
+   0.029357941395096593,
+   0.313945504948417
+  ]
+ },
+ "unseen_shape|combined|point+bc": {
+  "n": 18,
+  "rate": 0.5,
+  "ci": [
+   0.2903070395897999,
+   0.7096929604102
+  ]
+ },
+ "unseen_shape|combined|pointoracle+bc": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "unseen_shape|combined|latent+bc": {
+  "n": 0,
+  "rate": NaN,
+  "ci": [
+   NaN,
+   NaN
+  ]
+ },
+ "port|seen_shape|gen|bc": {
+  "n": 25,
+  "rate": 0.0
+ },
+ "port|seen_shape|gen|bc_id": {
+  "n": 25,
+  "rate": 0.4
+ },
+ "port|seen_shape|gen|field+bc": {
+  "n": 26,
+  "rate": 0.0
+ },
+ "port|seen_shape|gen|field+fm": {
+  "n": 27,
+  "rate": 0.25925925925925924
+ },
+ "port|seen_shape|gen|fm": {
+  "n": 26,
+  "rate": 0.038461538461538464
+ },
+ "port|seen_shape|gen|fm_id": {
+  "n": 26,
+  "rate": 0.4230769230769231
+ },
+ "port|seen_shape|gen|oracle+bc": {
+  "n": 26,
+  "rate": 0.07692307692307693
+ },
+ "port|seen_shape|gen|oracle+fm": {
+  "n": 27,
+  "rate": 0.18518518518518517
+ },
+ "port|seen_shape|gen|point+bc": {
+  "n": 26,
+  "rate": 0.23076923076923078
+ },
+ "port|seen_shape|gen|point+fm": {
+  "n": 27,
+  "rate": 0.18518518518518517
+ },
+ "port|unseen_shape|A|bc": {
+  "n": 41,
+  "rate": 0.0
+ },
+ "port|unseen_shape|A|bc_id": {
+  "n": 41,
+  "rate": 0.6097560975609756
+ },
+ "port|unseen_shape|A|field+bc": {
+  "n": 39,
+  "rate": 0.3076923076923077
+ },
+ "port|unseen_shape|A|field+fm": {
+  "n": 39,
+  "rate": 0.2564102564102564
+ },
+ "port|unseen_shape|A|fm": {
+  "n": 41,
+  "rate": 0.04878048780487805
+ },
+ "port|unseen_shape|A|fm_id": {
+  "n": 39,
+  "rate": 0.6153846153846154
+ },
+ "port|unseen_shape|A|latent+bc": {
+  "n": 31,
+  "rate": 0.0
+ },
+ "port|unseen_shape|A|latent+fm": {
+  "n": 31,
+  "rate": 0.03225806451612903
+ },
+ "port|unseen_shape|A|oracle+bc": {
+  "n": 39,
+  "rate": 0.10256410256410256
+ },
+ "port|unseen_shape|A|oracle+fm": {
+  "n": 39,
+  "rate": 0.41025641025641024
+ },
+ "port|unseen_shape|A|point+bc": {
+  "n": 39,
+  "rate": 0.4358974358974359
+ },
+ "port|unseen_shape|A|point+fm": {
+  "n": 39,
+  "rate": 0.2564102564102564
+ },
+ "port|unseen_shape|B|bc": {
+  "n": 39,
+  "rate": 0.0
+ },
+ "port|unseen_shape|B|bc_id": {
+  "n": 39,
+  "rate": 0.38461538461538464
+ },
+ "port|unseen_shape|B|field+bc": {
+  "n": 35,
+  "rate": 0.14285714285714285
+ },
+ "port|unseen_shape|B|field+fm": {
+  "n": 36,
+  "rate": 0.1111111111111111
+ },
+ "port|unseen_shape|B|fm": {
+  "n": 38,
+  "rate": 0.02631578947368421
+ },
+ "port|unseen_shape|B|fm_id": {
+  "n": 38,
+  "rate": 0.3157894736842105
+ },
+ "port|unseen_shape|B|oracle+bc": {
+  "n": 35,
+  "rate": 0.22857142857142856
+ },
+ "port|unseen_shape|B|oracle+fm": {
+  "n": 36,
+  "rate": 0.08333333333333333
+ },
+ "port|unseen_shape|B|point+bc": {
+  "n": 35,
+  "rate": 0.34285714285714286
+ },
+ "port|unseen_shape|B|point+fm": {
+  "n": 36,
+  "rate": 0.2222222222222222
+ },
+ "port|unseen_shape|C|bc": {
+  "n": 43,
+  "rate": 0.023255813953488372
+ },
+ "port|unseen_shape|C|bc_id": {
+  "n": 43,
+  "rate": 0.5581395348837209
+ },
+ "port|unseen_shape|C|field+bc": {
+  "n": 44,
+  "rate": 0.09090909090909091
+ },
+ "port|unseen_shape|C|field+fm": {
+  "n": 44,
+  "rate": 0.20454545454545456
+ },
+ "port|unseen_shape|C|fm": {
+  "n": 44,
+  "rate": 0.022727272727272728
+ },
+ "port|unseen_shape|C|fm_id": {
+  "n": 43,
+  "rate": 0.5348837209302325
+ },
+ "port|unseen_shape|C|oracle+bc": {
+  "n": 44,
+  "rate": 0.06818181818181818
+ },
+ "port|unseen_shape|C|oracle+fm": {
+  "n": 44,
+  "rate": 0.2727272727272727
+ },
+ "port|unseen_shape|C|point+bc": {
+  "n": 44,
+  "rate": 0.3181818181818182
+ },
+ "port|unseen_shape|C|point+fm": {
+  "n": 44,
+  "rate": 0.25
+ },
+ "port|unseen_shape|D|bc": {
+  "n": 18,
+  "rate": 0.0
+ },
+ "port|unseen_shape|D|bc_id": {
+  "n": 18,
+  "rate": 0.05555555555555555
+ },
+ "port|unseen_shape|D|field+bc": {
+  "n": 18,
+  "rate": 0.05555555555555555
+ },
+ "port|unseen_shape|D|field+fm": {
+  "n": 18,
+  "rate": 0.16666666666666666
+ },
+ "port|unseen_shape|D|fm": {
+  "n": 17,
+  "rate": 0.17647058823529413
+ },
+ "port|unseen_shape|D|fm_id": {
+  "n": 17,
+  "rate": 0.23529411764705882
+ },
+ "port|unseen_shape|D|oracle+bc": {
+  "n": 18,
+  "rate": 0.1111111111111111
+ },
+ "port|unseen_shape|D|oracle+fm": {
+  "n": 18,
+  "rate": 0.0
+ },
+ "port|unseen_shape|D|point+bc": {
+  "n": 17,
+  "rate": 0.23529411764705882
+ },
+ "port|unseen_shape|D|point+fm": {
+  "n": 18,
+  "rate": 0.2222222222222222
+ }
+}

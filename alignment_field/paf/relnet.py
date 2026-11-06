@@ -170,8 +170,9 @@ class RelNet(nn.Module):
             m = torch.gather(mask, 1, idx)
             feats = [col, xyz / 0.05]
             if fmap is not None:
-                vv, uu = (idx // IMG).float(), (idx % IMG).float()
-                grid = torch.stack([(uu + 0.5) / IMG * 2 - 1, (vv + 0.5) / IMG * 2 - 1], -1)[:, None]
+                Hh, Ww = rgb.shape[1], rgb.shape[2]
+                vv, uu = (idx // Ww).float(), (idx % Ww).float()
+                grid = torch.stack([(uu + 0.5) / Ww * 2 - 1, (vv + 0.5) / Hh * 2 - 1], -1)[:, None]
                 dino = F.grid_sample(fmap, grid, mode="bilinear", align_corners=False)  # (B,384,1,M)
                 feats.insert(0, dino[:, :, 0].transpose(1, 2))
             h = self.point_in(torch.cat(feats, -1))

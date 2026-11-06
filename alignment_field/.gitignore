@@ -18,3 +18,10 @@ __pycache__/
 /data/
 /results/eval_v4_il_baseline/
 /results/eval_v4_il/
+/runs_v5/
+/runs_v6/
+/results/eval_v4_sid/
+/results/eval_v4_core/
+/results/eval_v4_latent/
+/results/eval_v5_handoff/
+/results/eval_v6/

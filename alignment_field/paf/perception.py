@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .config import CROP, N_POINTS, PC_BOX
+from .config import CROP, N_POINTS, PC_BOX, REL_CROP
 from .geometry import UP, port_axes
 
 
@@ -90,6 +90,15 @@ def canonical_points(obs, R_P: np.ndarray, rng: np.random.Generator):
     out[:, :3] = p[idx] / 0.05
     out[:, 3:] = rgb[idx]
     return out
+
+
+def rel_view(obs):
+    """RGB, depth and intrinsics of the relational-net window (REL_CROP)."""
+    r0, r1, c0, c1 = REL_CROP
+    K = np.array(obs.K, dtype=np.float32, copy=True)
+    K[0, 2] -= c0
+    K[1, 2] -= r0
+    return (np.ascontiguousarray(obs.rgb[r0:r1, c0:c1, :3]), np.ascontiguousarray(obs.depth_mm[r0:r1, c0:c1]), K)
 
 
 def rgb_crop(obs) -> np.ndarray:

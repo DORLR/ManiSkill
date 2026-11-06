@@ -1,0 +1,14 @@
+role          condition                      fm_id                    fm              field+fm             oracle+fm                 bc_id                    bc              field+bc             oracle+bc  skipped
+seen_shape    pitch_extrap    0.27 [0.10,0.57] n11   0.09 [0.02,0.38] n11                      -                     -  0.40 [0.17,0.69] n10   0.00 [-0.00,0.28] n10                      -                     -  1
+seen_shape    pos_extrap      0.33 [0.06,0.79] n3    0.00 [0.00,0.56] n3                       -                     -  0.00 [0.00,0.56] n3    0.00 [0.00,0.56] n3                       -                     -  4
+seen_shape    combined        0.58 [0.32,0.81] n12   0.00 [0.00,0.24] n12                      -                     -  0.50 [0.25,0.75] n12   0.00 [0.00,0.24] n12                      -                     -  1
+unseen_shape  train           0.58 [0.44,0.71] n50   0.04 [0.01,0.13] n51                      -                     -  0.49 [0.36,0.62] n53   0.00 [0.00,0.07] n51                      -                     -  2
+unseen_shape  pitch_extrap    0.35 [0.22,0.50] n43   0.07 [0.02,0.18] n44                      -                     -  0.41 [0.28,0.56] n44   0.00 [0.00,0.08] n45                      -                     -  5
+unseen_shape  pos_extrap      0.46 [0.28,0.65] n24   0.00 [0.00,0.14] n24                      -                     -  0.50 [0.31,0.69] n24   0.04 [0.01,0.20] n24                      -                     -  12
+unseen_shape  combined        0.40 [0.22,0.61] n20   0.10 [0.03,0.29] n21                      -                     -  0.45 [0.26,0.66] n20   0.00 [0.00,0.15] n21                      -                     -  13
+
+seen_shape    gen   fm_id: 11/26   fm: 1/26   field+fm: 0/0   oracle+fm: 0/0   bc_id: 10/25   bc: 0/25   field+bc: 0/0   oracle+bc: 0/0   
+unseen_shape  A     fm_id: 24/39   fm: 2/41   field+fm: 0/0   oracle+fm: 0/0   bc_id: 25/41   bc: 0/41   field+bc: 0/0   oracle+bc: 0/0   
+unseen_shape  B     fm_id: 12/38   fm: 1/38   field+fm: 0/0   oracle+fm: 0/0   bc_id: 15/39   bc: 0/39   field+bc: 0/0   oracle+bc: 0/0   
+unseen_shape  C     fm_id: 23/43   fm: 1/44   field+fm: 0/0   oracle+fm: 0/0   bc_id: 24/43   bc: 1/43   field+bc: 0/0   oracle+bc: 0/0   
+unseen_shape  D     fm_id: 4/17   fm: 3/17   field+fm: 0/0   oracle+fm: 0/0   bc_id: 1/18   bc: 0/18   field+bc: 0/0   oracle+bc: 0/0   

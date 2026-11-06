@@ -24,6 +24,11 @@ from .collect import establish_reference
 from .geometry import apply_port_motion, pose_from_state, relative_state
 
 
+# Control baseline target: 2 mm before the pre-insertion pose, aligned (the same
+# point the policy's in-distribution reference start P_id is drawn around).
+POINT_TARGET = np.array([-2.0, 0, 0, 0, 0, 0])
+
+
 def sample_ood_start(rng):
     t_lat = rng.uniform(*C.OOD_T, 2) * rng.choice([-1, 1], 2)
     t = np.r_[rng.uniform(*C.OOD_TX), t_lat]
@@ -38,14 +43,16 @@ def run_loop(robot, policy, H_pre, R_P, method, rng):
     for it in range(C.LOOP_MAX_ITERS):
         obs = robot.observe()
         u_true = relative_state(obs.H, H_pre, R_P) / C.SIGMA
-        if method == "oracle":
+        oracle = method in ("oracle", "point_oracle")
+        if oracle:
             u_est, p_id = u_true, float("nan")
-            v, du = policy.field_step(u_true)
-            target = apply_port_motion(obs.H, du * C.SIGMA, R_P)
         else:
             u_est, p_id = policy.estimate_state(obs, rng)
+        if method in ("point", "point_oracle"):
+            v, du = policy.point_step(u_est, POINT_TARGET)
+        else:
             v, du = policy.field_step(u_est)
-            target = policy.target_pose(obs, du)
+        target = apply_port_motion(obs.H, du * C.SIGMA, R_P) if oracle else policy.target_pose(obs, du)
         traj.append({"it": it, "u_true": u_true.tolist(), "u_est": u_est.tolist(), "p_id": p_id,
                      "v_norm": float(np.linalg.norm(v)), "step_norm": float(np.linalg.norm(du))})
         small = small + 1 if np.linalg.norm(du) < 0.5 else 0
@@ -57,8 +64,7 @@ def run_loop(robot, policy, H_pre, R_P, method, rng):
         if u_est[0] + du[0] > 1.0:
             du = du.copy()
             du[0] = 1.0 - u_est[0]
-            target = (apply_port_motion(obs.H, du * C.SIGMA, R_P) if method == "oracle"
-                      else policy.target_pose(obs, du))
+            target = apply_port_motion(obs.H, du * C.SIGMA, R_P) if oracle else policy.target_pose(obs, du)
         if not robot.move_to(target):
             traj[-1]["ik_fail"] = True
             break

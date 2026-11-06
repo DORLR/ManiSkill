@@ -10,6 +10,9 @@ for each IL policy P in {fm, bc} (RGB + joint angles, learned from demonstration
   oracle+P        true state -> same field -> P (upper bound for the field)
 and, as the policy's own reference on this shape/grasp:
   P_id            P from a start inside its training distribution
+  latent+P        latent field in P's own feature space (paf.latent_field) -> P
+  point+P         control: relational-net estimate -> straight to one fixed point (2 mm before
+                  the pre-insertion pose, aligned) -> P; pointoracle+P the same with the true state
 Cells: A-D (never trained on) x {train, pitch_extrap, pos_extrap, combined};
 training shapes x {pitch_extrap, pos_extrap, combined}.
 """
@@ -51,10 +54,14 @@ def _work(spec):
                 _C["robot"].env.close()
             _C["robot"], _C["port"] = Robot(spec["port"]), spec["port"]
         if "pols" not in _C:
-            need_field = any(k in spec["kinds"] for k in ("field", "oracle"))
+            need_field = any(k in spec["kinds"] for k in ("field", "oracle", "point", "point_oracle"))
             _C["pols"] = {n: (InsertionPolicy(spec["policies"][n]),
                               FieldPolicy(spec["fieldrels"][n], estimate="rel") if need_field else None)
                           for n in spec["policies"]}
+            if "latent" in spec["kinds"]:
+                from paf.latent_field import LatentField
+                _C["latent"] = {n: LatentField(spec["latents"][n], _C["pols"][n][0].model)
+                                for n in spec["policies"]}
         robot = _C["robot"]
         rng = np.random.default_rng(spec["seed"])
         for attempt in range(3):
@@ -74,7 +81,9 @@ def _work(spec):
             qid = np.r_[-0.002, rng.uniform(-0.0005, 0.0005, 2), rng.uniform(-1, 1, 3) * np.radians(0.5)]
             for name, (pol, fp), kind in [(n, _C["pols"][n], k) for n in _C["pols"]
                                           for k in spec["kinds"]]:
-                method = {"alone": name, "field": f"field+{name}", "oracle": f"oracle+{name}", "id": f"{name}_id"}[kind]
+                method = {"alone": name, "field": f"field+{name}", "oracle": f"oracle+{name}", "id": f"{name}_id",
+                          "point": f"point+{name}", "point_oracle": f"pointoracle+{name}",
+                          "latent": f"latent+{name}"}[kind]
                 ep = {"start": s, "method": method, "policy": name, "kind": kind}
                 start = qid if kind == "id" else q0
                 if not robot.move_to(pose_from_state(start, H_pre, R_P)):
@@ -82,12 +91,18 @@ def _work(spec):
                     res["episodes"].append(ep)
                     continue
                 ep["u0"] = (relative_state(robot.hand_pose(), H_pre, R_P) / C.SIGMA).tolist()
-                if kind in ("field", "oracle"):
+                if kind in ("field", "oracle", "point", "point_oracle"):
                     tr = run_loop(robot, fp, H_pre, R_P, kind, rng)
                     ep["field_iters"] = len(tr)
                     ep["u_after_field"] = (relative_state(robot.hand_pose(), H_pre, R_P) / C.SIGMA).tolist()
                     if tr:
                         ep["field_est_err"] = float(np.linalg.norm(np.array(tr[-1]["u_est"]) - np.array(tr[-1]["u_true"])))
+                if kind == "latent":
+                    tr = _C["latent"][name].run(robot)
+                    ep["field_iters"] = len(tr)
+                    ep["latent_E"] = [t["E"] for t in tr]
+                    ep["latent_ik_fail"] = any(t.get("ik_fail") for t in tr)
+                    ep["u_after_field"] = (relative_state(robot.hand_pose(), H_pre, R_P) / C.SIGMA).tolist()
                 ep.update(rollout_policy(robot, pol, H_pre, R_P, rng))
                 res["episodes"].append(ep)
                 _retreat(robot, H_pre, R_P)
@@ -103,6 +118,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--policies", nargs="+", required=True, help="name=run_dir, e.g. fm=runs_v4/policy")
     ap.add_argument("--fieldrels", nargs="+", required=True, help="name=dir with RelNet model.pt + that policy's field.pt")
+    ap.add_argument("--latents", nargs="+", default=[], help="name=dir with latent.pt (paf.latent_field)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--n-grasps", type=int, default=5)
     ap.add_argument("--n-starts", type=int, default=3)
@@ -138,6 +154,7 @@ def main():
     for s in specs:
         s.update(n_starts=args.n_starts, kinds=args.kinds, policies=dict(x.split("=") for x in args.policies),
                  fieldrels=dict(x.split("=") for x in args.fieldrels),
+                 latents=dict(x.split("=") for x in args.latents),
                  path=str(out / f"{s['role']}_{s['port']}_{s['condition']}_{s['idx']}.json"))
         if not Path(s["path"]).exists():
             todo.append(s)

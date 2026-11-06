@@ -27,6 +27,16 @@ import mplib  # noqa: E402
 import numpy as np  # noqa: E402
 
 import mani_skill.envs  # noqa: E402,F401  registers the task
+import importlib  # noqa: E402
+
+from . import config as _C  # noqa: E402
+
+# The task allows only its native 256x256 wrist camera. We keep its mount and
+# replace only the camera parameters by the D405 default stream (paf.config),
+# at runtime, without editing the task's files.
+_envmod = importlib.import_module("mani_skill.envs.tasks.tabletop.wminsertion_v2.env")
+_FOVY = float(2 * np.arctan((_C.CAM_H / 2) / ((_C.CAM_W / 2) / np.tan(np.radians(_C.CAM_HFOV_DEG / 2)))))
+_envmod._native_rgb256_config = lambda cfg: {"hand_camera": dict(width=_C.CAM_W, height=_C.CAM_H, fov=_FOVY)}
 from mani_skill.examples.motionplanning.panda.solutions.wminsertion_v2 import (  # noqa: E402
     ContinuousScriptedPolicyConfig,
     RandomContinuousScriptedPolicy,
@@ -54,6 +64,12 @@ class Obs:
     cam_T_world: np.ndarray  # (4, 4) extrinsic (OpenCV convention), world -> camera
     H: np.ndarray            # (4, 4) hand pose from FK
     qpos: np.ndarray         # (9,) measured joint angles
+
+
+def _min_range(depth_mm):
+    d = depth_mm.copy()
+    d[d < _C.DEPTH_MIN_MM] = 0  # below the D405 minimum range: no depth
+    return d
 
 
 class Robot:
@@ -106,7 +122,7 @@ class Robot:
         ext[:3, :] = _np(par["extrinsic_cv"])[0]
         return Obs(
             rgb=_np(cam["rgb"])[0],
-            depth_mm=_np(cam["depth"])[0, ..., 0],
+            depth_mm=_min_range(_np(cam["depth"])[0, ..., 0]),
             K=_np(par["intrinsic_cv"])[0],
             cam_T_world=ext,
             H=self.hand_pose(),

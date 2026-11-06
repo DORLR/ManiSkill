@@ -56,6 +56,7 @@ def main():
     ap.add_argument("--n-sweep", type=int, default=None)
     ap.add_argument("--n-push", type=int, default=None)
     ap.add_argument("--n-demo", type=int, default=0, help="insertion demonstrations per grasp (v4)")
+    ap.add_argument("--mix", default=None, help="view kinds and counts, e.g. handoff=30,approach=50 (overrides sweeps)")
     args = ap.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -70,7 +71,8 @@ def main():
             specs.append(dict(port=port, idx=i, seed=args.seed0 + 1000 * pi + i, pitch=pitch, grasp_pos=pos,
                               n_sweep=args.n_sweep if args.n_sweep is not None else C.N_SWEEP,
                               n_push=args.n_push if args.n_push is not None else C.N_PUSH, n_demo=args.n_demo,
-                              store_raw=args.store_raw, path=str(path)))
+                              store_raw=args.store_raw, path=str(path),
+                              mix={k: int(v) for k, v in (x.split("=") for x in args.mix.split(","))} if args.mix else None))
     print(f"{len(specs)} grasps to collect with {args.workers} workers", flush=True)
     t0 = time.time()
     ctx = mp.get_context("spawn")

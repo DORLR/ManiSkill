@@ -18,12 +18,12 @@ from paf import config as C
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", required=True)
+    ap.add_argument("--data", required=True, nargs="+", help="one or more globs")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
     files = []
     n = 0
-    for f in sorted(glob.glob(args.data)):
+    for f in sorted(sum((glob.glob(g) for g in args.data), [])):
         d = np.load(f, allow_pickle=False)
         if "depth_full" not in d.files or len(d["q"]) == 0:
             continue
@@ -33,9 +33,11 @@ def main():
         raise SystemExit(f"no shards with raw RGB-D found in {args.data} (collect with --store-raw)")
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    d0 = np.load(files[0], allow_pickle=False)
+    hw = d0["depth_full"].shape[1:]
     mm = {
-        "rgb": np.lib.format.open_memmap(out / "rgb.npy", "w+", np.uint8, (n, 256, 256, 3)),
-        "depth": np.lib.format.open_memmap(out / "depth.npy", "w+", np.int16, (n, 256, 256)),
+        "rgb": np.lib.format.open_memmap(out / "rgb.npy", "w+", np.uint8, (n, *hw, 3)),
+        "depth": np.lib.format.open_memmap(out / "depth.npy", "w+", np.int16, (n, *hw)),
     }
     small = {k: [] for k in ("K", "cam_T_world", "H", "R_P", "u", "push", "kind", "grasp")}
     ports, k0 = [], 0
