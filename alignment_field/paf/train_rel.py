@@ -88,7 +88,7 @@ def metrics(model, loader, dev, max_batches=None):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--packed", required=True)
+    ap.add_argument("--packed", required=True, nargs="+", help="one or more packed directories")
     ap.add_argument("--val-ports", nargs="+", default=[])
     ap.add_argument("--train-ports", nargs="+", default=None)
     ap.add_argument("--monitor-packed", default=None)
@@ -102,13 +102,17 @@ def main():
     ap.add_argument("--max-steps", type=int, default=0, help="smoke test: stop after this many steps")
     ap.add_argument("--h", type=float, default=0.5)
     ap.add_argument("--init", default=None, help="warm start from a previous model.pt")
+    ap.add_argument("--rel-kw", default="{}", help='RelNet kwargs as JSON, e.g. {"focus": 0.02, "n_cand": 4096}')
     args = ap.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     dev = "cuda"
     torch.manual_seed(0)
-    tr = Packed(args.packed, keep_ports=args.train_ports, drop_ports=args.val_ports)
-    va = Packed(args.packed, keep_ports=args.val_ports) if args.val_ports else None
+    from torch.utils.data import ConcatDataset
+    trs = [Packed(p, keep_ports=args.train_ports, drop_ports=args.val_ports) for p in args.packed]
+    vas = [Packed(p, keep_ports=args.val_ports) for p in args.packed] if args.val_ports else []
+    tr = trs[0] if len(trs) == 1 else ConcatDataset(trs)
+    va = None if not vas else (vas[0] if len(vas) == 1 else ConcatDataset([v for v in vas if len(v)]))
     mon = Packed(args.monitor_packed) if args.monitor_packed else None
     mk = lambda ds, sh: DataLoader(ds, args.bs, shuffle=sh, num_workers=args.workers, pin_memory=True,
                                    drop_last=sh, persistent_workers=args.workers > 0)
@@ -117,7 +121,10 @@ def main():
     ml = mk(mon, False) if mon is not None else None
     print(f"train views {len(tr)}, val views {len(va) if va else 0}, monitor views {len(mon) if mon else 0}",
           flush=True)
-    model = RelNet(use_dino=not args.no_dino).to(dev)
+    rel_kw = json.loads(args.rel_kw)
+    model = RelNet(use_dino=not args.no_dino, **rel_kw).to(dev)
+    Path(args.out).mkdir(parents=True, exist_ok=True)
+    (Path(args.out) / "relnet_kw.json").write_text(json.dumps(rel_kw))
     if args.init:
         model.load_state_dict(torch.load(args.init, map_location=dev))
     params = [p for p in model.parameters() if p.requires_grad]
@@ -168,8 +175,8 @@ def main():
     # the field is unchanged: fit to the ID set (push successes of training shapes)
     # straight-push ID set (v3 style); v4 has no push trials and fits its field to the
     # insertion policy's measured successes instead (scripts/measure_id.py)
-    s = tr.small
-    sel = tr.idx[s["push"][tr.idx] == 1]
+    s = trs[0].small
+    sel = trs[0].idx[s["push"][trs[0].idx] == 1]
     M = s["u"][sel]
     fit = None
     if len(M) >= 10:

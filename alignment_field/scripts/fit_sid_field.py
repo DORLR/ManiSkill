@@ -100,6 +100,8 @@ def main():
     print(json.dumps(fit), flush=True)
     torch.save(net.state_dict(), out / "field.pt")
     shutil.copy(f"{args.rel}/model.pt", out / "model.pt")
+    if Path(f"{args.rel}/relnet_kw.json").exists():
+        shutil.copy(f"{args.rel}/relnet_kw.json", out / "relnet_kw.json")
     (out / "summary.json").write_text(json.dumps({"fit": fit, "args": vars(args)}, indent=1))
 
 

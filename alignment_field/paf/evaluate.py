@@ -40,6 +40,8 @@ def run_loop(robot, policy, H_pre, R_P, method, rng):
     """Returns the trajectory of true and estimated states (sigma units)."""
     traj = []
     small = 0
+    if hasattr(policy, "reset_history"):
+        policy.reset_history()
     for it in range(C.LOOP_MAX_ITERS):
         obs = robot.observe()
         u_true = relative_state(obs.H, H_pre, R_P) / C.SIGMA

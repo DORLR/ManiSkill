@@ -55,9 +55,13 @@ def _work(spec):
             _C["robot"], _C["port"] = Robot(spec["port"]), spec["port"]
         if "pols" not in _C:
             need_field = any(k in spec["kinds"] for k in ("field", "oracle", "point", "point_oracle"))
+            need_field = need_field or "field_fuse" in spec["kinds"]
             _C["pols"] = {n: (InsertionPolicy(spec["policies"][n]),
                               FieldPolicy(spec["fieldrels"][n], estimate="rel") if need_field else None)
                           for n in spec["policies"]}
+            if "field_fuse" in spec["kinds"]:
+                _C["fused"] = {n: FieldPolicy(spec["fieldrels"][n], estimate="rel", share_from=_C["pols"][n][1], fuse=5)
+                               for n in spec["policies"]}
             if "latent" in spec["kinds"]:
                 from paf.latent_field import LatentField
                 _C["latent"] = {n: LatentField(spec["latents"][n], _C["pols"][n][0].model)
@@ -83,7 +87,7 @@ def _work(spec):
                                           for k in spec["kinds"]]:
                 method = {"alone": name, "field": f"field+{name}", "oracle": f"oracle+{name}", "id": f"{name}_id",
                           "point": f"point+{name}", "point_oracle": f"pointoracle+{name}",
-                          "latent": f"latent+{name}"}[kind]
+                          "latent": f"latent+{name}", "field_fuse": f"fieldfuse+{name}"}[kind]
                 ep = {"start": s, "method": method, "policy": name, "kind": kind}
                 start = qid if kind == "id" else q0
                 if not robot.move_to(pose_from_state(start, H_pre, R_P)):
@@ -91,6 +95,14 @@ def _work(spec):
                     res["episodes"].append(ep)
                     continue
                 ep["u0"] = (relative_state(robot.hand_pose(), H_pre, R_P) / C.SIGMA).tolist()
+                if kind == "field_fuse":
+                    ff = _C["fused"][name]
+                    ff.R_P = fp.R_P
+                    tr = run_loop(robot, ff, H_pre, R_P, "field", rng)
+                    ep["field_iters"] = len(tr)
+                    ep["u_after_field"] = (relative_state(robot.hand_pose(), H_pre, R_P) / C.SIGMA).tolist()
+                    if tr:
+                        ep["field_est_err"] = float(np.linalg.norm(np.array(tr[-1]["u_est"]) - np.array(tr[-1]["u_true"])))
                 if kind in ("field", "oracle", "point", "point_oracle"):
                     tr = run_loop(robot, fp, H_pre, R_P, kind, rng)
                     ep["field_iters"] = len(tr)

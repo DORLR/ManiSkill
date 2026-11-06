@@ -25,3 +25,7 @@ __pycache__/
 /results/eval_v4_latent/
 /results/eval_v5_handoff/
 /results/eval_v6/
+/runs_v7/
+/results/eval_v6/
+/results/eval_v6_fuse/
+/results/eval_v7/

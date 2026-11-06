@@ -132,8 +132,12 @@ class CrossBlock(nn.Module):
 
 
 class RelNet(nn.Module):
-    def __init__(self, d=256, layers=4, use_dino=True):
+    def __init__(self, d=256, layers=4, use_dino=True, focus=None, n_cand=N_CAND, n_plug=N_PLUG):
+        """focus: if set (m), sample board and plug points only within +-focus (lateral) of the
+        pin tips, located from the plug points themselves (the plug points closest to the board);
+        the front 3 cm of the plug. Concentrates the sampled points on the pins and the holes."""
         super().__init__()
+        self.focus, self.n_cand, self.n_plug = focus, n_cand, n_plug
         self.dino = DinoFeatures() if use_dino else None
         fdim = (384 if use_dino else 0) + 3 + 3          # dino + rgb + xyz
         self.point_in = mlp((fdim, 128, 128), last_act=True)
@@ -162,9 +166,11 @@ class RelNet(nn.Module):
         x_b = torch.nanquantile(xs, 0.8, dim=1, keepdim=True).nan_to_num(0.05)
         port = valid & lateral & ((p[..., 0] - x_b).abs() < BOARD_BAND)
         plug = valid & lateral & (p[..., 0] < x_b - BOARD_BAND) & (p[..., 0] > PLUG_X[0])
+        if self.focus is not None:
+            port, plug = self._focus(p, port, plug)
         out = []
-        for mask, sa, n in ((plug, self.sa_plug, N_PLUG), (port, self.sa_port, N_PORT)):
-            idx = _sample(mask, N_CAND)                                       # (B,M)
+        for mask, sa, n in ((plug, self.sa_plug, self.n_plug), (port, self.sa_port, N_PORT)):
+            idx = _sample(mask, self.n_cand)                                  # (B,M)
             xyz = torch.gather(p, 1, idx[..., None].expand(-1, -1, 3))
             col = torch.gather(rgbf, 1, idx[..., None].expand(-1, -1, 3))
             m = torch.gather(mask, 1, idx)
@@ -179,6 +185,20 @@ class RelNet(nn.Module):
             tok, _ = sa(xyz, h, m, n)
             out.append(tok)
         return out[0] + self.type_emb[0], out[1] + self.type_emb[1]
+
+    def _focus(self, p, port, plug):
+        """Pin-tip centre from the plug points nearest the board; keep points near it."""
+        x = torch.where(plug, p[..., 0], torch.full_like(p[..., 0], -1.0))
+        front = x.max(1, keepdim=True).values                                # (B,1)
+        tips = plug & (p[..., 0] > front - 0.004)
+        yz = torch.where(tips[..., None], p[..., 1:], torch.full_like(p[..., 1:], float("nan")))
+        c = yz.nanmedian(1).values.nan_to_num(0.0)                          # (B,2)
+        near = ((p[..., 1:] - c[:, None]).abs() < self.focus).all(-1)
+        port_f = port & near
+        plug_f = plug & near & (p[..., 0] > front - 0.03)
+        ok_port = port_f.sum(1, keepdim=True) >= 64
+        ok_plug = plug_f.sum(1, keepdim=True) >= 32
+        return torch.where(ok_port, port_f, port), torch.where(ok_plug, plug_f, plug)
 
     def forward(self, rgb, depth_mm, K, cam_T_world, H, R_P):
         a, b = self.tokens(rgb, depth_mm, K, cam_T_world, H, R_P)

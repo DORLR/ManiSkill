@@ -7,13 +7,18 @@ object pose (tests/test_no_truth_leak.py checks this module's source).
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import numpy as np
 import torch
 
 from . import config as C
 from . import noise as N
 from .field import FieldNet, step_from_field
-from .geometry import apply_port_motion
+from scipy.spatial.transform import Rotation
+
+from .geometry import apply_port_motion, relative_state
 from .geometry import port_axes
 from .model import AlignNet, RGBOnlyNet
 from .relnet import RelNet
@@ -21,8 +26,13 @@ from .perception import port_axes_from_obs, preprocess, rel_view, rgb_crop
 
 
 class FieldPolicy:
-    def __init__(self, run_dir, device="cuda", estimate="hat", share_from=None, depth_noise=None, noise_seed=0):
+    def __init__(self, run_dir, device="cuda", estimate="hat", share_from=None, depth_noise=None, noise_seed=0,
+                 fuse=1):
         self.dev = device
+        # fuse > 1: each estimate implies an estimate of the (fixed) pre-insertion pose given the
+        # current hand pose (FK); the median of the last `fuse` implied poses gives the state.
+        self.fuse = fuse
+        self.history = []
         self.depth_noise = depth_noise          # None or a level of paf.noise (sensor model)
         self.noise_rng = np.random.default_rng(noise_seed)
         # "hat" (point cloud + RGB), "pc" (point cloud only) or "rgb" (RGB only, no depth)
@@ -31,7 +41,9 @@ class FieldPolicy:
             self.model, self.field = share_from.model, share_from.field
         else:
             if estimate == "rel":
-                self.model = RelNet().to(device).eval()
+                kw_file = Path(f"{run_dir}/relnet_kw.json")
+                kw = json.loads(kw_file.read_text()) if kw_file.exists() else {}
+                self.model = RelNet(**kw).to(device).eval()
             else:
                 net = RGBOnlyNet if estimate == "rgb" else AlignNet
                 self.model = net(pretrained=False).to(device).eval()
@@ -69,7 +81,28 @@ class FieldPolicy:
             pts = torch.as_tensor(pc[None], device=self.dev, dtype=torch.float32)
             o = self.model(rgb, pts)
         u = o["q_pc" if self.estimate == "pc" else "q_hat"][0].float().cpu().numpy()
-        return u, float(torch.sigmoid(o["id_logit"][0]).item())
+        p_id = float(torch.sigmoid(o["id_logit"][0]).item())
+        if self.fuse > 1:
+            u = self._fused(obs.H, u)
+        return u, p_id
+
+    def reset_history(self):
+        self.history = []
+
+    def _fused(self, H, u):
+        """Median over recent frames of the pre-insertion pose implied by (H, u); FK only."""
+        q = u * C.SIGMA
+        R_P = self.R_P
+        p_est = H[:3, 3] - R_P @ q[:3]
+        R_est = R_P @ Rotation.from_rotvec(q[3:]).as_matrix().T @ R_P.T @ H[:3, :3]
+        self.history = (self.history + [(p_est, R_est)])[-self.fuse:]
+        p_med = np.median(np.array([h[0] for h in self.history]), 0)
+        R_ref = self.history[-1][1]
+        dv = np.median(np.array([Rotation.from_matrix(h[1] @ R_ref.T).as_rotvec() for h in self.history]), 0)
+        T_est = np.eye(4)
+        T_est[:3, :3] = Rotation.from_rotvec(dv).as_matrix() @ R_ref
+        T_est[:3, 3] = p_med
+        return relative_state(H, T_est, R_P) / C.SIGMA
 
     @torch.no_grad()
     def field_step(self, u):

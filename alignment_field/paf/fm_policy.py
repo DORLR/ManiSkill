@@ -136,6 +136,7 @@ def main():
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--init", default=None, help="warm start from a previous model.pt")
     ap.add_argument("--head", default="fm", choices=["fm", "bc"])
+    ap.add_argument("--frame-stride", type=int, default=1, help="keep every k-th recorded frame (memory)")
     args = ap.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -143,14 +144,14 @@ def main():
     torch.manual_seed(0)
     gen = list(generated_specs())
     tr_ports = [p for p in gen if p not in args.val_ports]
-    R, Q, A, _ = load_demos(args.data, tr_ports)
+    R, Q, A, _ = load_demos(args.data, tr_ports, args.frame_stride)
     try:
-        Rv, Qv, Av, _ = load_demos(args.data, args.val_ports)
+        Rv, Qv, Av, _ = load_demos(args.data, args.val_ports, args.frame_stride)
     except ValueError:  # no validation-shape demos (smoke tests): hold out 5 % of frames
         k = max(1, len(A) // 20)
         R, Rv, Q, Qv, A, Av = R[k:], R[:k], Q[k:], Q[:k], A[k:], A[:k]
     print(f"demo frames: train {len(A)}, val {len(Av)}", flush=True)
-    T = [torch.as_tensor(x).pin_memory() for x in (R, Q, A)]
+    T = [torch.from_numpy(x) for x in (R, Q, A)]  # no pinned copy: 62 GB container limit
     V = [torch.as_tensor(x) for x in (Rv, Qv, Av)]
     model = InsertPolicyNet(head=args.head).to(dev)
     if args.init:
@@ -179,9 +180,12 @@ def main():
         model.eval()
         with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
             idx = torch.randperm(len(Av))[:2048]
-            rgb, prop, act = [x[idx].to(dev) for x in V]
-            pred = model.sample(rgb, prop.float())[:, 0].float()
-            err = ((pred - act[:, 0].float()) * ACT_SCALE * 1000).abs().mean(0).cpu().numpy()  # mrad
+            errs = []
+            for c in idx.split(256):  # chunks: 256x256 crops would need >4 GB at once
+                rgb, prop, act = [x[c].to(dev) for x in V]
+                pred = model.sample(rgb, prop.float())[:, 0].float()
+                errs.append(((pred - act[:, 0].float()) * ACT_SCALE * 1000).abs().cpu())
+            err = torch.cat(errs).mean(0).numpy()  # mrad
         model.train()
         res = {"epoch": ep, "loss": tot / max(1, spe), "val_first_target_abs_err_mrad": err.round(4).tolist(),
                "minutes": (time.time() - t0) / 60}

@@ -21,7 +21,8 @@ from types import MappingProxyType
 
 import numpy as np
 
-N_GENERATED = 50
+N_GENERATED = 50      # G00..G49: the shape set of v3-v6 (all default shape lists use these)
+N_REGISTERED = 150    # G50..G149 added on 2026-11-06 for more training-shape diversity (prefix-stable)
 GEN_SEED = 20261105
 _DONE = False
 
@@ -61,7 +62,13 @@ def generated_specs(n=N_GENERATED, seed=GEN_SEED):
     return {f"G{i:02d}": _sample_spec_kwargs(rng) for i in range(n)}
 
 
-def register_generated(n=N_GENERATED, seed=GEN_SEED):
+def extra_specs(seed=GEN_SEED):
+    """The shapes beyond the v3-v6 set (G50..G149); same generator, so G00..G49 are unchanged."""
+    allspec = generated_specs(N_REGISTERED, seed)
+    return {k: v for i, (k, v) in enumerate(allspec.items()) if i >= N_GENERATED}
+
+
+def register_generated(n=N_REGISTERED, seed=GEN_SEED):
     global _DONE
     if _DONE:
         return
