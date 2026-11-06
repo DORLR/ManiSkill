@@ -27,8 +27,17 @@ from .perception import port_axes_from_obs, preprocess, rel_view, rgb_crop
 
 class FieldPolicy:
     def __init__(self, run_dir, device="cuda", estimate="hat", share_from=None, depth_noise=None, noise_seed=0,
-                 fuse=1):
+                 fuse=1, plug_dir=None):
         self.dev = device
+        # plug_dir: PlugNet run; the rotation is then composed from the episode-median plug angle,
+        # the FK hand rotation and the port axes (paf.plugnet), the translation stays RelNet's.
+        self.plug, self.thetas, self.tips = None, [], []
+        if plug_dir is not None:
+            from .plugnet import PlugNet
+            kw = json.loads(Path(f"{plug_dir}/plugnet_kw.json").read_text())
+            self.plug = PlugNet(**kw).to(device).eval()
+            self.plug.load_state_dict(torch.load(f"{plug_dir}/model.pt", map_location=device))
+            self.plug_frame = json.loads(Path(f"{plug_dir}/plug_frame.json").read_text())
         # fuse > 1: each estimate implies an estimate of the (fixed) pre-insertion pose given the
         # current hand pose (FK); the median of the last `fuse` implied poses gives the state.
         self.fuse = fuse
@@ -82,12 +91,33 @@ class FieldPolicy:
             o = self.model(rgb, pts)
         u = o["q_pc" if self.estimate == "pc" else "q_hat"][0].float().cpu().numpy()
         p_id = float(torch.sigmoid(o["id_logit"][0]).item())
+        if self.plug is not None:
+            from .plugnet import compose
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                th = float(self.plug(t(rgb, torch.uint8), t(depth, torch.int16), t(K), t(obs.cam_T_world),
+                                     t(obs.H), t(self.R_P))[0])
+            self.thetas.append(th)
+            from .plugnet import tip_distance
+            self.tips += [x for x in tip_distance(t(depth, torch.int16), t(K), t(obs.cam_T_world), t(obs.H), t(self.R_P))
+                          if np.isfinite(x)]
+            L = 1000 * float(np.median(self.tips)) if self.tips else 37.0       # mm, pin tips ahead of the hand
+            r_p = np.degrees(compose(float(np.median(self.thetas)), obs.H, self.R_P, self.plug_frame)) / np.degrees(C.SIGMA_R)
+            # RelNet pins the pin-tip position well, its split into hand translation and rotation is
+            # ill-conditioned: keep its tip position, take the rotation from the plug angle (small angles).
+            y_tip = u[1] + L * np.radians(u[5])
+            z_tip = u[2] - L * np.radians(u[4])
+            u = u.copy()
+            u[1] = y_tip - L * np.radians(r_p[2])
+            u[2] = z_tip + L * np.radians(r_p[1])
+            u[3:] = r_p
         if self.fuse > 1:
             u = self._fused(obs.H, u)
         return u, p_id
 
     def reset_history(self):
         self.history = []
+        self.thetas = []
+        self.tips = []
 
     def _fused(self, H, u):
         """Median over recent frames of the pre-insertion pose implied by (H, u); FK only."""

@@ -55,10 +55,14 @@ def _work(spec):
             _C["robot"], _C["port"] = Robot(spec["port"]), spec["port"]
         if "pols" not in _C:
             need_field = any(k in spec["kinds"] for k in ("field", "oracle", "point", "point_oracle"))
-            need_field = need_field or "field_fuse" in spec["kinds"]
+            need_field = need_field or "field_fuse" in spec["kinds"] or "field_plug" in spec["kinds"]
             _C["pols"] = {n: (InsertionPolicy(spec["policies"][n]),
                               FieldPolicy(spec["fieldrels"][n], estimate="rel") if need_field else None)
                           for n in spec["policies"]}
+            if "field_plug" in spec["kinds"]:
+                _C["plugged"] = {n: FieldPolicy(spec["fieldrels"][n], estimate="rel", share_from=_C["pols"][n][1],
+                                                fuse=spec.get("plug_fuse", 1), plug_dir=spec["plug_dir"])
+                                 for n in spec["policies"]}
             if "field_fuse" in spec["kinds"]:
                 _C["fused"] = {n: FieldPolicy(spec["fieldrels"][n], estimate="rel", share_from=_C["pols"][n][1], fuse=5)
                                for n in spec["policies"]}
@@ -87,7 +91,8 @@ def _work(spec):
                                           for k in spec["kinds"]]:
                 method = {"alone": name, "field": f"field+{name}", "oracle": f"oracle+{name}", "id": f"{name}_id",
                           "point": f"point+{name}", "point_oracle": f"pointoracle+{name}",
-                          "latent": f"latent+{name}", "field_fuse": f"fieldfuse+{name}"}[kind]
+                          "latent": f"latent+{name}", "field_fuse": f"fieldfuse+{name}",
+                          "field_plug": f"fieldplug+{name}"}[kind]
                 ep = {"start": s, "method": method, "policy": name, "kind": kind}
                 start = qid if kind == "id" else q0
                 if not robot.move_to(pose_from_state(start, H_pre, R_P)):
@@ -95,8 +100,8 @@ def _work(spec):
                     res["episodes"].append(ep)
                     continue
                 ep["u0"] = (relative_state(robot.hand_pose(), H_pre, R_P) / C.SIGMA).tolist()
-                if kind == "field_fuse":
-                    ff = _C["fused"][name]
+                if kind in ("field_fuse", "field_plug"):
+                    ff = _C["fused" if kind == "field_fuse" else "plugged"][name]
                     ff.R_P = fp.R_P
                     tr = run_loop(robot, ff, H_pre, R_P, "field", rng)
                     ep["field_iters"] = len(tr)
@@ -131,6 +136,8 @@ def main():
     ap.add_argument("--policies", nargs="+", required=True, help="name=run_dir, e.g. fm=runs_v4/policy")
     ap.add_argument("--fieldrels", nargs="+", required=True, help="name=dir with RelNet model.pt + that policy's field.pt")
     ap.add_argument("--latents", nargs="+", default=[], help="name=dir with latent.pt (paf.latent_field)")
+    ap.add_argument("--plug-dir", default=None, help="PlugNet run for the field_plug kind")
+    ap.add_argument("--plug-fuse", type=int, default=1, help="translation fusion window for field_plug")
     ap.add_argument("--out", required=True)
     ap.add_argument("--n-grasps", type=int, default=5)
     ap.add_argument("--n-starts", type=int, default=3)
@@ -166,7 +173,7 @@ def main():
     for s in specs:
         s.update(n_starts=args.n_starts, kinds=args.kinds, policies=dict(x.split("=") for x in args.policies),
                  fieldrels=dict(x.split("=") for x in args.fieldrels),
-                 latents=dict(x.split("=") for x in args.latents),
+                 latents=dict(x.split("=") for x in args.latents), plug_dir=args.plug_dir, plug_fuse=args.plug_fuse,
                  path=str(out / f"{s['role']}_{s['port']}_{s['condition']}_{s['idx']}.json"))
         if not Path(s["path"]).exists():
             todo.append(s)

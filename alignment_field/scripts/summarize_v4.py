@@ -8,8 +8,8 @@ import json
 import math
 from collections import defaultdict
 
-METHODS = ("fm_id", "fm", "field+fm", "oracle+fm", "point+fm", "pointoracle+fm", "latent+fm", "fieldfuse+fm",
-           "bc_id", "bc", "field+bc", "oracle+bc", "point+bc", "pointoracle+bc", "latent+bc", "fieldfuse+bc")
+METHODS = ("fm_id", "fm", "field+fm", "oracle+fm", "point+fm", "pointoracle+fm", "latent+fm", "fieldfuse+fm", "fieldplug+fm",
+           "bc_id", "bc", "field+bc", "oracle+bc", "point+bc", "pointoracle+bc", "latent+bc", "fieldfuse+bc", "fieldplug+bc")
 
 
 def wilson(k, n, z=1.96):
