@@ -65,3 +65,20 @@ Gaussian diffusion (1000 steps, linear, learned sigma), EMA 0.9999.
 
 ## 6. Change log
 * 2026-11-07: package created; expert audit; float-depth twin camera; wm_v1 collection started.
+* 2026-11-07 (Toronto ~02:00): first wm_v1 run stopped at 321 grasps: a generated shape whose
+  environment cannot be built raised outside the per-grasp guard and ended the pool (fixed:
+  the grasp is recorded as failed). Findings from those 321 grasps:
+  - reference insertion by grasp position: 85-100 % for -30..-12 mm, 2/36 for -12..-10 mm
+    (expert exceeds its 800-step budget; likely the fingers reach the board first, not verified).
+    The upper position-extrapolation band [-12, -10] mm is therefore almost never insertable in
+    this environment; only [-30, -28] mm is a usable extrapolation band. To be decided with the user.
+  - given a reference insertion, far-start expert insertions succeeded 97 % (insert + perturbed).
+  - contact trials: lateral offset 0 mm inserted 209/213, 0-0.5 mm 89/199, 0.5-1 mm 65/180,
+    1-2 mm 32/341, 2-3 mm 1/352.
+  - placement failures (IK branch jumps near joint limits) now fall back to an MPlib RRT path.
+* 2026-11-07: per-pixel segmentation (plug / robot / board / table / other) added as a label for a
+  segmentation network (user: real-robot masks come from annotation or an off-the-shelf
+  segmenter); schema wm-traj-2. wm_v1 re-collected from scratch so that every file has masks.
+* Measured depth coverage (320 x 320 crop): board and holes 100 %, plug 28 % of its pixels (the
+  housing part nearer than the D405 7 cm minimum range has no depth; the front of the housing and
+  the pins have), whole crop 77 %. Plug points per frame: about 700-9 600, 6-43 mm ahead of the hand.

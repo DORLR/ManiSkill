@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from typing import Callable
 
+import mplib
 import numpy as np
 import sapien
 from transforms3d.euler import euler2quat
@@ -36,6 +37,10 @@ from mani_skill.examples.motionplanning.panda.solutions.wminsertion_v2.scripted 
 
 from .robot import Robot
 from .sampling import Offset
+from .._paths import use_alignment_field
+
+use_alignment_field()
+from paf.geometry import T_to_pose, pose_distance  # noqa: E402
 
 SAFE_GAP_M = 0.012          # Chongyu's transport_tip_gap_m
 PUSH_SPEED_M_S = 0.003      # his insertion speed
@@ -170,13 +175,31 @@ class Expert:
     def _tcp_T(self, ex: _Execution, rel: sapien.Pose) -> np.ndarray:
         return ex._tcp(rel).to_transformation_matrix()
 
+    def _planned_move(self, T: np.ndarray, tol_m: float = 3e-4, tol_deg: float = 0.2) -> bool:
+        """Fallback when the straight waypoint path is refused (IK branch jump): an MPlib RRT path,
+        executed as joint commands, then held until the arm settles; succeeds if the hand ends
+        within tol of T (checked by FK)."""
+        p, q = T_to_pose(T)
+        res = self.robot.planner.plan_pose(mplib.Pose(p, q), self.robot.qpos(), time_step=0.05, planning_time=2.0)
+        if res.get("status") != "Success":
+            return False
+        path = np.asarray(res["position"])
+        for qa in path:
+            self.robot._command(qa[:7], 1)
+        self.robot._command(path[-1][:7], 40)
+        dt, dr = pose_distance(self.robot.hand_pose(), T)
+        return dt < tol_m and np.degrees(dr) < tol_deg
+
+    def _move(self, T: np.ndarray) -> bool:
+        return self.robot.move_to(T) or self._planned_move(T)
+
     def to_safe_from_spawn(self) -> bool:
         """After reset: lift in world z at the spawn XY, then move to the aligned safe standoff."""
         ex = self._execution()
         safe = self._tcp_T(ex, ex.safe)
         lift = self.robot.hand_pose().copy()
         lift[2, 3] = safe[2, 3]
-        return self.robot.move_to(lift) and self.robot.move_to(safe)
+        return (self.robot.move_to(lift) and self.robot.move_to(safe)) or self._planned_move(safe)
 
     def retreat(self) -> bool:
         """Back out along the insertion axis to the safe gap, keeping lateral offset and attitude."""
@@ -185,18 +208,18 @@ class Expert:
         out = ex._outside_pose(SAFE_GAP_M, np.asarray(rel.p[1:]), np.asarray(rel.q))
         if float(rel.p[0]) >= float(out.p[0]):  # already further out than the safe gap
             return True
-        return self.robot.move_to(self._tcp_T(ex, out))
+        return self.robot.move_to(self._tcp_T(ex, out))  # straight out only: the pins may be in the holes
 
     def move_to_offset(self, off: Offset) -> bool:
-        """Retreat, then go to the start; if the direct planner path is refused (IK branch
-        jump), go through the aligned safe standoff first."""
+        """Retreat, then go to the start: straight path, else through the aligned safe standoff,
+        else an RRT path."""
         ex = self._execution()
         if not self.retreat():
             return False
         target = self._tcp_T(ex, ex.offset_pose(off))
         if self.robot.move_to(target):
             return True
-        return self.robot.move_to(self._tcp_T(ex, ex.safe)) and self.robot.move_to(target)
+        return (self.robot.move_to(self._tcp_T(ex, ex.safe)) and self.robot.move_to(target)) or self._planned_move(target)
 
     # ------------------------------------------------- recorded trajectories
     def run(self, kind: str, on_step: StepCallback, seed_offset: int, **kw) -> dict:

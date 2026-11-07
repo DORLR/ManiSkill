@@ -22,12 +22,24 @@ def _init(out: str, cfg: dict):
 
 
 def _work(spec: GraspSpec) -> dict:
+    """One grasp. An environment that cannot be built (some generated shapes cannot realise the
+    default grasp) marks this grasp as failed instead of stopping the pool."""
     from ..env.robot import Robot
     from .episode import collect_grasp
-    if _STATE["port"] != spec.port:
-        if _STATE["robot"] is not None:
-            _STATE["robot"].env.close()
-        _STATE["robot"], _STATE["port"] = Robot(spec.port), spec.port
+    try:
+        if _STATE["port"] != spec.port:
+            if _STATE["robot"] is not None:
+                _STATE["robot"].env.close()
+            _STATE["robot"], _STATE["port"] = None, None
+            _STATE["robot"], _STATE["port"] = Robot(spec.port), spec.port
+    except Exception as exc:
+        summary = {"grasp": spec.key, "port": spec.port, "condition": spec.condition, "pitch_deg": spec.pitch,
+                   "grasp_pos_m": spec.grasp_pos, "seed": spec.seed, "trajectories": [], "bytes": 0,
+                   "reference_ok": False, "error": f"environment: {type(exc).__name__}: {exc}", "seconds": 0.0}
+        gdir = _STATE["out"] / spec.port / spec.key
+        gdir.mkdir(parents=True, exist_ok=True)
+        (gdir / "grasp.json").write_text(json.dumps(summary))
+        return summary
     return collect_grasp(_STATE["robot"], spec, _STATE["out"], _STATE["cfg"])
 
 

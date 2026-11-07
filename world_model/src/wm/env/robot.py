@@ -39,11 +39,16 @@ DEPTH_MIN_M = _C.DEPTH_MIN_MM / 1000.0
 _FLOAT_SHADER = os.path.join(os.path.dirname(sapien.__file__), "vulkan_shader", "default")
 
 
+SEG_CLASSES = ("other", "plug", "robot", "board", "table")  # uint8 class ids 0..4
+
+
 @dataclass
 class Frame:
-    """One wrist-camera observation, cropped. Everything here exists on a real robot."""
+    """One wrist-camera observation, cropped. Everything here exists on a real robot
+    (the segmentation as an annotation or an off-the-shelf segmenter's output)."""
     rgb: np.ndarray          # (320, 320, 3) uint8
     depth: np.ndarray        # (320, 320) uint16, units of DEPTH_UNIT_M, 0 = no return
+    seg: np.ndarray          # (320, 320) uint8, index into SEG_CLASSES
     K: np.ndarray            # (3, 3) intrinsics of the crop
     cam_T_world: np.ndarray  # (4, 4) world -> camera (OpenCV), from FK and the hand-eye mount
     qpos: np.ndarray         # (9,) measured joint angles
@@ -67,7 +72,23 @@ class Robot(_ea.Robot):
     def reset(self, seed: int, pitch_deg: float, grasp_pos_m: float):
         info = super().reset(seed, pitch_deg, grasp_pos_m)
         self._attach_twin()
+        self._seg_lut = self._segmentation_lut()
         return info
+
+    def _segmentation_lut(self) -> np.ndarray:
+        """Per-scene segmentation id -> class id (SEG_CLASSES)."""
+        lut = np.zeros(1 << 16, np.uint8)
+        for link in self.base.agent.robot.get_links():
+            cls = 1 if link.name == "wm_charger" else 2
+            for o in link._objs:
+                lut[int(o.entity.per_scene_id)] = cls
+        for actor in self.base.scene.get_all_actors():
+            name = actor.name.lower()
+            cls = 3 if ("receptacle" in name or "socket" in name or "board" in name) else \
+                4 if ("table" in name or "ground" in name) else 0
+            for i in np.atleast_1d(np.asarray(actor.per_scene_id)):
+                lut[int(i)] = cls
+        return lut
 
     # ------------------------------------------------------------------ camera
     def _camera(self):
@@ -92,6 +113,7 @@ class Robot(_ea.Robot):
         cam.capture()
         self._twin.take_picture()
         rgb = _ea._np(cam.get_picture("Color"))[0, ..., :3]
+        seg_id = _ea._np(cam.get_picture("PositionSegmentation"))[0, ..., 3].astype(np.int64) & 0xFFFF
         depth = -np.asarray(self._twin.get_picture("Position"))[..., 2].astype(np.float64)
         depth[depth < DEPTH_MIN_M] = 0.0            # D405 minimum range; also no return
         ext = np.eye(4)
@@ -101,5 +123,6 @@ class Robot(_ea.Robot):
         K[0, 2] -= c0
         K[1, 2] -= r0
         d = np.clip(np.round(depth[r0:r1, c0:c1] / DEPTH_UNIT_M), 0, 65535).astype(np.uint16)
-        return Frame(rgb=np.ascontiguousarray(rgb[r0:r1, c0:c1]).astype(np.uint8), depth=d, K=K,
+        return Frame(rgb=np.ascontiguousarray(rgb[r0:r1, c0:c1]).astype(np.uint8), depth=d,
+                     seg=self._seg_lut[seg_id[r0:r1, c0:c1]], K=K,
                      cam_T_world=ext, qpos=self.qpos(), hand=self.hand_pose())

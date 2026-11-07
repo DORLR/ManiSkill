@@ -11,9 +11,12 @@ Model inputs (all obtainable on a real robot)
     action       (T, 7)           float32 commanded arm joint targets (20 Hz)
     phase        (T,)             uint8   index into PHASES (expert phase label, bookkeeping only)
 
-Labels (also real-robot obtainable: one insertion per grasp + FK), stored in `meta`
-    H_star       inserted hand pose (4x4) of this grasp
-    axis         insertion direction (unit, world) from the hand motion of that insertion
+Labels (also real-robot obtainable)
+    seg          (N, 320, 320)    uint8   per-pixel class (SEG_CLASSES), the training target of the
+                                          segmentation network; on a real robot an annotation or an
+                                          off-the-shelf segmenter (e.g. SAM) gives it
+    in `meta`: H_star  inserted hand pose (4x4) of this grasp (FK of the one insertion)
+               axis    insertion direction (unit, world) from the hand motion of that insertion
 
 Evaluation only (simulator truth; never a model input, prefixed `eval_`)
     eval_rel     (T + 1, 7)       float32 charger pose in the socket-goal frame (x, y, z, qw, qx, qy, qz)
@@ -22,7 +25,8 @@ Evaluation only (simulator truth; never a model input, prefixed `eval_`)
 position, seeds, trajectory kind and its parameters, outcome, steps.
 """
 
-SCHEMA_VERSION = "wm-traj-1"
+SCHEMA_VERSION = "wm-traj-2"   # 2: + seg
+SEG_CLASSES = ("other", "plug", "robot", "board", "table")
 DEPTH_UNIT_M = 1e-4
 CONTROL_HZ = 20
 IMAGE_EVERY = 4  # 20 Hz control -> 5 Hz images

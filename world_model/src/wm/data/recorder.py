@@ -22,7 +22,7 @@ class Recorder:
     def begin(self):
         self.t = 0
         self.buf = {k: [] for k in ("qpos", "hand", "eval_rel", "action", "phase",
-                                    "rgb", "depth", "img_step", "cam_T_world")}
+                                    "rgb", "depth", "seg", "img_step", "cam_T_world")}
         self.K = None
         self._sample(image=self.images)
 
@@ -45,6 +45,7 @@ class Recorder:
         }
         if self.images:
             out.update(rgb=np.asarray(b["rgb"], np.uint8), depth=np.asarray(b["depth"], np.uint16),
+                       seg=np.asarray(b["seg"], np.uint8),
                        img_step=np.asarray(b["img_step"], np.int32),
                        cam_T_world=np.asarray(b["cam_T_world"], np.float32),
                        K=np.asarray(self.K, np.float32))
@@ -62,6 +63,7 @@ class Recorder:
         f = self.robot.frame()
         self.buf["rgb"].append(f.rgb)
         self.buf["depth"].append(f.depth)
+        self.buf["seg"].append(f.seg)
         self.buf["img_step"].append(self.t)
         self.buf["cam_T_world"].append(f.cam_T_world.astype(np.float32))
         self.K = f.K
