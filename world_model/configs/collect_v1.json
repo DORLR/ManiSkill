@@ -1,0 +1,14 @@
+{
+  "name": "wm_v1",
+  "seed": 4000000,
+  "generated_shapes": 150,
+  "train_grasps_per_shape": 4,
+  "band_grasps_per_shape": 4,
+  "grasps_per_test_condition": 3,
+  "trajectories": {"insert": 4, "perturbed": 2, "contact": 5, "random": 1},
+  "random_waypoints": 3,
+  "images": true,
+  "image_every": 4,
+  "rgb_codec": "jpeg",
+  "jpeg_quality": 95
+}

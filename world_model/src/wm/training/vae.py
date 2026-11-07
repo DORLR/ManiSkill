@@ -1,0 +1,93 @@
+"""Stage 1: token VAE.
+
+Loss = Chamfer(plug) + Chamfer(port) [mm] + w_pose * plug-point loss [mm]
+       + w_joint * joint L1 [mrad] + beta * KL.
+Model selection and the harm-only early stop use the OOD validation split.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import torch
+from torch.utils.data import DataLoader
+
+from ..data import index as data_index
+from ..data.datasets import FrameDataset
+from ..models.vae import TokenVAE
+from . import common
+from .losses import chamfer_mm, kl, plug_point_loss_mm
+
+
+def losses(out: dict, batch: dict, w: dict) -> dict:
+    l = {"chamfer_plug": chamfer_mm(out["plug_points"], out["plug_xyz"], out["plug_mask"]),
+         "chamfer_port": chamfer_mm(out["port_points"], out["port_xyz"], out["port_mask"]),
+         "plug_point": plug_point_loss_mm(out["R"], out["t"], out["plug_xyz"], out["plug_mask"],
+                                          batch["hand"], batch["h_star"], batch["R_P"]),
+         "joint_mrad": (out["joints"].float() - batch["qpos"][:, :7].float()).abs().mean() * 1000,
+         "kl": kl(out["mean"].float(), out["logvar"].float())}
+    l["total"] = (l["chamfer_plug"] + l["chamfer_port"] + w["pose"] * l["plug_point"]
+                  + w["joint"] * l["joint_mrad"] + w["beta"] * l["kl"])
+    return l
+
+
+@torch.no_grad()
+def evaluate(model, loader, w, device, max_batches: int) -> dict:
+    model.eval()
+    acc, n = {}, 0
+    for i, batch in enumerate(loader):
+        if i >= max_batches:
+            break
+        batch = common.to_device(batch, device)
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            l = losses(model(batch, sample=False), batch, w)
+        for k, v in l.items():
+            acc[k] = acc.get(k, 0.0) + float(v)
+        n += 1
+    model.train()
+    return {k: v / max(n, 1) for k, v in acc.items()}
+
+
+def build(cfg: dict, entries: list[dict] | None = None):
+    entries = entries if entries is not None else data_index.load(cfg["data"])
+    train_ds = FrameDataset(entries, "train")
+    val_ds = FrameDataset(entries, "ood_val")
+    mk = lambda ds, shuffle: DataLoader(ds, batch_size=cfg["batch_size"], shuffle=shuffle, drop_last=shuffle,
+                                        num_workers=cfg["workers"], persistent_workers=cfg["workers"] > 0)
+    return TokenVAE(**cfg["model"]), mk(train_ds, True), mk(val_ds, True)
+
+
+def train(cfg: dict, run_dir: Path, entries: list[dict] | None = None, max_steps: int | None = None) -> Path:
+    common.seed_all(cfg["seed"])
+    device = torch.device("cuda")
+    model, train_loader, val_loader = build(cfg, entries)
+    model.to(device)
+    opt = torch.optim.AdamW(common.trainable(model), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
+    log, w = common.Logger(run_dir), cfg["loss_weights"]
+    log(event="start", train_frames=len(train_loader.dataset), val_frames=len(val_loader.dataset),
+        params_m=sum(p.numel() for p in common.trainable(model)) / 1e6)
+    best, bad = float("inf"), 0
+    steps = max_steps or cfg["steps"]
+    for step, batch in zip(range(1, steps + 1), common.cycle(train_loader)):
+        batch = common.to_device(batch, device)
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            l = losses(model(batch), batch, w)
+        opt.zero_grad(set_to_none=True)
+        l["total"].backward()
+        torch.nn.utils.clip_grad_norm_(common.trainable(model), cfg["grad_clip"])
+        opt.step()
+        if step % cfg["log_every"] == 0 or step == steps:
+            log(step=step, **{f"train_{k}": float(v) for k, v in l.items()})
+        if step % cfg["eval_every"] == 0 or step == steps:
+            v = evaluate(model, val_loader, w, device, cfg["eval_batches"])
+            log(step=step, **{f"val_{k}": x for k, x in v.items()})
+            common.save_checkpoint(run_dir / "last.pt", model=model.state_dict(), opt=opt.state_dict(), step=step, cfg=cfg)
+            if v["plug_point"] < best:
+                best, bad = v["plug_point"], 0
+                common.save_checkpoint(run_dir / "best.pt", model=model.state_dict(), step=step, cfg=cfg)
+            else:
+                bad += 1
+                if bad >= cfg["patience"] and v["plug_point"] > best * (1 + cfg["harm_margin"]):
+                    log(event="early_stop_harm", step=step, best=best, current=v["plug_point"])
+                    break
+    return run_dir / "best.pt"

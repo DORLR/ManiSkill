@@ -1,0 +1,20 @@
+{
+  "data": "/mnt/storage2/qingxin/data/wm_v1",
+  "latents": "/mnt/storage2/qingxin/data/wm_v1_latents",
+  "vae_checkpoint": "/mnt/storage2/qingxin/runs/vae_v1/best.pt",
+  "seed": 0,
+  "size": "S",
+  "action_dim": 56,
+  "batch_size": 256,
+  "workers": 8,
+  "lr": 0.0001,
+  "grad_clip": 1.0,
+  "ema_decay": 0.9999,
+  "steps": 200000,
+  "log_every": 100,
+  "eval_every": 5000,
+  "eval_batches": 8,
+  "eval_sampling_steps": 50,
+  "patience": 5,
+  "harm_margin": 0.05
+}
