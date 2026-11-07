@@ -79,6 +79,13 @@ Gaussian diffusion (1000 steps, linear, learned sigma), EMA 0.9999.
 * 2026-11-07: per-pixel segmentation (plug / robot / board / table / other) added as a label for a
   segmentation network (user: real-robot masks come from annotation or an off-the-shelf
   segmenter); schema wm-traj-2. wm_v1 re-collected from scratch so that every file has masks.
+* 2026-11-07 02:05-04:00 (Toronto): wm_v1 collected, 40 workers on rs2. 1240 grasps, 13 701
+  trajectory files, 19 GB. Shapes G90, G93, G139 cannot be built (24 grasps). Reference insertion
+  1055/1240; by condition about 95 % except position extrapolation and combined (about 50 %:
+  the [-12, -10] mm side). Far-start expert insertions 4049/4220, perturbed 2023/2110, random motion
+  1009/1055. Contact trials 5275: inserted 1567, jammed 3534; inserted by lateral offset: 0 mm
+  794/836, 0-0.5 mm 391/722, 0.5-1 mm 222/755, 1-2 mm 155/1463, 2-3 mm 5/1496.
+  Most expert failures (421) are his own guard "commanded pin corners too close to the wall".
 * Measured depth coverage (320 x 320 crop): board and holes 100 %, plug 28 % of its pixels (the
   housing part nearer than the D405 7 cm minimum range has no depth; the front of the housing and
   the pins have), whole crop 77 %. Plug points per frame: about 700-9 600, 6-43 mm ahead of the hand.
