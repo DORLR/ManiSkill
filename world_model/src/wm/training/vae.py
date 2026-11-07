@@ -7,6 +7,7 @@ Model selection and the harm-only early stop use the OOD validation split.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import torch
@@ -66,7 +67,7 @@ def train(cfg: dict, run_dir: Path, entries: list[dict] | None = None, max_steps
     log, w = common.Logger(run_dir), cfg["loss_weights"]
     log(event="start", train_frames=len(train_loader.dataset), val_frames=len(val_loader.dataset),
         params_m=sum(p.numel() for p in common.trainable(model)) / 1e6)
-    best, bad = float("inf"), 0
+    best, bad, skipped = float("inf"), 0, 0
     steps = max_steps or cfg["steps"]
     for step, batch in zip(range(1, steps + 1), common.cycle(train_loader)):
         batch = common.to_device(batch, device)
@@ -74,13 +75,23 @@ def train(cfg: dict, run_dir: Path, entries: list[dict] | None = None, max_steps
             l = losses(model(batch), batch, w)
         opt.zero_grad(set_to_none=True)
         l["total"].backward()
-        torch.nn.utils.clip_grad_norm_(common.trainable(model), cfg["grad_clip"])
+        gn = torch.nn.utils.clip_grad_norm_(common.trainable(model), cfg["grad_clip"])
+        if not (torch.isfinite(l["total"]) and torch.isfinite(gn)):
+            skipped += 1                       # never apply a non-finite update
+            log(step=step, event="skipped_nonfinite_step", skipped=skipped)
+            if skipped >= cfg.get("max_skipped", 50):
+                log(event="stop_nonfinite", step=step)
+                break
+            continue
         opt.step()
         if step % cfg["log_every"] == 0 or step == steps:
-            log(step=step, **{f"train_{k}": float(v) for k, v in l.items()})
+            log(step=step, grad_norm=float(gn), **{f"train_{k}": float(v) for k, v in l.items()})
         if step % cfg["eval_every"] == 0 or step == steps:
             v = evaluate(model, val_loader, w, device, cfg["eval_batches"])
             log(step=step, **{f"val_{k}": x for k, x in v.items()})
+            if not math.isfinite(v["plug_point"]):
+                log(event="stop_nonfinite_validation", step=step)
+                break
             common.save_checkpoint(run_dir / "last.pt", model=model.state_dict(), opt=opt.state_dict(), step=step, cfg=cfg)
             if v["plug_point"] < best:
                 best, bad = v["plug_point"], 0

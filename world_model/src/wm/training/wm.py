@@ -13,6 +13,7 @@ Evaluation on the OOD validation split:
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import torch
@@ -85,7 +86,7 @@ def train(cfg: dict, run_dir: Path, entries: list[dict] | None = None, max_steps
     log = common.Logger(run_dir)
     log(event="start", train_windows=len(train_loader.dataset), val_windows=len(val_loader.dataset),
         params_m=sum(p.numel() for p in model.parameters()) / 1e6, scale=scale)
-    best, bad = float("inf"), 0
+    best, bad, skipped = float("inf"), 0, 0
     steps = max_steps or cfg["steps"]
     for step, batch in zip(range(1, steps + 1), common.cycle(train_loader)):
         batch = common.to_device(batch, device)
@@ -95,7 +96,14 @@ def train(cfg: dict, run_dir: Path, entries: list[dict] | None = None, max_steps
             loss = diffusion.training_losses(model, x, t, dict(y=batch["y"], x_cond=x_cond, rel_t=batch["rel_t"]))["loss"].mean()
         opt.zero_grad(set_to_none=True)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), cfg["grad_clip"])
+        gn = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg["grad_clip"])
+        if not (torch.isfinite(loss) and torch.isfinite(gn)):   # never apply a non-finite update
+            skipped += 1
+            log(step=step, event="skipped_nonfinite_step", skipped=skipped)
+            if skipped >= cfg.get("max_skipped", 50):
+                log(event="stop_nonfinite", step=step)
+                break
+            continue
         opt.step()
         ema.update(model)
         if step % cfg["log_every"] == 0 or step == steps:
@@ -106,6 +114,9 @@ def train(cfg: dict, run_dir: Path, entries: list[dict] | None = None, max_steps
             common.save_checkpoint(run_dir / "last.pt", model=model.state_dict(), ema=ema.model.state_dict(),
                                    opt=opt.state_dict(), step=step, cfg=cfg)
             key = v["pred_joint_mrad"] + v["pred_pose_trans_mm"]
+            if not math.isfinite(key):
+                log(event="stop_nonfinite_validation", step=step)
+                break
             if key < best:
                 best, bad = key, 0
                 common.save_checkpoint(run_dir / "best.pt", ema=ema.model.state_dict(), step=step, cfg=cfg)

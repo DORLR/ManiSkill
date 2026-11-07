@@ -28,7 +28,9 @@ class TokenVAE(nn.Module):
         self.tokenizer = RelationTokenizer(**(tokenizer or {}))
         d = self.tokenizer.d
         self.latent_ch, self.n_dec_plug = latent_ch, n_dec_plug
-        self.to_moments = nn.Linear(d, 2 * latent_ch)
+        # LayerNorm before the moments keeps token magnitudes bounded (without it the latent mean
+        # drifted to ~50 and then exploded to ~6e5 at step 1145 of the first run; KL became 8e9).
+        self.to_moments = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, 2 * latent_ch))
         self.from_latent = nn.Linear(latent_ch, dec_d)
         self.pos = nn.Parameter(torch.randn(N_TOKENS, dec_d) * 0.02)
         layer = lambda: nn.TransformerEncoderLayer(dec_d, 8, 2 * dec_d, batch_first=True, norm_first=True)

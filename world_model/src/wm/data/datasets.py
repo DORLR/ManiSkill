@@ -21,6 +21,13 @@ from . import schema
 
 WM_STRIDE = 2      # images between world-model steps: 2 x 0.2 s = 0.4 s (8 control steps)
 CONTEXT = 4
+# The board is mounted upright; a fitted insertion axis with a vertical component above this
+# means RANSAC found another plane (0.3 % of wm_v1 trajectories). Those trajectories are skipped.
+MAX_AXIS_UP = 0.1
+
+
+def port_axes_ok(entry: dict) -> bool:
+    return entry["R_P"] is not None and abs(entry["R_P"][2][0]) <= MAX_AXIS_UP
 
 
 def _jpeg(f, j: int) -> np.ndarray:
@@ -30,7 +37,7 @@ def _jpeg(f, j: int) -> np.ndarray:
 
 class FrameDataset(Dataset):
     def __init__(self, entries: list[dict], split: str, kinds: tuple[str, ...] | None = None):
-        self.entries = [e for e in entries if e["split"] == split and e["R_P"] is not None and e["n_images"]
+        self.entries = [e for e in entries if e["split"] == split and port_axes_ok(e) and e["n_images"]
                         and (kinds is None or e["kind"] in kinds)]
         self.items = [(i, j) for i, e in enumerate(self.entries) for j in range(e["n_images"])]
 
@@ -60,7 +67,7 @@ class LatentWindowDataset(Dataset):
         self.scale = scale
         self.files, self.items = [], []
         for e in entries:
-            if e["split"] != split or not e["n_images"]:
+            if e["split"] != split or not e["n_images"] or not port_axes_ok(e):
                 continue
             p = Path(latent_root) / Path(e["path"]).relative_to(data_root)
             if not p.exists():

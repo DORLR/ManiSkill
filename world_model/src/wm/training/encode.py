@@ -1,6 +1,8 @@
 """Frozen VAE -> latent mean of every recorded image, saved next to the trajectory's
 control data. Writes <out>/<relative trajectory path>.npz and <out>/stats.json with the
-latent scale (1 / std over the train split, as Stable Diffusion's 0.18215)."""
+latent scale (1 / RMS over the train split, as Stable Diffusion's 0.18215).
+
+Trajectories are read and decoded by DataLoader workers; the GPU encodes in batches."""
 
 from __future__ import annotations
 
@@ -9,49 +11,80 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from torch.utils.data import DataLoader, Dataset
 
 from ..data import store
+from ..data.datasets import port_axes_ok
 from ..models.vae import TokenVAE
 
 
+class _Trajectories(Dataset):
+    def __init__(self, entries: list[dict], data_root: Path, out: Path):
+        self.items = [(e, out / Path(e["path"]).relative_to(data_root)) for e in entries
+                      if e["n_images"] and port_axes_ok(e)]
+
+    def __len__(self):
+        return len(self.items)
+
+    def __getitem__(self, i):
+        e, dst = self.items[i]
+        if dst.exists():
+            return {"dst": str(dst), "cached": True, "split": e["split"]}
+        arrays, _ = store.load(e["path"])
+        steps = arrays["img_step"]
+        return {"dst": str(dst), "cached": False, "split": e["split"], "R_P": np.asarray(e["R_P"], np.float32),
+                "rgb": arrays["rgb"], "depth": arrays["depth"].astype(np.int32), "K": arrays["K"],
+                "cam_T_world": arrays["cam_T_world"], "hand_img": arrays["hand"][steps],
+                "qpos_img": arrays["qpos"][steps], "img_step": steps, "qpos": arrays["qpos"],
+                "action": arrays["action"]}
+
+
+def _keep(sample):
+    """Keep numpy arrays as they are (no automatic tensor conversion)."""
+    return sample
+
+
 @torch.no_grad()
-def encode_trajectory(model: TokenVAE, entry: dict, device, batch: int = 32) -> dict:
-    arrays, _ = store.load(entry["path"])
-    steps = arrays["img_step"]
-    n = len(steps)
-    R_P = torch.tensor(entry["R_P"], dtype=torch.float32, device=device)
+def _encode(model: TokenVAE, t: dict, device, batch: int) -> np.ndarray:
+    n = len(t["img_step"])
     means = []
     for a in range(0, n, batch):
         sl = slice(a, min(n, a + batch))
-        b = {"rgb": torch.from_numpy(arrays["rgb"][sl]), "depth": torch.from_numpy(arrays["depth"][sl].astype(np.int32)),
-             "K": torch.from_numpy(arrays["K"]).expand(sl.stop - sl.start, 3, 3),
-             "cam_T_world": torch.from_numpy(arrays["cam_T_world"][sl]),
-             "hand": torch.from_numpy(arrays["hand"][steps[sl]]), "qpos": torch.from_numpy(arrays["qpos"][steps[sl]])}
-        b = {k: v.to(device) for k, v in b.items()}
-        b["R_P"] = R_P.expand(sl.stop - sl.start, 3, 3)
+        m = sl.stop - sl.start
+        b = {"rgb": torch.from_numpy(t["rgb"][sl]), "depth": torch.from_numpy(t["depth"][sl]),
+             "K": torch.from_numpy(t["K"]).expand(m, 3, 3), "cam_T_world": torch.from_numpy(t["cam_T_world"][sl]),
+             "hand": torch.from_numpy(t["hand_img"][sl]), "qpos": torch.from_numpy(t["qpos_img"][sl]),
+             "R_P": torch.from_numpy(t["R_P"]).expand(m, 3, 3)}
+        b = {k: v.to(device, non_blocking=True) for k, v in b.items()}
         with torch.autocast("cuda", dtype=torch.bfloat16):
             mean, _, _ = model.encode(b)
         means.append(mean.float().cpu().numpy())
-    return {"mean": np.concatenate(means).astype(np.float16), "img_step": steps,
-            "qpos": arrays["qpos"], "action": arrays["action"], "hand": arrays["hand"][steps]}
+    return np.concatenate(means).astype(np.float16)
 
 
-def run(model: TokenVAE, entries: list[dict], data_root: Path, out: Path, device) -> float:
+def run(model: TokenVAE, entries: list[dict], data_root: Path, out: Path, device,
+        workers: int = 12, batch: int = 64) -> float:
     model.eval().to(device)
+    loader = DataLoader(_Trajectories(entries, data_root, out), batch_size=None, shuffle=False,
+                        num_workers=workers, prefetch_factor=2 if workers else None, collate_fn=_keep)
     sq, cnt = 0.0, 0
-    for e in entries:
-        if not e["n_images"] or e["R_P"] is None:
-            continue
-        dst = out / Path(e["path"]).relative_to(data_root)
-        if dst.exists():
-            d = dict(np.load(dst))
+    for k, t in enumerate(loader):
+        dst = Path(t["dst"])
+        if t["cached"]:
+            mean = np.load(dst)["mean"]
         else:
-            d = encode_trajectory(model, e, device)
+            mean = _encode(model, t, device, batch)
             dst.parent.mkdir(parents=True, exist_ok=True)
-            np.savez(dst, **d)
-        if e["split"] == "train":
-            m = d["mean"].astype(np.float64)
+            np.savez(dst, mean=mean, img_step=t["img_step"], qpos=t["qpos"], action=t["action"],
+                     hand=t["hand_img"])
+        if t["split"] == "train":
+            m = mean.astype(np.float64)
             sq, cnt = sq + float((m ** 2).sum()), cnt + m.size
-    scale = 1.0 / max(np.sqrt(sq / max(cnt, 1)), 1e-6)
+        if k % 500 == 0:
+            print(f"encoded {k}/{len(loader)}", flush=True)
+    if cnt == 0:
+        raise RuntimeError("no train-split latents: cannot compute the latent scale")
+    scale = 1.0 / max(np.sqrt(sq / cnt), 1e-6)
+    out.mkdir(parents=True, exist_ok=True)
     (out / "stats.json").write_text(json.dumps({"scale": scale, "train_values": cnt}))
     return scale
