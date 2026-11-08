@@ -178,3 +178,41 @@ def rollout_stability(rd: Reader, adapter, fk, trajs: list[dict], steps_ahead: i
     return {report_at[k]: {"trajectories": len(v["grid"]), "pose_grid_mm": _med(v["grid"]), "pose_angle_deg": _med(v["angle"]),
                            "adapter_joint_err_mrad": _med(v["joint_mrad"]), "hand_pos_err_mm": _med(v["hand_mm"]),
                            "latent_rms_ratio": _med(v["rms_ratio"])} for k, v in acc.items()}
+
+
+@torch.no_grad()
+def adapter_on_contact(adapter, data_root: str, split: str = "ood_val", dev=None) -> dict:
+    """Joint adapter on the contact trials (raw trajectories; no latents needed), per phase of the push:
+    free (before the plug reaches the hole: first 0.8 s of the push) and late (after 1.2 s, where jammed
+    trials are blocked), for jammed and inserted trials. Error of the adapter vs the rule "the joints
+    reach the commanded targets" (mrad, mean over the 8 predicted steps x 7 joints)."""
+    from ..data import index
+    from ..data.datasets import port_axes_ok
+    from .probes import PUSH_PHASE
+    rows = {}
+    for e in index.load(data_root):
+        if e["split"] != split or e["kind"] != "contact" or e.get("outcome") not in ("inserted", "jammed") or not port_axes_ok(e):
+            continue
+        with np.load(e["path"]) as f:
+            qpos, action, phase = f["qpos"].astype(np.float32), f["action"].astype(np.float32), f["phase"]
+        push = np.flatnonzero(phase == PUSH_PHASE)
+        if len(push) == 0:
+            continue
+        p0 = int(push[0])
+        for s in push[:-8]:
+            seg = "free" if s - p0 < 16 else ("late" if s - p0 >= 24 else None)
+            if seg is None:
+                continue
+            x, y = adapter_io(qpos, action, int(s))
+            rows.setdefault((e["outcome"], seg), []).append((x, y))
+    out = {}
+    for (outcome, seg), xy in sorted(rows.items()):
+        x = torch.tensor(np.stack([a for a, _ in xy]), device=dev)
+        y = torch.tensor(np.stack([b for _, b in xy]), device=dev)
+        pred = adapter(x)
+        cmd = x[:, -56:]
+        out[f"{outcome}/{seg}"] = {"windows": len(xy),
+                                   "adapter_err_mrad": round(float((pred - y).abs().mean() * 1000), 4),
+                                   "follow_command_err_mrad": round(float((cmd - y).abs().mean() * 1000), 4),
+                                   "joint_motion_mrad": round(float(y.abs().mean() * 1000), 4)}
+    return out

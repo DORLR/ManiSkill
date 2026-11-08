@@ -1,0 +1,26 @@
+{
+ "inserted/free": {
+  "windows": 11296,
+  "adapter_err_mrad": 0.0191,
+  "follow_command_err_mrad": 0.3213,
+  "joint_motion_mrad": 0.9834
+ },
+ "inserted/late": {
+  "windows": 78686,
+  "adapter_err_mrad": 0.0239,
+  "follow_command_err_mrad": 0.3305,
+  "joint_motion_mrad": 0.9692
+ },
+ "jammed/free": {
+  "windows": 27568,
+  "adapter_err_mrad": 0.0237,
+  "follow_command_err_mrad": 0.3293,
+  "joint_motion_mrad": 1.0109
+ },
+ "jammed/late": {
+  "windows": 15200,
+  "adapter_err_mrad": 0.1519,
+  "follow_command_err_mrad": 0.834,
+  "joint_motion_mrad": 0.5403
+ }
+}

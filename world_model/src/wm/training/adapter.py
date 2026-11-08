@@ -1,9 +1,10 @@
 """Joint adapter training (models/adapter.py).
 
-L1 on standardised outputs; validation on ood_val reports the joint error in mrad overall, on
-windows where the commands kept moving but the joints did not (blocked: mean |command - next
-measured| over the 8 steps > 5 mrad), and the same for the "joints follow the commands" rule
-(the assumption Ctrl-World's setting makes), so the adapter's value is visible.
+L1 on standardised outputs; validation on ood_val reports the joint error in mrad, next to the
+"joints reach the commanded targets" rule (the assumption of Ctrl-World's setting). The "blocked"
+counters use a 5 mrad gap that random validation windows never reach (logged 0 in the v3 run); the
+blocked case is checked on the contact trials by analysis/wm_checks.adapter_on_contact
+(scripts/analysis/check_adapter.py).
 """
 
 from __future__ import annotations
