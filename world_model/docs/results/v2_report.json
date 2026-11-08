@@ -1,0 +1,123 @@
+{
+ "trials": {
+  "train": [
+   2418,
+   1645
+  ],
+  "ood_val": [
+   2429,
+   1723
+  ]
+ },
+ "note": "[trials, jammed]; probes trained on train, scored on ood_val (held-out shapes)",
+ "probes": {
+  "push_start/latent/logistic": {
+   "balanced_acc": 0.689,
+   "auc": 0.759,
+   "jam_recall": 0.733,
+   "insert_recall": 0.646
+  },
+  "push_start/latent/mlp": {
+   "balanced_acc": 0.772,
+   "auc": 0.863,
+   "jam_recall": 0.87,
+   "insert_recall": 0.674
+  },
+  "push_start/joints/logistic": {
+   "balanced_acc": 0.61,
+   "auc": 0.597,
+   "jam_recall": 0.572,
+   "insert_recall": 0.649
+  },
+  "push_start/joints/mlp": {
+   "balanced_acc": 0.721,
+   "auc": 0.794,
+   "jam_recall": 0.836,
+   "insert_recall": 0.606
+  },
+  "push_start/truth/logistic": {
+   "balanced_acc": 0.833,
+   "auc": 0.927,
+   "jam_recall": 0.794,
+   "insert_recall": 0.873
+  },
+  "push_start/truth/mlp": {
+   "balanced_acc": 0.931,
+   "auc": 0.982,
+   "jam_recall": 0.936,
+   "insert_recall": 0.925
+  },
+  "push+0.4s/latent/logistic": {
+   "balanced_acc": 0.678,
+   "auc": 0.728,
+   "jam_recall": 0.661,
+   "insert_recall": 0.695
+  },
+  "push+0.4s/latent/mlp": {
+   "balanced_acc": 0.762,
+   "auc": 0.864,
+   "jam_recall": 0.883,
+   "insert_recall": 0.642
+  },
+  "push+0.4s/joints/logistic": {
+   "balanced_acc": 0.539,
+   "auc": 0.551,
+   "jam_recall": 0.486,
+   "insert_recall": 0.592
+  },
+  "push+0.4s/joints/mlp": {
+   "balanced_acc": 0.586,
+   "auc": 0.61,
+   "jam_recall": 0.715,
+   "insert_recall": 0.456
+  },
+  "push+0.4s/truth/logistic": {
+   "balanced_acc": 0.833,
+   "auc": 0.927,
+   "jam_recall": 0.794,
+   "insert_recall": 0.873
+  },
+  "push+0.4s/truth/mlp": {
+   "balanced_acc": 0.931,
+   "auc": 0.982,
+   "jam_recall": 0.936,
+   "insert_recall": 0.925
+  },
+  "push+0.8s/latent/logistic": {
+   "balanced_acc": 0.644,
+   "auc": 0.672,
+   "jam_recall": 0.608,
+   "insert_recall": 0.681
+  },
+  "push+0.8s/latent/mlp": {
+   "balanced_acc": 0.775,
+   "auc": 0.867,
+   "jam_recall": 0.889,
+   "insert_recall": 0.661
+  },
+  "push+0.8s/joints/logistic": {
+   "balanced_acc": 0.513,
+   "auc": 0.529,
+   "jam_recall": 0.413,
+   "insert_recall": 0.613
+  },
+  "push+0.8s/joints/mlp": {
+   "balanced_acc": 0.5,
+   "auc": 0.516,
+   "jam_recall": 0.66,
+   "insert_recall": 0.339
+  },
+  "push+0.8s/truth/logistic": {
+   "balanced_acc": 0.833,
+   "auc": 0.927,
+   "jam_recall": 0.794,
+   "insert_recall": 0.873
+  },
+  "push+0.8s/truth/mlp": {
+   "balanced_acc": 0.931,
+   "auc": 0.982,
+   "jam_recall": 0.936,
+   "insert_recall": 0.925
+  }
+ }
+}

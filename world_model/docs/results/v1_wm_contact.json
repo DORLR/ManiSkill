@@ -1,0 +1,142 @@
+{
+ "wm_checkpoint_step": 85000,
+ "history": false,
+ "single_step": {
+  "push_start": {
+   "inserted_trials": {
+    "windows": 1412,
+    "real_progress_mm": 0.968,
+    "wm_progress_mm": 1.026,
+    "abs_err_mm": 0.14,
+    "real_stalled": 0.004,
+    "wm_stalled": 0.007
+   },
+   "jammed_trials": {
+    "windows": 3446,
+    "real_progress_mm": 0.977,
+    "wm_progress_mm": 0.991,
+    "abs_err_mm": 0.173,
+    "real_stalled": 0.016,
+    "wm_stalled": 0.012
+   }
+  },
+  "later": {
+   "inserted_trials": {
+    "windows": 1848,
+    "real_progress_mm": 1.177,
+    "wm_progress_mm": 1.158,
+    "abs_err_mm": 0.148,
+    "real_stalled": 0.061,
+    "wm_stalled": 0.058
+   },
+   "jammed_trials": {
+    "windows": 1152,
+    "real_progress_mm": 0.351,
+    "wm_progress_mm": 0.848,
+    "abs_err_mm": 0.241,
+    "real_stalled": 0.438,
+    "wm_stalled": 0.282
+   }
+  }
+ },
+ "rollout_5_steps_from_push_start": {
+  "inserted_trials": {
+   "trials": 435,
+   "real_cum_progress_mm": [
+    0.75,
+    1.94,
+    3.13,
+    4.35,
+    5.53
+   ],
+   "wm_cum_progress_mm": [
+    0.77,
+    0.45,
+    NaN,
+    NaN,
+    NaN
+   ],
+   "abs_err_mm": [
+    0.15,
+    1.83,
+    NaN,
+    NaN,
+    NaN
+   ]
+  },
+  "jammed_trials": {
+   "trials": 1065,
+   "real_cum_progress_mm": [
+    0.75,
+    1.96,
+    3.09,
+    3.15,
+    3.14
+   ],
+   "wm_cum_progress_mm": [
+    0.79,
+    0.53,
+    NaN,
+    NaN,
+    NaN
+   ],
+   "abs_err_mm": [
+    0.18,
+    1.81,
+    NaN,
+    NaN,
+    NaN
+   ]
+  }
+ },
+ "rollout_5_steps_from_0.8s_into_push": {
+  "inserted_trials": {
+   "trials": 706,
+   "real_cum_progress_mm": [
+    1.2,
+    2.4,
+    3.58,
+    4.78,
+    6.01
+   ],
+   "wm_cum_progress_mm": [
+    1.17,
+    0.74,
+    NaN,
+    NaN,
+    NaN
+   ],
+   "abs_err_mm": [
+    0.14,
+    1.83,
+    NaN,
+    NaN,
+    NaN
+   ]
+  },
+  "jammed_trials": {
+   "trials": 1,
+   "real_cum_progress_mm": [
+    1.25,
+    2.36,
+    3.66,
+    4.99,
+    6.28
+   ],
+   "wm_cum_progress_mm": [
+    1.35,
+    2.39,
+    3.5,
+    4.6,
+    5.58
+   ],
+   "abs_err_mm": [
+    0.11,
+    0.03,
+    0.16,
+    0.39,
+    0.7
+   ]
+  }
+ }
+}

@@ -1,0 +1,142 @@
+{
+ "trials": {
+  "train": [
+   2418,
+   1645
+  ],
+  "ood_val": [
+   2429,
+   1723
+  ]
+ },
+ "note": "[trials, jammed]; probes trained on train, scored on ood_val (held-out shapes)",
+ "probes": {
+  "push_start/latent/logistic": {
+   "balanced_acc": 0.703,
+   "auc": 0.771,
+   "jam_recall": 0.739,
+   "insert_recall": 0.667
+  },
+  "push_start/latent/mlp": {
+   "balanced_acc": 0.792,
+   "auc": 0.869,
+   "jam_recall": 0.843,
+   "insert_recall": 0.742
+  },
+  "push_start/joints/logistic": {
+   "balanced_acc": 0.61,
+   "auc": 0.597,
+   "jam_recall": 0.572,
+   "insert_recall": 0.649
+  },
+  "push_start/joints/mlp": {
+   "balanced_acc": 0.721,
+   "auc": 0.794,
+   "jam_recall": 0.836,
+   "insert_recall": 0.606
+  },
+  "push_start/truth/logistic": {
+   "balanced_acc": 0.833,
+   "auc": 0.927,
+   "jam_recall": 0.794,
+   "insert_recall": 0.873
+  },
+  "push_start/truth/mlp": {
+   "balanced_acc": 0.931,
+   "auc": 0.982,
+   "jam_recall": 0.936,
+   "insert_recall": 0.925
+  },
+  "push+0.4s/latent/logistic": {
+   "balanced_acc": 0.695,
+   "auc": 0.756,
+   "jam_recall": 0.715,
+   "insert_recall": 0.676
+  },
+  "push+0.4s/latent/mlp": {
+   "balanced_acc": 0.806,
+   "auc": 0.88,
+   "jam_recall": 0.855,
+   "insert_recall": 0.756
+  },
+  "push+0.4s/joints/logistic": {
+   "balanced_acc": 0.539,
+   "auc": 0.551,
+   "jam_recall": 0.486,
+   "insert_recall": 0.592
+  },
+  "push+0.4s/joints/mlp": {
+   "balanced_acc": 0.586,
+   "auc": 0.61,
+   "jam_recall": 0.715,
+   "insert_recall": 0.456
+  },
+  "push+0.4s/truth/logistic": {
+   "balanced_acc": 0.833,
+   "auc": 0.927,
+   "jam_recall": 0.794,
+   "insert_recall": 0.873
+  },
+  "push+0.4s/truth/mlp": {
+   "balanced_acc": 0.931,
+   "auc": 0.982,
+   "jam_recall": 0.936,
+   "insert_recall": 0.925
+  },
+  "push+0.8s/latent/logistic": {
+   "balanced_acc": 0.662,
+   "auc": 0.725,
+   "jam_recall": 0.692,
+   "insert_recall": 0.633
+  },
+  "push+0.8s/latent/mlp": {
+   "balanced_acc": 0.786,
+   "auc": 0.878,
+   "jam_recall": 0.877,
+   "insert_recall": 0.695
+  },
+  "push+0.8s/joints/logistic": {
+   "balanced_acc": 0.513,
+   "auc": 0.529,
+   "jam_recall": 0.413,
+   "insert_recall": 0.613
+  },
+  "push+0.8s/joints/mlp": {
+   "balanced_acc": 0.5,
+   "auc": 0.516,
+   "jam_recall": 0.66,
+   "insert_recall": 0.339
+  },
+  "push+0.8s/truth/logistic": {
+   "balanced_acc": 0.833,
+   "auc": 0.927,
+   "jam_recall": 0.794,
+   "insert_recall": 0.873
+  },
+  "push+0.8s/truth/mlp": {
+   "balanced_acc": 0.931,
+   "auc": 0.982,
+   "jam_recall": 0.936,
+   "insert_recall": 0.925
+  }
+ },
+ "world_model": {
+  "checkpoint_step": 85000,
+  "inserted_trials": {
+   "windows": 1791,
+   "real_progress_mm_median": 1.166,
+   "wm_progress_mm_median": 1.152,
+   "abs_error_mm_median": 0.149,
+   "real_stalled_frac(<0.2mm)": 0.049,
+   "wm_stalled_frac(<0.2mm)": 0.055
+  },
+  "jammed_trials": {
+   "windows": 1209,
+   "real_progress_mm_median": 0.67,
+   "wm_progress_mm_median": 0.94,
+   "abs_error_mm_median": 0.227,
+   "real_stalled_frac(<0.2mm)": 0.353,
+   "wm_stalled_frac(<0.2mm)": 0.212
+  }
+ }
+}

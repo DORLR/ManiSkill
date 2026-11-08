@@ -1,0 +1,177 @@
+{
+ "latent_fm_v1_60s": {
+  "grasps": 156,
+  "expert_could_not_insert": 12,
+  "inserted": {
+   "train": [
+    20,
+    50
+   ],
+   "ALL": [
+    98,
+    288
+   ],
+   "pitch_extrap": [
+    16,
+    52
+   ],
+   "pitch_interp": [
+    15,
+    40
+   ],
+   "pos_interp": [
+    18,
+    50
+   ],
+   "pos_extrap": [
+    18,
+    50
+   ],
+   "combined": [
+    11,
+    46
+   ]
+  },
+  "median_seconds_to_insert": 27.400000000000002
+ },
+ "baseline_v1_60s": {
+  "grasps": 156,
+  "expert_could_not_insert": 12,
+  "inserted": {
+   "pitch_extrap": [
+    2,
+    52
+   ],
+   "ALL": [
+    16,
+    288
+   ],
+   "train": [
+    2,
+    50
+   ],
+   "pitch_interp": [
+    5,
+    40
+   ],
+   "pos_extrap": [
+    2,
+    50
+   ],
+   "pos_interp": [
+    3,
+    50
+   ],
+   "combined": [
+    2,
+    46
+   ]
+  },
+  "median_seconds_to_insert": 30.6
+ },
+ "fm_plus_wm_v1_selection_partial": {
+  "grasps": 47,
+  "expert_could_not_insert": 6,
+  "inserted": {
+   "train": [
+    5,
+    16
+   ],
+   "ALL": [
+    27,
+    82
+   ],
+   "pitch_extrap": [
+    5,
+    16
+   ],
+   "pitch_interp": [
+    1,
+    10
+   ],
+   "pos_extrap": [
+    6,
+    14
+   ],
+   "pos_interp": [
+    7,
+    16
+   ],
+   "combined": [
+    3,
+    10
+   ]
+  },
+  "median_seconds_to_insert": 26.8
+ },
+ "latent_fm_v1_24s": {
+  "grasps": 156,
+  "expert_could_not_insert": 12,
+  "inserted": {
+   "train": [
+    10,
+    50
+   ],
+   "ALL": [
+    35,
+    288
+   ],
+   "pitch_extrap": [
+    4,
+    52
+   ],
+   "pitch_interp": [
+    3,
+    40
+   ],
+   "pos_interp": [
+    4,
+    50
+   ],
+   "pos_extrap": [
+    11,
+    50
+   ],
+   "combined": [
+    3,
+    46
+   ]
+  },
+  "median_seconds_to_insert": 18.400000000000002
+ },
+ "latent_fm_v1_48s_subset": {
+  "grasps": 48,
+  "expert_could_not_insert": 2,
+  "inserted": {
+   "pitch_interp": [
+    6,
+    14
+   ],
+   "ALL": [
+    29,
+    92
+   ],
+   "train": [
+    6,
+    16
+   ],
+   "pos_interp": [
+    8,
+    16
+   ],
+   "pitch_extrap": [
+    4,
+    16
+   ],
+   "pos_extrap": [
+    3,
+    14
+   ],
+   "combined": [
+    2,
+    16
+   ]
+  },
+  "median_seconds_to_insert": 28.400000000000002
+ }
+}

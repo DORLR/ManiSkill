@@ -1,0 +1,142 @@
+{
+ "wm_checkpoint_step": 140000,
+ "history": true,
+ "single_step": {
+  "push_start": {
+   "inserted_trials": {
+    "windows": 1412,
+    "real_progress_mm": 0.935,
+    "wm_progress_mm": 0.95,
+    "abs_err_mm": 0.139,
+    "real_stalled": 0.013,
+    "wm_stalled": 0.018
+   },
+   "jammed_trials": {
+    "windows": 3446,
+    "real_progress_mm": 0.93,
+    "wm_progress_mm": 0.978,
+    "abs_err_mm": 0.155,
+    "real_stalled": 0.019,
+    "wm_stalled": 0.025
+   }
+  },
+  "later": {
+   "inserted_trials": {
+    "windows": 1848,
+    "real_progress_mm": 1.174,
+    "wm_progress_mm": 1.164,
+    "abs_err_mm": 0.153,
+    "real_stalled": 0.065,
+    "wm_stalled": 0.082
+   },
+   "jammed_trials": {
+    "windows": 1152,
+    "real_progress_mm": 0.379,
+    "wm_progress_mm": 0.761,
+    "abs_err_mm": 0.179,
+    "real_stalled": 0.414,
+    "wm_stalled": 0.353
+   }
+  }
+ },
+ "rollout_5_steps_from_push_start": {
+  "inserted_trials": {
+   "trials": 435,
+   "real_cum_progress_mm": [
+    0.71,
+    1.88,
+    3.06,
+    4.27,
+    5.45
+   ],
+   "wm_cum_progress_mm": [
+    0.7,
+    2.73,
+    NaN,
+    NaN,
+    NaN
+   ],
+   "abs_err_mm": [
+    0.14,
+    1.52,
+    NaN,
+    NaN,
+    NaN
+   ]
+  },
+  "jammed_trials": {
+   "trials": 1065,
+   "real_cum_progress_mm": [
+    0.7,
+    1.87,
+    2.97,
+    3.04,
+    3.04
+   ],
+   "wm_cum_progress_mm": [
+    0.73,
+    2.85,
+    NaN,
+    NaN,
+    NaN
+   ],
+   "abs_err_mm": [
+    0.16,
+    1.72,
+    NaN,
+    NaN,
+    NaN
+   ]
+  }
+ },
+ "rollout_5_steps_from_0.8s_into_push": {
+  "inserted_trials": {
+   "trials": 706,
+   "real_cum_progress_mm": [
+    1.17,
+    2.38,
+    3.59,
+    4.78,
+    5.95
+   ],
+   "wm_cum_progress_mm": [
+    1.15,
+    3.23,
+    NaN,
+    NaN,
+    NaN
+   ],
+   "abs_err_mm": [
+    0.14,
+    1.51,
+    NaN,
+    NaN,
+    NaN
+   ]
+  },
+  "jammed_trials": {
+   "trials": 1,
+   "real_cum_progress_mm": [
+    1.19,
+    2.25,
+    3.7,
+    4.49,
+    5.72
+   ],
+   "wm_cum_progress_mm": [
+    1.25,
+    3.36,
+    5.42,
+    8.54,
+    11.21
+   ],
+   "abs_err_mm": [
+    0.06,
+    1.11,
+    1.72,
+    4.04,
+    5.48
+   ]
+  }
+ }
+}

@@ -1,10 +1,13 @@
-"""Models.
+"""Models (v3).
 
-    perception   point cloud + DINOv2 primitives (reused from alignment_field/paf) and port axes
-    tokenizer    one frame -> 63 relation tokens + 1 joint token (plug/port set abstraction,
-                 plug<->port cross-attention, learned relation queries)
-    vae          token VAE: tokenizer -> per-token Gaussian latent (64 x C) -> decoders and
-                 the plug-pose head (trained with the plug-point loss)
-    cdit         NWM CDiT (vendored, unchanged) over the 8 x 8 latent grid, conditioned on the
-                 joint-target chunk; Gaussian diffusion from NWM
+    encoder         wrist RGB-D frame -> 64 tokens (DINOv2 + raw RGB + raw depth + viewing rays,
+                    self-attention, 64 learned queries); no segmentation, no point cloud
+    vae             encoder -> latent (64 x C, deterministic) -> patch decoder (depth, validity,
+                    RGB, DINO) + pose head (remaining motion to the inserted pose)
+    cdit            world model: NWM's CDiT with time shift, robot-state / commanded-path
+                    condition and context-noise level
+    adapter         Ctrl-World-style joint adapter: joints + tracking history + targets -> joints
+    policy          flow-matching policy on the latent + joints
+    baseline_policy latent-free baseline: the same encoder trained end to end with the policy
+    perception      port axes from one frame (board-plane fit + gravity)
 """

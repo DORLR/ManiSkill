@@ -1,10 +1,11 @@
-"""Stage 1: token autoencoder.
+"""Stage 1: autoencoder (v3), trained from scratch.
 
-Loss = Chamfer(plug) + Chamfer(port) [mm] + w_pose * plug-point loss [mm]
-       + w_angle * insertion-angle error [deg] + w_joint * joint L1 [mrad]
-(v1 had + beta * KL and no angle term; see docs/worklog.md, 2026-11-07.)
-Model selection and the harm-only early stop use the OOD validation split, on
-plug-point loss + w_angle * angle (the two pose terms).
+Loss = w_depth * depth L1 [mm] + w_valid * validity BCE + w_rgb * RGB L1 + w_dino * (1 - cos DINO)
+       + w_grid * reference-grid pose error [mm] + w_angle * angle error [deg]
+(losses.py; weights in the config). No KL (deterministic latent).
+
+Validation on ood_val (held-out shapes) every eval_every steps; model selection and the harm-only
+early stop use the pose score = grid + w_angle * angle, the quantity the world model is read by.
 """
 
 from __future__ import annotations
@@ -17,26 +18,23 @@ from torch.utils.data import DataLoader
 
 from ..data import index as data_index
 from ..data.datasets import FrameDataset
+from ..geometry import plug_region_points
 from ..models.vae import TokenVAE
 from . import common
-from .losses import chamfer_mm, insertion_angle_loss_deg, plug_point_loss_mm
+from .losses import insertion_pose, reconstruction
 
 
-def losses(out: dict, batch: dict, w: dict) -> dict:
-    l = {"chamfer_plug": chamfer_mm(out["plug_points"], out["plug_xyz"], out["plug_mask"]),
-         "chamfer_port": chamfer_mm(out["port_points"], out["port_xyz"], out["port_mask"]),
-         "plug_point": plug_point_loss_mm(out["R"], out["t"], out["plug_xyz"], out["plug_mask"],
-                                          batch["hand"], batch["h_star"], batch["R_P"]),
-         "angle_deg": insertion_angle_loss_deg(out["R"], batch["hand"], batch["h_star"], batch["R_P"]),
-         "joint_mrad": (out["joints"].float() - batch["qpos"][:, :7].float()).abs().mean() * 1000}
-    l["pose_score"] = l["plug_point"] + w.get("angle", 0.0) * l["angle_deg"]
-    l["total"] = (l["chamfer_plug"] + l["chamfer_port"] + w["pose"] * l["plug_point"]
-                  + w.get("angle", 0.0) * l["angle_deg"] + w["joint"] * l["joint_mrad"])
+def losses(out: dict, batch: dict, w: dict, ref: torch.Tensor) -> dict:
+    l = reconstruction(out["pred"], out["target"])
+    l.update(insertion_pose(out["pred"]["R"], out["pred"]["t"], batch["hand"], batch["h_star"], batch["R_P"], ref))
+    l["pose_score"] = l["grid_mm"] + w["angle"] * l["angle_deg"]
+    l["total"] = (w["depth"] * l["depth_mm"] + w["valid"] * l["valid_bce"] + w["rgb"] * l["rgb_l1"]
+                  + w["dino"] * l["dino_cos"] + w["grid"] * l["grid_mm"] + w["angle"] * l["angle_deg"])
     return l
 
 
 @torch.no_grad()
-def evaluate(model, loader, w, device, max_batches: int) -> dict:
+def evaluate(model, loader, w, device, max_batches: int, ref) -> dict:
     model.eval()
     acc, n = {}, 0
     for i, batch in enumerate(loader):
@@ -44,7 +42,7 @@ def evaluate(model, loader, w, device, max_batches: int) -> dict:
             break
         batch = common.to_device(batch, device)
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            l = losses(model(batch), batch, w)
+            l = losses(model(batch), batch, w, ref)
         for k, v in l.items():
             acc[k] = acc.get(k, 0.0) + float(v)
         n += 1
@@ -52,22 +50,18 @@ def evaluate(model, loader, w, device, max_batches: int) -> dict:
     return {k: v / max(n, 1) for k, v in acc.items()}
 
 
-def build(cfg: dict, entries: list[dict] | None = None):
-    entries = entries if entries is not None else data_index.load(cfg["data"])
-    train_ds = FrameDataset(entries, "train")
-    val_ds = FrameDataset(entries, "ood_val")
-    mk = lambda ds, shuffle: DataLoader(ds, batch_size=cfg["batch_size"], shuffle=shuffle, drop_last=shuffle,
-                                        num_workers=cfg["workers"], persistent_workers=cfg["workers"] > 0)
-    return TokenVAE(**cfg["model"]), mk(train_ds, True), mk(val_ds, True)
-
-
 def train(cfg: dict, run_dir: Path, entries: list[dict] | None = None, max_steps: int | None = None) -> Path:
     common.seed_all(cfg["seed"])
     device = torch.device("cuda")
-    model, train_loader, val_loader = build(cfg, entries)
-    model.to(device)
+    entries = entries if entries is not None else data_index.load(cfg["data"])
+    mk = lambda ds: DataLoader(ds, batch_size=cfg["batch_size"], shuffle=True, drop_last=True,
+                               num_workers=cfg["workers"], persistent_workers=cfg["workers"] > 0, pin_memory=True)
+    train_loader, val_loader = mk(FrameDataset(entries, "train")), mk(FrameDataset(entries, "ood_val"))
+    model = TokenVAE(**cfg["model"]).to(device)
     opt = torch.optim.AdamW(common.trainable(model), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
-    log, w = common.Logger(run_dir), cfg["loss_weights"]
+    warmup = cfg.get("warmup_steps", 0)
+    sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, (s + 1) / warmup) if warmup else 1.0)
+    log, w, ref = common.Logger(run_dir), cfg["loss_weights"], plug_region_points(device)
     log(event="start", train_frames=len(train_loader.dataset), val_frames=len(val_loader.dataset),
         params_m=sum(p.numel() for p in common.trainable(model)) / 1e6)
     best, bad, skipped = float("inf"), 0, 0
@@ -75,7 +69,7 @@ def train(cfg: dict, run_dir: Path, entries: list[dict] | None = None, max_steps
     for step, batch in zip(range(1, steps + 1), common.cycle(train_loader)):
         batch = common.to_device(batch, device)
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            l = losses(model(batch), batch, w)
+            l = losses(model(batch), batch, w, ref)
         opt.zero_grad(set_to_none=True)
         l["total"].backward()
         gn = torch.nn.utils.clip_grad_norm_(common.trainable(model), cfg["grad_clip"])
@@ -87,10 +81,11 @@ def train(cfg: dict, run_dir: Path, entries: list[dict] | None = None, max_steps
                 break
             continue
         opt.step()
+        sched.step()
         if step % cfg["log_every"] == 0 or step == steps:
             log(step=step, grad_norm=float(gn), **{f"train_{k}": float(v) for k, v in l.items()})
         if step % cfg["eval_every"] == 0 or step == steps:
-            v = evaluate(model, val_loader, w, device, cfg["eval_batches"])
+            v = evaluate(model, val_loader, w, device, cfg["eval_batches"], ref)
             log(step=step, **{f"val_{k}": x for k, x in v.items()})
             if not math.isfinite(v["pose_score"]):
                 log(event="stop_nonfinite_validation", step=step)

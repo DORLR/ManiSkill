@@ -1,10 +1,6 @@
-"""Perception primitives.
-
-Reused from alignment_field/paf (tested there): back-projection, hand-centred port
-axes, frozen DINOv2 ViT-S/14 features, PointNet++ set abstraction, plug<->port
-cross-attention block. Port axes come from a board-plane RANSAC fit plus gravity
-(paf.perception.port_axes_from_obs), estimated once per trajectory from its first image.
-"""
+"""Port axes from one frame: board-plane RANSAC fit + gravity (alignment_field/paf/perception.py,
+tested there). Estimated once per trajectory / episode from its first image; a real-robot quantity
+(depth image, intrinsics, camera pose from FK + hand-eye mount)."""
 
 from __future__ import annotations
 
@@ -16,10 +12,7 @@ from .._paths import use_alignment_field
 
 use_alignment_field()
 
-from paf.model import mlp  # noqa: E402,F401
 from paf.perception import port_axes_from_obs  # noqa: E402
-from paf.relnet import (BOARD_BAND, BOX_YZ, PLUG_X, CrossBlock, DinoFeatures,  # noqa: E402,F401
-                        SetAbstraction, _sample, backproject_torch, to_port_frame)
 
 DEPTH_UNIT_MM = 0.1  # stored depth unit (wm.data.schema.DEPTH_UNIT_M) in millimetres
 

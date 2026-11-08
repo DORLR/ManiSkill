@@ -1,49 +1,54 @@
 # world_model
 
-Latent world model for plug insertion with unseen port shapes and unseen grasps,
-on Chongyu's ManiSkill task `WMInsertionChargerRandomized-v2` (used unchanged).
+Latent world model and flow-matching policy for plug insertion with unseen port shapes and unseen
+grasps, on Chongyu's ManiSkill task `WMInsertionChargerRandomized-v2` (used unchanged).
 
-Only real-robot information is used as model input or label: wrist RGB-D (D405
-default stream), camera intrinsics, hand-eye mount, joint angles (forward
-kinematics), commanded joint targets, and one insertion per grasp (its FK hand pose).
-Simulator truth is used only by the demonstration expert (standing in for a
-teleoperator) and for evaluation (`eval_*` arrays).
+Only real-robot information is used as model input or label: wrist RGB-D (D405 default stream),
+camera intrinsics, hand-eye mount, joint angles and forward kinematics, commanded joint targets, and
+one insertion per grasp (its FK hand pose). Simulator truth is used only by the demonstration expert
+(standing in for a teleoperator) and for evaluation (`eval_*` arrays).
+
+The record of every run and decision is in [docs/](docs/README.md); the current design is
+[docs/design_v3.md](docs/design_v3.md).
 
 ## Layout
 
 ```
 world_model/
-  pyproject.toml          package `wm` (pip install -e world_model)
-  configs/                collect_v1.json, vae_v1.json, wm_v1.json
-  scripts/                command-line entry points (thin wrappers around wm.*)
-    collect.py            collect the dataset (resumable)        summarise.py   dataset report
-    inspect_trajectory.py arrays + image strip of one file        build_index.py splits + port axes
-    train_vae.py          stage 1                                 encode_latents.py  VAE -> latents
-    train_wm.py           stage 2                                 smoke_models.py    end-to-end smoke test
+  pyproject.toml            package `wm` (pip install -e world_model)
+  configs/
+    data/                   collection
+    v3/                     current: vae, adapter, wm_s, wm_b, policy, baseline
+    archive/v1, archive/v2  configs of the recorded earlier runs
+  scripts/
+    data/                   collect, summarise, inspect_trajectory, build_index, compute_ee
+    train/                  train_vae, encode_latents, train_adapter, train_wm, train_policy
+    eval/                   eval_policy (closed loop in simulation)
+    analysis/               check_latents, check_world_model
+    pipelines/              pipeline_v3.sh (the whole v3 run, with the gate before the world models)
+    smoke_v3.py             end-to-end smoke test on a small slice of the data
   src/wm/
-    env/                  robot access (float depth twin camera), sampling, demonstration expert
-    data/                 schema, recorder, store (npz + JPEG), index, splits, torch datasets
-    collect/              plan (what to collect), episode (one grasp), runner (parallel)
-    models/               perception (reused from alignment_field), tokenizer, vae, cdit
-    training/             common, losses, vae, encode, wm
-    third_party/nwm/      NWM CDiT + diffusion, vendored unchanged (CC BY-NC 4.0)
-    geometry.py           SE(3) helpers
-  tests/                  unit tests (no simulator needed)
-  docs/plan.md            design, data, splits, evaluation, change log
+    env/                    robot access (float-depth twin camera), sampling, demonstration expert
+    data/                   schema, recorder, store, index/splits, kinematics, conditions, datasets
+    collect/                collection plan and parallel runner
+    models/                 encoder, vae, cdit, adapter, policy, baseline_policy, perception
+    training/               common, losses, vae, encode, adapter, wm, policy
+    eval/                   agents and closed-loop rollouts
+    analysis/               probes (latent), wm_checks (world model)
+    third_party/nwm/        NWM CDiT + diffusion, vendored unchanged (CC BY-NC 4.0)
+    geometry.py             SE(3) helpers, pose losses
+  tests/                    unit tests (CPU, no simulator)
+  docs/                     dated records + results/
 ```
 
-Depends on `alignment_field/` (sibling folder) for the environment adapter and the
-perception primitives; see `src/wm/_paths.py`.
+Depends on `alignment_field/` (sibling folder) for the environment adapter and the port-axis fit;
+see `src/wm/_paths.py`.
 
-## Pipeline
+## Running (rs2)
 
 ```bash
 source /mnt/storage2/qingxin/env.sh && cd $Q/code/ManiSkill
-python world_model/scripts/collect.py --config world_model/configs/collect_v1.json --out $Q/data/wm_v1 --workers 40
-python world_model/scripts/summarise.py $Q/data/wm_v1
-python world_model/scripts/build_index.py $Q/data/wm_v1
-python world_model/scripts/train_vae.py --config world_model/configs/vae_v1.json --run $Q/runs/vae_v1
-python world_model/scripts/encode_latents.py --vae $Q/runs/vae_v1/best.pt --data $Q/data/wm_v1 --out $Q/data/wm_v1_latents
-python world_model/scripts/train_wm.py --config world_model/configs/wm_v1.json --run $Q/runs/wm_v1
 python -m pytest -q world_model/tests
+python world_model/scripts/smoke_v3.py --out $Q/runs/smoke_v3
+tmux new-session -d -s qingxin-v3 "bash world_model/scripts/pipelines/pipeline_v3.sh"
 ```

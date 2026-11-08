@@ -1,55 +1,52 @@
-"""CPU shape and gradient checks (no DINOv2, no simulator)."""
+"""CPU shape, gradient and geometry checks of the v3 models (no DINOv2 weights, no simulator)."""
 
 import math
 
 import numpy as np
 import torch
 
-from wm.geometry import insertion_motion, plug_points_at_insertion, rot6d_to_matrix, rotation_angle_deg
+from wm.data.conditions import COND_DIM, pose_feature, wm_condition
+from wm.geometry import (insertion_motion, plug_points_at_insertion, plug_region_points, pose_loss_terms,
+                         rot6d_to_matrix, rotation_angle_deg)
+from wm.models.adapter import IN_DIM, OUT_DIM, JointAdapter
 from wm.models.cdit import TokenCDiT, create_diffusion, grid_to_tokens, tokens_to_grid
+from wm.models.encoder import N_PATCH, prepare
 from wm.models.vae import TokenVAE
-from wm.training.losses import insertion_angle_loss_deg, plug_point_loss_mm
+from wm.training.losses import insertion_pose, reconstruction
+
+ENC = dict(d=32, layers=1, query_layers=1, heads=4, dino=False)
 
 
-def _batch(B=2, H=48, W=48):
-    depth = np.full((B, H, W), 1500, np.int32)       # board 150 mm in front of the camera
-    depth[:, 30:, 18:30] = 900                        # something nearer: the plug
-    K = torch.tensor([[40.0, 0, W / 2], [0, 40.0, H / 2], [0, 0, 1]]).expand(B, 3, 3)
-    eye = torch.eye(4).expand(B, 4, 4)
-    R_P = torch.tensor([[0.0, 0, 1], [1, 0, 0], [0, 1, 0]]).T.expand(B, 3, 3)   # port x = camera z
-    return {"rgb": torch.randint(0, 255, (B, H, W, 3), dtype=torch.uint8), "depth": torch.from_numpy(depth),
-            "K": K, "cam_T_world": eye, "hand": eye.clone(), "R_P": R_P, "qpos": torch.zeros(B, 9),
-            "h_star": eye.clone()}
+def _batch(B=2):
+    depth = np.zeros((B, 320, 320), np.int32)
+    depth[:, 100:200, 100:200] = 1500                  # some returns, the rest has no depth (0)
+    K = torch.tensor([[300.0, 0, 160], [0, 300.0, 160], [0, 0, 1]]).expand(B, 3, 3)
+    eye = torch.eye(4).expand(B, 4, 4).clone()
+    return {"rgb": torch.randint(0, 255, (B, 320, 320, 3), dtype=torch.uint8), "depth": torch.from_numpy(depth),
+            "K": K, "cam_T_world": eye, "hand": eye.clone(), "R_P": torch.eye(3).expand(B, 3, 3), "h_star": eye.clone()}
 
 
-def test_vae_forward_backward():
+def test_depth_kept_as_is():
+    b = _batch()
+    p = prepare(b["rgb"], b["depth"])
+    assert p["depth_patch"].shape == (2, N_PATCH, 196)
+    assert (p["depth_patch"] == 0).any() and (p["depth_patch"] > 0).any()   # missing depth stays exactly 0
+
+
+def test_autoencoder_forward_backward():
     torch.manual_seed(0)
-    m = TokenVAE(tokenizer=dict(d=64, cross_layers=1, query_layers=1, n_plug=16, n_port=32, n_cand=128,
-                                use_dino=False), latent_ch=8, dec_d=64, dec_layers=1, n_dec_plug=32, n_dec_port=64)
-    out = m(_batch())
-    assert out["z"].shape == (2, 64, 8) and out["plug_points"].shape == (2, 32, 3)
-    loss = out["plug_points"].sum() + out["z"].pow(2).mean() + out["t"].sum()
-    loss.backward()
+    m = TokenVAE(encoder=ENC, latent_ch=8, dec_d=32, dec_layers=1, patch_layers=1, heads=4)
+    b = _batch()
+    out = m(b)
+    assert out["z"].shape == (2, 64, 8) and out["pred"]["depth_patch"].shape == (2, N_PATCH, 196)
+    l = reconstruction(out["pred"], out["target"])
+    l.update(insertion_pose(out["pred"]["R"], out["pred"]["t"], b["hand"], b["h_star"], b["R_P"], plug_region_points()))
+    sum(l.values()).backward()
+    assert all(torch.isfinite(v) for v in l.values())
 
 
-def test_plug_point_loss_zero_for_true_motion():
-    B, N = 2, 20
-    p = torch.randn(B, N, 3) * 0.02
-    hand = torch.eye(4).expand(B, 4, 4).clone()
-    a = 0.1
-    h_star = torch.eye(4).expand(B, 4, 4).clone()
-    h_star[:, :3, :3] = torch.tensor([[math.cos(a), -math.sin(a), 0], [math.sin(a), math.cos(a), 0], [0, 0, 1]])
-    h_star[:, :3, 3] = torch.tensor([0.01, -0.002, 0.003])
-    R_P = torch.eye(3).expand(B, 3, 3)
-    target = plug_points_at_insertion(p, hand, h_star, R_P)
-    mask = torch.ones(B, N, dtype=torch.bool)
-    assert plug_point_loss_mm(h_star[:, :3, :3], h_star[:, :3, 3], p, mask, hand, h_star, R_P) < 1e-3
-    assert torch.allclose(target, p @ h_star[:, :3, :3].transpose(1, 2) + h_star[:, None, :3, 3], atol=1e-6)
-
-
-def test_insertion_angle_zero_for_true_motion():
-    B = 2
-    a = 0.01
+def test_insertion_angle_and_grid_zero_for_true_motion():
+    B, a = 2, 0.01
     hand = torch.eye(4).expand(B, 4, 4).clone()
     hand[:, :3, 3] = torch.tensor([0.1, 0.2, 0.3])
     h_star = hand.clone()
@@ -58,19 +55,9 @@ def test_insertion_angle_zero_for_true_motion():
     R_star, t_star = insertion_motion(hand, h_star, R_P)
     p = torch.randn(B, 10, 3) * 0.02
     assert torch.allclose(plug_points_at_insertion(p, hand, h_star, R_P), p @ R_star.transpose(1, 2) + t_star[:, None], atol=1e-6)
-    assert insertion_angle_loss_deg(R_star, hand, h_star, R_P) < 2e-2
+    g, ang = pose_loss_terms(R_star, t_star, R_star, t_star, plug_region_points())
+    assert float(g.max()) < 1e-4 and float(ang.max()) < 2e-2
     assert abs(float(rotation_angle_deg(R_star, torch.eye(3).expand(B, 3, 3))[0]) - math.degrees(a)) < 1e-2
-
-
-def test_action_condition_history():
-    from wm.data.datasets import HISTORY_STEPS, action_condition
-    T = 40
-    qpos = np.zeros((T + 1, 9), np.float32)
-    action = np.ones((T, 7), np.float32)          # commands 1 rad ahead, joints never move: blocked
-    y0 = action_condition(action, qpos, 0, history=True)
-    y = action_condition(action, qpos, 30, history=True)
-    assert y.shape == (56 + 7 * HISTORY_STEPS,) and np.allclose(action_condition(action, qpos, 30, False), y[:56])
-    assert np.allclose(y0[56:], 0) and np.allclose(y[56:], 1)
 
 
 def test_rot6d_is_rotation():
@@ -79,15 +66,33 @@ def test_rot6d_is_rotation():
     assert torch.allclose(torch.det(R), torch.ones(5), atol=1e-5)
 
 
-def test_cdit_diffusion_step():
+def test_condition_shapes_and_frame():
+    T = 50
+    hand = np.tile(np.eye(4), (T + 1, 1, 1))
+    hand[:, 0, 3] = np.arange(T + 1) * 1e-3                 # moving 1 mm per step along world x
+    cmd = hand[:T].copy()
+    cmd[:, 0, 3] += 2e-3                                      # commands 2 mm ahead
+    R_P = np.eye(3)
+    y = wm_condition(hand, cmd, np.array([0, 8, 16, 24]), 24, 40, R_P)
+    assert y.shape == (COND_DIM,)
+    f = pose_feature(hand[30], hand[24], R_P)
+    assert np.allclose(f[:3], [0.6, 0, 0]) and np.allclose(f[3:], [1, 0, 0, 0, 1, 0])   # 6 mm = 0.6 cm
+
+
+def test_cdit_diffusion_step_with_time_shift_and_context_noise():
     torch.manual_seed(0)
     z = torch.randn(2, 64, 8)
     assert torch.equal(grid_to_tokens(tokens_to_grid(z)), z)
-    model = TokenCDiT(action_dim=56, latent_ch=8, context_size=4, size="S")
+    model = TokenCDiT(cond_dim=COND_DIM, latent_ch=8, context_size=4, size="S")
     diffusion = create_diffusion(timestep_respacing="")
-    x, x_cond = tokens_to_grid(z), tokens_to_grid(torch.randn(2, 4, 64, 8))
-    t = torch.randint(0, diffusion.num_timesteps, (2,))
-    loss = diffusion.training_losses(model, x, t, dict(y=torch.randn(2, 56), x_cond=x_cond,
-                                                      rel_t=torch.ones(2)))["loss"].mean()
+    x = tokens_to_grid(z)
+    kw = dict(y=torch.randn(2, COND_DIM), x_cond=tokens_to_grid(torch.randn(2, 4, 64, 8)),
+              rel_t=torch.tensor([0.4, -8.0]), ctx_noise=torch.tensor([0.0, 0.05]))
+    loss = diffusion.training_losses(model, x, torch.tensor([10, 500]), kw)["loss"].mean()
     loss.backward()
     assert torch.isfinite(loss)
+
+
+def test_adapter_shapes():
+    m = JointAdapter(hidden=32)
+    assert m(torch.randn(3, IN_DIM)).shape == (3, OUT_DIM)

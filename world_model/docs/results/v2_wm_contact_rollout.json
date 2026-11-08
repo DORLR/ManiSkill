@@ -1,0 +1,54 @@
+{
+ "wm_checkpoint_step": 150000,
+ "history": true,
+ "rollout_5_steps_from_push_start": {
+  "inserted_trials": {
+   "trials": 435,
+   "real_cum_progress_mm": [
+    0.71,
+    1.88,
+    3.06,
+    4.27,
+    5.45
+   ],
+   "wm_cum_progress_mm": [
+    0.73,
+    1.63,
+    NaN,
+    NaN,
+    NaN
+   ],
+   "abs_err_mm": [
+    0.14,
+    0.43,
+    NaN,
+    NaN,
+    NaN
+   ]
+  },
+  "jammed_trials": {
+   "trials": 1065,
+   "real_cum_progress_mm": [
+    0.7,
+    1.87,
+    2.97,
+    3.04,
+    3.04
+   ],
+   "wm_cum_progress_mm": [
+    0.72,
+    1.64,
+    NaN,
+    NaN,
+    NaN
+   ],
+   "abs_err_mm": [
+    0.16,
+    0.44,
+    NaN,
+    NaN,
+    NaN
+   ]
+  }
+ }
+}

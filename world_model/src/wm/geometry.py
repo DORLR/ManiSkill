@@ -49,9 +49,10 @@ def plug_points_at_insertion(p: torch.Tensor, hand: torch.Tensor, h_star: torch.
 
 
 def plug_region_points(device=None) -> torch.Tensor:
-    """A fixed 5x5x5 grid (2 cm cube, x 10-30 mm) where the plug sits in hand-centred port axes.
-    Reading a pose (R, t) as the mean displacement of these points gives one shape-independent
-    number in mm; used to compare two poses, never as a label."""
+    """The reference grid: a fixed 5x5x5 grid (2 cm cube, x 10-30 mm, y and z +-10 mm) where the plug
+    sits in hand-centred port axes, the same for every shape and grasp. A rigid motion (R, t) is
+    turned into millimetres by moving these points; it is a ruler, never a label or a measured
+    plug location."""
     g = torch.linspace(-0.01, 0.01, 5, device=device)
     return torch.stack(torch.meshgrid(g + 0.02, g, g, indexing="ij"), -1).reshape(-1, 3)
 
@@ -59,3 +60,19 @@ def plug_region_points(device=None) -> torch.Tensor:
 def apply_rigid(p: torch.Tensor, R: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
     """p (B,N,3), R (B,3,3), t (B,3) -> R p + t."""
     return p @ R.transpose(1, 2) + t[:, None]
+
+
+def grid_pose_error_mm(R_a: torch.Tensor, t_a: torch.Tensor, R_b: torch.Tensor, t_b: torch.Tensor,
+                       ref: torch.Tensor) -> torch.Tensor:
+    """Reference-grid pose error (B,): mean distance (mm) between the reference-grid points moved by
+    (R_a, t_a) and by (R_b, t_b). Mostly measures translation: the grid is only 2 cm across, so a
+    0.4 deg rotation moves its points by ~0.14 mm (rotation_angle_deg covers small angles)."""
+    p = ref[None].expand(R_a.shape[0], -1, -1)
+    return (apply_rigid(p, R_a, t_a) - apply_rigid(p, R_b, t_b)).norm(dim=-1).mean(1) * 1000
+
+
+def pose_loss_terms(R_a, t_a, R_b, t_b, ref) -> tuple[torch.Tensor, torch.Tensor]:
+    """(reference-grid error mm, angle deg), each (B,). Used for the VAE pose head against the FK
+    label and for the world model's predicted pose against the pose read from the true latent."""
+    return (grid_pose_error_mm(R_a.float(), t_a.float(), R_b.float(), t_b.float(), ref),
+            rotation_angle_deg(R_a.float(), R_b.float()))

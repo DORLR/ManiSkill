@@ -1,0 +1,13 @@
+{"minutes": 0.0, "event": "start", "train_samples": 393974, "val_samples": 408010, "params_m": 34.2981}
+{"minutes": 51.25, "step": 5000, "val_flow_loss": 0.94187, "val_action_err_mrad": 3.12719}
+{"minutes": 94.13, "step": 10000, "val_flow_loss": 0.49076, "val_action_err_mrad": 2.01391}
+{"minutes": 134.27, "step": 15000, "val_flow_loss": 0.32963, "val_action_err_mrad": 1.23699}
+{"minutes": 165.39, "step": 20000, "val_flow_loss": 0.31089, "val_action_err_mrad": 1.22028}
+{"minutes": 208.82, "step": 25000, "val_flow_loss": 0.27332, "val_action_err_mrad": 1.00966}
+{"minutes": 247.54, "step": 30000, "val_flow_loss": 0.28902, "val_action_err_mrad": 1.24372}
+{"minutes": 282.08, "step": 35000, "val_flow_loss": 0.29027, "val_action_err_mrad": 0.99044}
+{"minutes": 310.68, "step": 40000, "val_flow_loss": 0.26603, "val_action_err_mrad": 0.90427}
+{"minutes": 339.25, "step": 45000, "val_flow_loss": 0.21793, "val_action_err_mrad": 0.87826}
+{"minutes": 366.74, "step": 50000, "val_flow_loss": 0.3003, "val_action_err_mrad": 1.02317}
+{"minutes": 390.95, "step": 55000, "val_flow_loss": 0.24811, "val_action_err_mrad": 0.91098}
+{"minutes": 415.66, "step": 60000, "val_flow_loss": 0.22891, "val_action_err_mrad": 0.95472}

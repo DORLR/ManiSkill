@@ -1,0 +1,33 @@
+{
+ "trials": {
+  "train": [
+   2418,
+   1645
+  ],
+  "ood_val": [
+   2429,
+   1723
+  ]
+ },
+ "note": "[trials, jammed]; probes trained on train, scored on ood_val (held-out shapes)",
+ "probes": {},
+ "world_model": {
+  "checkpoint_step": 140000,
+  "inserted_trials": {
+   "windows": 1791,
+   "real_progress_mm_median": 1.169,
+   "wm_progress_mm_median": 1.16,
+   "abs_error_mm_median": 0.154,
+   "real_stalled_frac(<0.2mm)": 0.061,
+   "wm_stalled_frac(<0.2mm)": 0.073
+  },
+  "jammed_trials": {
+   "windows": 1209,
+   "real_progress_mm_median": 0.614,
+   "wm_progress_mm_median": 0.87,
+   "abs_error_mm_median": 0.184,
+   "real_stalled_frac(<0.2mm)": 0.355,
+   "wm_stalled_frac(<0.2mm)": 0.287
+  }
+ }
+}

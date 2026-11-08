@@ -1,1 +1,2 @@
-"""Dataset format (schema), recording during an expert run, and file storage."""
+"""Data: on-disk format (schema), recording, storage, index and splits, forward kinematics of the
+hand, world-model conditions, and the torch datasets."""

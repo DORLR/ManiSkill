@@ -1,20 +1,19 @@
-"""Leakage checks: the model only sees real-robot inputs, never grasp parameters, shape identity
-or simulator truth; labels from the one insertion (h_star) are used only by the loss; the
-test ports A-D never reach training or model selection."""
+"""Leakage checks: models only see real-robot inputs, never grasp parameters, shape identity or
+simulator truth; labels from the one insertion (h_star) are used only by the loss; the test ports
+A-D never reach training or model selection."""
 
 import inspect
-import json
 
 import numpy as np
 
 from wm.data import splits, store
 from wm.data.datasets import FrameDataset, LatentWindowDataset
-from wm.models.tokenizer import RelationTokenizer
+from wm.models.encoder import ImageEncoder
 from wm.models.vae import TokenVAE
 
-MODEL_INPUTS = {"rgb", "depth", "K", "cam_T_world", "hand", "qpos", "R_P"}
+MODEL_INPUTS = {"rgb", "depth", "K", "cam_T_world", "hand", "R_P"}
 LOSS_ONLY = {"h_star"}
-# Label / metadata / truth accessors (the word "port" alone is legitimate: socket points seen in the image).
+# Label / metadata / truth accessors (the word "port" alone is legitimate: port axes, socket pixels).
 FORBIDDEN = ("h_star", "H_star", "eval_", "pitch", "grasp_pos", "condition", '["port"]', "meta",
              "goal_pose", "charger", "seg")
 
@@ -42,23 +41,26 @@ def test_frame_dataset_yields_only_inputs_and_loss_label(tmp_path):
 
 
 def test_encoder_never_reads_labels_or_truth():
-    src = inspect.getsource(TokenVAE.encode) + inspect.getsource(RelationTokenizer)
+    src = inspect.getsource(TokenVAE.encode) + inspect.getsource(ImageEncoder)
     for word in FORBIDDEN:
         assert word not in src, f"encoder source mentions {word!r}"
-    params = set(inspect.signature(RelationTokenizer.forward).parameters) - {"self"}
-    assert params == {"rgb", "depth", "K", "cam_T_world", "hand", "R_P", "qpos"}
+    params = set(inspect.signature(ImageEncoder.forward).parameters) - {"self"}
+    assert params == MODEL_INPUTS
 
 
 def test_world_model_samples_contain_no_labels(tmp_path):
     root, lat = tmp_path / "data", tmp_path / "lat"
     e = _fake_trajectory(root / "G00" / "g" / "t.npz")
     (lat / "G00" / "g").mkdir(parents=True)
-    n, T = 9, 40
+    n, T = 12, 60
     np.savez(lat / "G00" / "g" / "t.npz", mean=np.zeros((n, 64, 8), np.float16), img_step=np.arange(n) * 4,
-             qpos=np.zeros((T, 9), np.float32), action=np.zeros((T - 1, 7), np.float32), hand=np.zeros((n, 4, 4)))
+             qpos=np.zeros((T, 9), np.float32), action=np.zeros((T - 1, 7), np.float32),
+             hand=np.tile(np.eye(4, dtype=np.float32), (T, 1, 1)), hand_cmd=np.tile(np.eye(4, dtype=np.float32), (T - 1, 1, 1)))
     e["n_images"] = n
     ds = LatentWindowDataset(lat, [e], "train", root, scale=1.0)
-    assert set(ds[0]) == {"x_cond", "x", "y", "rel_t"}
+    item = ds[0]
+    assert set(item) == {"x_cond", "x", "y", "rel_t"}
+    assert -16.0 <= float(item["rel_t"]) <= 16.0 and float(item["rel_t"]) != 0
 
 
 def test_test_ports_never_train_or_validate():

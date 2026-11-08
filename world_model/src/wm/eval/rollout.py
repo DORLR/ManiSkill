@@ -1,4 +1,5 @@
-"""Closed-loop rollouts of the latent policy.
+"""Closed-loop rollouts of a policy agent (v3 protocol, fixed before any v3 result: 60 s per episode,
+success = within 1 mm of full depth, seeded policy sampling, 4 grasps per shape and condition).
 
 Per grasp: the expert inserts once (as in data collection; grasps it cannot insert are reported
 and skipped, the same for every method), then for each far start (same start box as the data,
@@ -78,8 +79,13 @@ def _diagnosis(robot) -> dict:
 
 def episode(robot, expert, agent, start: Offset, seed: int, max_decisions: int = MAX_DECISIONS,
             on_step=None) -> dict:
-    """on_step(robot, frame_or_None): optional hook after every control step (used to record videos)."""
+    """on_step(robot): optional hook after every control step (used to record videos).
+    The policy's sampling is seeded with the episode seed, so an episode can be replayed exactly."""
+    import torch
+
     from .agent import EXECUTE
+    torch.manual_seed(seed)
+    np.random.seed(seed % (2 ** 32))
     if not expert.move_to_offset(start):
         return {"outcome": "placement_failed"}
     f = robot.frame()
@@ -100,8 +106,7 @@ def episode(robot, expert, agent, start: Offset, seed: int, max_decisions: int =
 _STATE = {}
 
 
-def _init(vae_ckpt: str, policy_ckpt: str, max_decisions: int = MAX_DECISIONS, wm_ckpt: str | None = None,
-          n_candidates: int = 16):
+def _init(vae_ckpt: str, policy_ckpt: str, max_decisions: int = MAX_DECISIONS):
     """Never raise here: an exception in a Pool initializer makes the pool respawn workers forever."""
     _STATE.update(port=None, robot=None, agent=None, init_error=None, max_decisions=max_decisions)
     try:
@@ -112,9 +117,6 @@ def _init(vae_ckpt: str, policy_ckpt: str, max_decisions: int = MAX_DECISIONS, w
         if kind == "image":
             from .agent import ImagePolicyAgent
             _STATE["agent"] = ImagePolicyAgent(policy_ckpt)
-        elif wm_ckpt:
-            from .planner import WorldModelGuidedAgent
-            _STATE["agent"] = WorldModelGuidedAgent(vae_ckpt, policy_ckpt, wm_ckpt, n_candidates)
         else:
             from .agent import LatentPolicyAgent
             _STATE["agent"] = LatentPolicyAgent(vae_ckpt, policy_ckpt)
@@ -152,7 +154,7 @@ def _work(g: EvalGrasp) -> dict:
 
 def run(vae_ckpt: str, policy_ckpt: str, split: str, out: Path, workers: int,
         grasps_per_cell: int, starts_per_grasp: int, only: list[str] | None = None,
-        max_decisions: int = MAX_DECISIONS, wm_ckpt: str | None = None, n_candidates: int = 16) -> None:
+        max_decisions: int = MAX_DECISIONS) -> None:
     out.mkdir(parents=True, exist_ok=True)
     done = set()
     res_path = out / "results.jsonl"
@@ -163,7 +165,7 @@ def run(vae_ckpt: str, policy_ckpt: str, split: str, out: Path, workers: int,
     grasps.sort(key=lambda g: g.port)
     print(f"{len(grasps)} grasps x {starts_per_grasp} starts, {workers} workers", flush=True)
     t0 = time.time()
-    with mp.get_context("spawn").Pool(workers, initializer=_init, initargs=(vae_ckpt, policy_ckpt, max_decisions, wm_ckpt, n_candidates)) as pool, \
+    with mp.get_context("spawn").Pool(workers, initializer=_init, initargs=(vae_ckpt, policy_ckpt, max_decisions)) as pool, \
             open(res_path, "a") as f:
         for k, r in enumerate(pool.imap_unordered(_work, grasps)):
             f.write(json.dumps(r) + "\n")
