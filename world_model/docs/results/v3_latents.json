@@ -1,0 +1,223 @@
+{
+ "trials": {
+  "train": [
+   2418,
+   1645
+  ],
+  "ood_val": [
+   2429,
+   1723
+  ]
+ },
+ "jam_probes": {
+  "push_start/latent/logistic": {
+   "balanced_acc": 0.705,
+   "auc": 0.764,
+   "jam_recall": 0.707,
+   "insert_recall": 0.703
+  },
+  "push_start/latent/mlp": {
+   "balanced_acc": 0.75,
+   "auc": 0.847,
+   "jam_recall": 0.855,
+   "insert_recall": 0.646
+  },
+  "push_start/joints/logistic": {
+   "balanced_acc": 0.61,
+   "auc": 0.597,
+   "jam_recall": 0.572,
+   "insert_recall": 0.649
+  },
+  "push_start/joints/mlp": {
+   "balanced_acc": 0.721,
+   "auc": 0.794,
+   "jam_recall": 0.836,
+   "insert_recall": 0.606
+  },
+  "push_start/truth/logistic": {
+   "balanced_acc": 0.833,
+   "auc": 0.927,
+   "jam_recall": 0.794,
+   "insert_recall": 0.873
+  },
+  "push_start/truth/mlp": {
+   "balanced_acc": 0.931,
+   "auc": 0.982,
+   "jam_recall": 0.936,
+   "insert_recall": 0.925
+  },
+  "push+0.4s/latent/logistic": {
+   "balanced_acc": 0.701,
+   "auc": 0.763,
+   "jam_recall": 0.709,
+   "insert_recall": 0.694
+  },
+  "push+0.4s/latent/mlp": {
+   "balanced_acc": 0.755,
+   "auc": 0.848,
+   "jam_recall": 0.849,
+   "insert_recall": 0.661
+  },
+  "push+0.4s/joints/logistic": {
+   "balanced_acc": 0.539,
+   "auc": 0.551,
+   "jam_recall": 0.486,
+   "insert_recall": 0.592
+  },
+  "push+0.4s/joints/mlp": {
+   "balanced_acc": 0.586,
+   "auc": 0.61,
+   "jam_recall": 0.715,
+   "insert_recall": 0.456
+  },
+  "push+0.4s/truth/logistic": {
+   "balanced_acc": 0.833,
+   "auc": 0.927,
+   "jam_recall": 0.794,
+   "insert_recall": 0.873
+  },
+  "push+0.4s/truth/mlp": {
+   "balanced_acc": 0.931,
+   "auc": 0.982,
+   "jam_recall": 0.936,
+   "insert_recall": 0.925
+  },
+  "push+0.8s/latent/logistic": {
+   "balanced_acc": 0.711,
+   "auc": 0.778,
+   "jam_recall": 0.723,
+   "insert_recall": 0.7
+  },
+  "push+0.8s/latent/mlp": {
+   "balanced_acc": 0.731,
+   "auc": 0.845,
+   "jam_recall": 0.891,
+   "insert_recall": 0.571
+  },
+  "push+0.8s/joints/logistic": {
+   "balanced_acc": 0.513,
+   "auc": 0.529,
+   "jam_recall": 0.413,
+   "insert_recall": 0.613
+  },
+  "push+0.8s/joints/mlp": {
+   "balanced_acc": 0.5,
+   "auc": 0.516,
+   "jam_recall": 0.66,
+   "insert_recall": 0.339
+  },
+  "push+0.8s/truth/logistic": {
+   "balanced_acc": 0.833,
+   "auc": 0.927,
+   "jam_recall": 0.794,
+   "insert_recall": 0.873
+  },
+  "push+0.8s/truth/mlp": {
+   "balanced_acc": 0.931,
+   "auc": 0.982,
+   "jam_recall": 0.936,
+   "insert_recall": 0.925
+  }
+ },
+ "offset_probes": {
+  "truth_spread_median_abs": {
+   "lateral_y_mm": 0.575,
+   "lateral_z_mm": 0.596,
+   "roll_deg": 0.404,
+   "pitch_deg": 0.397,
+   "yaw_deg": 0.412
+  },
+  "latent/linear": {
+   "lateral_y_mm": {
+    "r2": 0.724,
+    "median_abs_err": 0.3
+   },
+   "lateral_z_mm": {
+    "r2": 0.478,
+    "median_abs_err": 0.501
+   },
+   "roll_deg": {
+    "r2": 0.935,
+    "median_abs_err": 0.144
+   },
+   "pitch_deg": {
+    "r2": 0.618,
+    "median_abs_err": 0.277
+   },
+   "yaw_deg": {
+    "r2": 0.834,
+    "median_abs_err": 0.183
+   }
+  },
+  "latent/mlp": {
+   "lateral_y_mm": {
+    "r2": 0.788,
+    "median_abs_err": 0.292
+   },
+   "lateral_z_mm": {
+    "r2": 0.331,
+    "median_abs_err": 0.495
+   },
+   "roll_deg": {
+    "r2": 0.933,
+    "median_abs_err": 0.145
+   },
+   "pitch_deg": {
+    "r2": 0.633,
+    "median_abs_err": 0.258
+   },
+   "yaw_deg": {
+    "r2": 0.838,
+    "median_abs_err": 0.186
+   }
+  },
+  "joints/mlp": {
+   "lateral_y_mm": {
+    "r2": -0.087,
+    "median_abs_err": 0.627
+   },
+   "lateral_z_mm": {
+    "r2": -0.072,
+    "median_abs_err": 0.65
+   },
+   "roll_deg": {
+    "r2": -0.504,
+    "median_abs_err": 0.167
+   },
+   "pitch_deg": {
+    "r2": -0.713,
+    "median_abs_err": 0.632
+   },
+   "yaw_deg": {
+    "r2": -1.226,
+    "median_abs_err": 0.387
+   }
+  },
+  "pose_head/linear": {
+   "lateral_y_mm": {
+    "r2": 0.617,
+    "median_abs_err": 0.354
+   },
+   "lateral_z_mm": {
+    "r2": 0.038,
+    "median_abs_err": 0.618
+   },
+   "roll_deg": {
+    "r2": 0.908,
+    "median_abs_err": 0.145
+   },
+   "pitch_deg": {
+    "r2": -1.977,
+    "median_abs_err": 0.682
+   },
+   "yaw_deg": {
+    "r2": 0.854,
+    "median_abs_err": 0.19
+   }
+  }
+ },
+ "angle_gate": {
+  "latent_angle_r2": 0.801,
+  "pose_head_angle_r2": -0.072
+ }
+}

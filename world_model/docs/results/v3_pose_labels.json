@@ -1,0 +1,50 @@
+{
+ "contact_trials": {
+  "train": 2418,
+  "ood_val": 2429
+ },
+ "label_vs_truth_r2_linear": {
+  "lateral_y_mm": 0.992,
+  "lateral_z_mm": 0.987,
+  "roll_deg": 0.999,
+  "pitch_deg": 0.999,
+  "yaw_deg": 0.999
+ },
+ "label_rotation_deg_std": {
+  "x_roll": 0.854,
+  "y_pitch": 0.872,
+  "z_yaw": 0.864
+ },
+ "truth_rpy_deg_std": {
+  "roll": 0.907,
+  "pitch": 0.926,
+  "yaw": 0.918
+ },
+ "inserted_pose_vs_H_star": {
+  "trajectories": 8689,
+  "rotation_deg_xyz(roll,pitch,yaw)": {
+   "median_abs": [
+    0.0,
+    0.001,
+    0.0
+   ],
+   "p90_abs": [
+    0.012,
+    0.026,
+    0.009
+   ]
+  },
+  "translation_mm_xyz(depth,lateral_y,lateral_z)": {
+   "median_abs": [
+    0.001,
+    0.003,
+    0.004
+   ],
+   "p90_abs": [
+    0.037,
+    0.047,
+    0.195
+   ]
+  }
+ }
+}

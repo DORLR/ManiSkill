@@ -55,7 +55,7 @@ def contact_trials(data_root: str, latent_root: str, split: str) -> list[dict]:
         off = meta["offset"]
         out.append({"lat": d, "j0": j0, "push0": int(push[0]), "y": int(e["outcome"] == "jammed"),
                     "offset": np.array([*off["yz_mm"], *off["rpy_deg"]], np.float32),
-                    "R_P": np.asarray(e["R_P"], np.float64), "port": e["port"]})
+                    "R_P": np.asarray(e["R_P"], np.float64), "port": e["port"], "condition": e["condition"]})
     return out
 
 
