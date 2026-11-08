@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import random
 import time
 from pathlib import Path
@@ -22,6 +23,15 @@ def seed_all(seed: int):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+    limit_gpu_memory()
+
+
+def limit_gpu_memory():
+    """Cap this process's GPU memory (env WM_GPU_MEM_FRACTION, e.g. 0.2) on a shared GPU: if the cap
+    is reached only this process fails, the other users' jobs are never starved of memory."""
+    frac = os.environ.get("WM_GPU_MEM_FRACTION")
+    if frac and torch.cuda.is_available():
+        torch.cuda.set_per_process_memory_fraction(float(frac), 0)
 
 
 def to_device(batch: dict, device) -> dict:
@@ -50,16 +60,20 @@ class Logger:
 
 
 class EMA:
-    """Exponential moving average of parameters (DiT / NWM use decay 0.9999)."""
+    """Exponential moving average of parameters (DiT / NWM use decay 0.9999), with warm-up
+    decay = min(decay, (1 + n) / (10 + n)) after n updates. Without warm-up, after 5000 steps
+    61 % of the average is still the initialisation (measured: diffusion loss 0.46 vs 0.004 raw)."""
 
     def __init__(self, model: torch.nn.Module, decay: float):
-        self.decay = decay
+        self.decay, self.n = decay, 0
         self.model = copy.deepcopy(model).eval().requires_grad_(False)
 
     @torch.no_grad()
     def update(self, model: torch.nn.Module):
+        d = min(self.decay, (1 + self.n) / (10 + self.n))
+        self.n += 1
         for e, p in zip(self.model.parameters(), model.parameters()):
-            e.mul_(self.decay).add_(p.detach(), alpha=1 - self.decay)
+            e.mul_(d).add_(p.detach(), alpha=1 - d)
 
 
 def save_checkpoint(path: Path, **state):

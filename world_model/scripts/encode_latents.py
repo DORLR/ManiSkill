@@ -10,7 +10,7 @@ from pathlib import Path
 import torch
 
 from wm.data import index
-from wm.models.vae import TokenVAE
+from wm.models.vae import load_vae
 from wm.training import encode
 
 
@@ -19,11 +19,11 @@ def main():
     ap.add_argument("--vae", required=True)
     ap.add_argument("--data", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--kinds", nargs="+", help="only these trajectory kinds (e.g. contact, for the probes)")
     args = ap.parse_args()
-    ckpt = torch.load(args.vae, map_location="cpu")
-    model = TokenVAE(**ckpt["cfg"]["model"])
-    model.load_state_dict(ckpt["model"])
-    scale = encode.run(model, index.load(args.data), Path(args.data), Path(args.out), torch.device("cuda"))
+    model = load_vae(args.vae)
+    entries = [e for e in index.load(args.data) if not args.kinds or e["kind"] in args.kinds]
+    scale = encode.run(model, entries, Path(args.data), Path(args.out), torch.device("cuda"))
     print("latent scale", scale)
 
 

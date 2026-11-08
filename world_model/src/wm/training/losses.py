@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import torch
 
-from ..geometry import apply_rigid, plug_points_at_insertion
+from ..geometry import apply_rigid, insertion_motion, plug_points_at_insertion, rotation_angle_deg
 
 
 def chamfer_mm(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -30,5 +30,10 @@ def plug_point_loss_mm(R: torch.Tensor, t: torch.Tensor, plug_xyz: torch.Tensor,
     return (err * plug_mask).sum() / plug_mask.sum().clamp(min=1)
 
 
-def kl(mean: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
-    return 0.5 * (mean.pow(2) + logvar.exp() - 1 - logvar).mean()
+def insertion_angle_loss_deg(R: torch.Tensor, hand: torch.Tensor, h_star: torch.Tensor, R_P: torch.Tensor) -> torch.Tensor:
+    """Angle (deg) between the predicted rotation still needed and the true one (FK of the one
+    insertion). The plug-point loss is nearly blind to small angles (0.4 deg moves a 20 mm plug's
+    points by ~0.14 mm); this term supervises the rotation directly."""
+    with torch.autocast("cuda", enabled=False):
+        R_star, _ = insertion_motion(hand.float(), h_star.float(), R_P.float())
+        return rotation_angle_deg(R.float(), R_star).mean()

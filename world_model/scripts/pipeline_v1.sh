@@ -32,7 +32,4 @@ nice -n 10 python world_model/scripts/train_wm.py --config "$Q/runs/wm_trial_con
 test -f "$Q/runs/wm_trial/last.pt" || { stamp "STOP: CDiT trial wrote no checkpoint"; exit 1; }
 stamp "CDiT trial ok: $(grep val_ "$Q/logs/train_wm_trial.log" | tail -1 | cut -c1-160)"
 
-stamp "CDiT training"
-nice -n 10 python world_model/scripts/train_wm.py --config world_model/configs/wm_v1.json \
-    --run "$Q/runs/wm_v1" > "$Q/logs/train_wm_v1.log" 2>&1
-stamp "CDiT training finished"
+stamp "stopping after the CDiT trial: full CDiT training needs a decision on sharing GPU 1"

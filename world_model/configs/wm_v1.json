@@ -16,5 +16,8 @@
   "eval_batches": 8,
   "eval_sampling_steps": 50,
   "patience": 5,
-  "harm_margin": 0.05
+  "harm_margin": 0.05,
+  "amp": false,
+  "warmup_steps": 1000,
+  "max_skipped": 50
 }

@@ -14,7 +14,7 @@ from pathlib import Path
 import torch
 
 from wm.data import index
-from wm.models.vae import TokenVAE
+from wm.models.vae import load_vae
 from wm.training import common, encode, vae, wm
 
 CONFIGS = Path(__file__).resolve().parents[1] / "configs"
@@ -42,9 +42,7 @@ def main():
     best = vae.train(cfg_v, out / "vae", entries, max_steps=3)
     print(f"VAE ok ({time.time() - t0:.0f}s), peak GPU {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
 
-    ckpt = torch.load(best, map_location="cpu")
-    model = TokenVAE(**ckpt["cfg"]["model"])
-    model.load_state_dict(ckpt["model"])
+    model = load_vae(best)
     scale = encode.run(model, entries, Path(args.data), out / "latents", torch.device("cuda"))
     print(f"latents ok, scale {scale:.3f}")
 

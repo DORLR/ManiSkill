@@ -57,7 +57,7 @@ def _encode(model: TokenVAE, t: dict, device, batch: int) -> np.ndarray:
              "R_P": torch.from_numpy(t["R_P"]).expand(m, 3, 3)}
         b = {k: v.to(device, non_blocking=True) for k, v in b.items()}
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            mean, _, _ = model.encode(b)
+            mean, _ = model.encode(b)
         means.append(mean.float().cpu().numpy())
     return np.concatenate(means).astype(np.float16)
 

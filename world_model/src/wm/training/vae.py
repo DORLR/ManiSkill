@@ -1,8 +1,10 @@
-"""Stage 1: token VAE.
+"""Stage 1: token autoencoder.
 
 Loss = Chamfer(plug) + Chamfer(port) [mm] + w_pose * plug-point loss [mm]
-       + w_joint * joint L1 [mrad] + beta * KL.
-Model selection and the harm-only early stop use the OOD validation split.
+       + w_angle * insertion-angle error [deg] + w_joint * joint L1 [mrad]
+(v1 had + beta * KL and no angle term; see docs/worklog.md, 2026-11-07.)
+Model selection and the harm-only early stop use the OOD validation split, on
+plug-point loss + w_angle * angle (the two pose terms).
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ from ..data import index as data_index
 from ..data.datasets import FrameDataset
 from ..models.vae import TokenVAE
 from . import common
-from .losses import chamfer_mm, kl, plug_point_loss_mm
+from .losses import chamfer_mm, insertion_angle_loss_deg, plug_point_loss_mm
 
 
 def losses(out: dict, batch: dict, w: dict) -> dict:
@@ -25,10 +27,11 @@ def losses(out: dict, batch: dict, w: dict) -> dict:
          "chamfer_port": chamfer_mm(out["port_points"], out["port_xyz"], out["port_mask"]),
          "plug_point": plug_point_loss_mm(out["R"], out["t"], out["plug_xyz"], out["plug_mask"],
                                           batch["hand"], batch["h_star"], batch["R_P"]),
-         "joint_mrad": (out["joints"].float() - batch["qpos"][:, :7].float()).abs().mean() * 1000,
-         "kl": kl(out["mean"].float(), out["logvar"].float())}
+         "angle_deg": insertion_angle_loss_deg(out["R"], batch["hand"], batch["h_star"], batch["R_P"]),
+         "joint_mrad": (out["joints"].float() - batch["qpos"][:, :7].float()).abs().mean() * 1000}
+    l["pose_score"] = l["plug_point"] + w.get("angle", 0.0) * l["angle_deg"]
     l["total"] = (l["chamfer_plug"] + l["chamfer_port"] + w["pose"] * l["plug_point"]
-                  + w["joint"] * l["joint_mrad"] + w["beta"] * l["kl"])
+                  + w.get("angle", 0.0) * l["angle_deg"] + w["joint"] * l["joint_mrad"])
     return l
 
 
@@ -41,7 +44,7 @@ def evaluate(model, loader, w, device, max_batches: int) -> dict:
             break
         batch = common.to_device(batch, device)
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            l = losses(model(batch, sample=False), batch, w)
+            l = losses(model(batch), batch, w)
         for k, v in l.items():
             acc[k] = acc.get(k, 0.0) + float(v)
         n += 1
@@ -89,16 +92,16 @@ def train(cfg: dict, run_dir: Path, entries: list[dict] | None = None, max_steps
         if step % cfg["eval_every"] == 0 or step == steps:
             v = evaluate(model, val_loader, w, device, cfg["eval_batches"])
             log(step=step, **{f"val_{k}": x for k, x in v.items()})
-            if not math.isfinite(v["plug_point"]):
+            if not math.isfinite(v["pose_score"]):
                 log(event="stop_nonfinite_validation", step=step)
                 break
             common.save_checkpoint(run_dir / "last.pt", model=model.state_dict(), opt=opt.state_dict(), step=step, cfg=cfg)
-            if v["plug_point"] < best:
-                best, bad = v["plug_point"], 0
+            if v["pose_score"] < best:
+                best, bad = v["pose_score"], 0
                 common.save_checkpoint(run_dir / "best.pt", model=model.state_dict(), step=step, cfg=cfg)
             else:
                 bad += 1
-                if bad >= cfg["patience"] and v["plug_point"] > best * (1 + cfg["harm_margin"]):
-                    log(event="early_stop_harm", step=step, best=best, current=v["plug_point"])
+                if bad >= cfg["patience"] and v["pose_score"] > best * (1 + cfg["harm_margin"]):
+                    log(event="early_stop_harm", step=step, best=best, current=v["pose_score"])
                     break
     return run_dir / "best.pt"

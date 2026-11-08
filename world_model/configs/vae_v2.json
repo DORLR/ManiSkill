@@ -1,0 +1,37 @@
+{
+  "data": "/mnt/storage2/qingxin/data/wm_v1",
+  "seed": 0,
+  "model": {
+    "tokenizer": {
+      "d": 256,
+      "cross_layers": 4,
+      "query_layers": 2,
+      "n_plug": 128,
+      "n_port": 256,
+      "n_cand": 2048,
+      "use_dino": true
+    },
+    "latent_ch": 8,
+    "dec_d": 256,
+    "dec_layers": 2,
+    "n_dec_plug": 256,
+    "n_dec_port": 512
+  },
+  "loss_weights": {
+    "pose": 1.0,
+    "angle": 2.0,
+    "joint": 0.01
+  },
+  "batch_size": 32,
+  "workers": 12,
+  "lr": 0.0001,
+  "weight_decay": 0.01,
+  "grad_clip": 1.0,
+  "steps": 60000,
+  "log_every": 100,
+  "eval_every": 2000,
+  "eval_batches": 50,
+  "patience": 5,
+  "harm_margin": 0.05,
+  "max_skipped": 50
+}
