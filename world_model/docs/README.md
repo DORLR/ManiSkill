@@ -24,4 +24,6 @@ summaries) are copied into `results/`; run directories are on rs2 under `/mnt/st
 | `v1_offset_report.json`, `v2_offset_report.json` | offset regressions |
 | `v1_wm_contact.json`, `v2_wm_contact.json`, `v2_report_world_model.json` | world-model stall checks (one step) |
 | `v3_adapter.json` | joint adapter on the contact trials (free vs blocked) |
+| `v3_latents.json` | v3 latent checks: jam probes, offset regressions, gate |
+| `v3_pose_labels.json` | pose label vs true offset; spread of inserted poses within a grasp |
 | `v1_wm_contact_rollout.json`, `v2_wm_contact_rollout.json` | multi-step checks -- **invalid** (decoded joints exploded), kept as the record of that failure |
