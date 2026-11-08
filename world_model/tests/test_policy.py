@@ -22,7 +22,8 @@ def _latent_file(lat, n=5, T=20):
     (lat / "G00" / "g").mkdir(parents=True)
     np.savez(lat / "G00" / "g" / "t.npz", mean=np.zeros((n, 64, 8), np.float16), img_step=np.arange(n) * 4,
              qpos=np.zeros((T, 9), np.float32), action=np.ones((T - 1, 7), np.float32),
-             hand=np.tile(np.eye(4, dtype=np.float32), (T, 1, 1)), hand_cmd=np.tile(np.eye(4, dtype=np.float32), (T - 1, 1, 1)))
+             hand=np.tile(np.eye(4, dtype=np.float32), (T, 1, 1)), hand_cmd=np.tile(np.eye(4, dtype=np.float32), (T - 1, 1, 1)),
+             cam_T_world=np.tile(np.eye(4, dtype=np.float32), (n, 1, 1)), K=np.eye(3, dtype=np.float32))
 
 
 def test_policy_dataset(tmp_path):

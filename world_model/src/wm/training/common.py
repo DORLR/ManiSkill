@@ -35,7 +35,9 @@ def limit_gpu_memory():
 
 
 def to_device(batch: dict, device) -> dict:
-    return {k: v.to(device, non_blocking=True) if torch.is_tensor(v) else v for k, v in batch.items()}
+    """Moves tensors (also inside nested dicts, e.g. the target-frame geometry) to the device."""
+    return {k: v.to(device, non_blocking=True) if torch.is_tensor(v) else (to_device(v, device) if isinstance(v, dict) else v)
+            for k, v in batch.items()}
 
 
 def cycle(loader):

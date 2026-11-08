@@ -1,4 +1,6 @@
 #!/bin/bash
+# NOTE: ran at commit 9c662f0 (v3 pose regressor; stopped at the latent gate). The v3 configs now point
+# to the v3g runs; only its baseline branch (training + evaluation) is still in use. See pipeline_v3g.sh.
 # v3, everything from scratch (docs/design_v3.md). GPU 1 only; memory caps per process
 # (WM_GPU_MEM_FRACTION of 98 GB) keep our total under 55 GB:
 #

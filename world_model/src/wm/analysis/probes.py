@@ -158,12 +158,21 @@ def _rotvec_deg(R: torch.Tensor) -> torch.Tensor:
     return torch.rad2deg(v * (ang / (2 * torch.sin(ang).clamp_min(1e-6)))[:, None])
 
 
+def frame_geometry(trials: list[dict], j_of, dev) -> dict:
+    """Batched geometry (K, camera pose, hand pose, port axes) of image j_of(t) of each trial."""
+    st = lambda f: torch.tensor(np.stack([f(t) for t in trials]), dtype=torch.float32, device=dev)
+    return {"K": st(lambda t: t["lat"]["K"]), "cam_T_world": st(lambda t: t["lat"]["cam_T_world"][j_of(t)]),
+            "hand": st(lambda t: t["lat"]["hand"][int(t["lat"]["img_step"][j_of(t)])]), "R_P": st(lambda t: t["R_P"])}
+
+
 @torch.no_grad()
 def _pose_reading(ts, vae, scale, dev) -> np.ndarray:
+    """Plug pose solved from the push-start latent (rotation vector deg, translation mm)."""
     out = []
     for b in range(0, len(ts), 256):
-        z = torch.tensor(np.stack([t["lat"]["mean"][t["j0"]] for t in ts[b:b + 256]]), dtype=torch.float32, device=dev)
-        R, t = vae.decode_pose(z)
+        ch = ts[b:b + 256]
+        z = torch.tensor(np.stack([t["lat"]["mean"][t["j0"]] for t in ch]), dtype=torch.float32, device=dev)
+        R, t = vae.decode_pose(z, frame_geometry(ch, lambda t: t["j0"], dev))
         out.append(torch.cat([_rotvec_deg(R.float()), t.float() * 1000], -1).cpu().numpy())
     return np.concatenate(out)
 
@@ -183,12 +192,29 @@ def offset_probes(tr: list[dict], te: list[dict], scale: float, vae=None, dev=No
     return rep
 
 
+def pose_by_condition(te: list[dict], vae, scale, dev) -> dict:
+    """Correlation of the solved pose's components with the true offset, per grasp condition (held-out
+    shapes). The v3 regressor failed exactly here: pitch under grasp-pitch extrapolation."""
+    pred, off = _pose_reading(te, vae, scale, dev), np.stack([t["offset"] for t in te])
+    cond = np.array([t["condition"] for t in te])
+    pairs = {"roll": (0, 2), "pitch": (1, 3), "yaw": (2, 4), "lateral_y": (4, 0), "lateral_z": (5, 1)}
+    out = {}
+    for c in sorted(set(cond)):
+        m = cond == c
+        out[c] = {"trials": int(m.sum()), **{n: round(float(abs(np.corrcoef(pred[m, i], off[m, k])[0, 1])), 3)
+                                              for n, (i, k) in pairs.items()},
+                  "pitch_reading_std_deg": round(float(pred[m, 1].std()), 3)}
+    return out
+
+
 def angle_gate(offset_report: dict) -> dict:
     """Mean R^2 of roll / pitch / yaw from the latent (MLP) and from the pose head (linear)."""
     ang = ("roll_deg", "pitch_deg", "yaw_deg")
     lat = float(np.mean([offset_report["latent/mlp"][a]["r2"] for a in ang]))
-    head = float(np.mean([offset_report["pose_head/linear"][a]["r2"] for a in ang])) if "pose_head/linear" in offset_report else float("nan")
-    return {"latent_angle_r2": round(lat, 3), "pose_head_angle_r2": round(head, 3)}
+    has = "pose_head/linear" in offset_report
+    head = float(np.mean([offset_report["pose_head/linear"][a]["r2"] for a in ang])) if has else float("nan")
+    pitch = float(offset_report["pose_head/linear"]["pitch_deg"]["r2"]) if has else float("nan")
+    return {"latent_angle_r2": round(lat, 3), "pose_head_angle_r2": round(head, 3), "pose_head_pitch_r2": round(pitch, 3)}
 
 
 assert CONTEXT == 4

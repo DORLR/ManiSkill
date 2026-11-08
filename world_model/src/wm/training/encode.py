@@ -7,6 +7,7 @@ Writes <out>/<relative trajectory path>.npz with
     action    (T, 7)              commanded joint targets
     hand      (T+1, 4, 4)         measured hand pose (FK of qpos)
     hand_cmd  (T, 4, 4)           commanded hand pose (FK of the targets; data/kinematics.py)
+    cam_T_world (N, 4, 4), K (3, 3)  camera pose / intrinsics of each image (to read a pose from a latent)
 and <out>/stats.json with the latent scale (1 / RMS over the train split, as Stable Diffusion's
 0.18215). Trajectories are read and decoded by DataLoader workers; the GPU encodes in batches.
 """
@@ -83,7 +84,8 @@ def run(model: TokenVAE, entries: list[dict], data_root: Path, ee_root: Path, ou
             mean = _encode(model, t, device, batch)
             dst.parent.mkdir(parents=True, exist_ok=True)
             np.savez(dst, mean=mean, img_step=t["img_step"], qpos=t["qpos"], action=t["action"],
-                     hand=t["hand"].astype(np.float32), hand_cmd=t["hand_cmd"].astype(np.float32))
+                     hand=t["hand"].astype(np.float32), hand_cmd=t["hand_cmd"].astype(np.float32),
+                     cam_T_world=t["cam_T_world"].astype(np.float32), K=np.asarray(t["K"], np.float32))
         if t["split"] == "train":
             m = mean.astype(np.float64)
             sq, cnt = sq + float((m ** 2).sum()), cnt + m.size

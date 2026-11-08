@@ -1,8 +1,10 @@
 """Stage 1: autoencoder (v3), trained from scratch.
 
 Loss = w_depth * depth L1 [mm] + w_valid * validity BCE + w_rgb * RGB L1 + w_dino * (1 - cos DINO)
-       + w_grid * reference-grid pose error [mm] + w_angle * angle error [deg]
-(losses.py; weights in the config). No KL (deterministic latent).
+       + w_motion * per-pixel motion L1 [mm] + w_weight * per-pixel weight BCE
+       + w_grid * reference-grid error of the solved pose [mm] + w_angle * its angle error [deg]
+(losses.py; weights in the config). No KL (deterministic latent). v3g: the pose is solved from per-pixel
+motions by a weighted rigid fit (models/vae.py), not regressed.
 
 Validation on ood_val (held-out shapes) every eval_every steps; model selection and the harm-only
 early stop use the pose score = grid + w_angle * angle, the quantity the world model is read by.
@@ -21,15 +23,16 @@ from ..data.datasets import FrameDataset
 from ..geometry import plug_region_points
 from ..models.vae import TokenVAE
 from . import common
-from .losses import insertion_pose, reconstruction
+from .losses import geometric_pose, reconstruction
 
 
 def losses(out: dict, batch: dict, w: dict, ref: torch.Tensor) -> dict:
     l = reconstruction(out["pred"], out["target"])
-    l.update(insertion_pose(out["pred"]["R"], out["pred"]["t"], batch["hand"], batch["h_star"], batch["R_P"], ref))
+    l.update(geometric_pose(out["pred"], out["target"], batch, ref))
     l["pose_score"] = l["grid_mm"] + w["angle"] * l["angle_deg"]
     l["total"] = (w["depth"] * l["depth_mm"] + w["valid"] * l["valid_bce"] + w["rgb"] * l["rgb_l1"]
-                  + w["dino"] * l["dino_cos"] + w["grid"] * l["grid_mm"] + w["angle"] * l["angle_deg"])
+                  + w["dino"] * l["dino_cos"] + w["motion"] * l["motion_mm"] + w["weight"] * l["weight_bce"]
+                  + w["grid"] * l["grid_mm"] + w["angle"] * l["angle_deg"])
     return l
 
 

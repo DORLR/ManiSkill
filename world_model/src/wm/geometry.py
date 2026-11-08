@@ -76,3 +76,64 @@ def pose_loss_terms(R_a, t_a, R_b, t_b, ref) -> tuple[torch.Tensor, torch.Tensor
     label and for the world model's predicted pose against the pose read from the true latent."""
     return (grid_pose_error_mm(R_a.float(), t_a.float(), R_b.float(), t_b.float(), ref),
             rotation_angle_deg(R_a.float(), R_b.float()))
+
+
+# ---------------------------------------------------------------------------- geometric pose readout
+def pixel_points(depth_m: torch.Tensor, K: torch.Tensor, cam_T_world: torch.Tensor, hand: torch.Tensor,
+                 R_P: torch.Tensor, crop: int) -> torch.Tensor:
+    """3-D point of every pixel of a G x G depth image (the crop resized to G x G), in hand-centred port
+    axes: (B, G*G, 3). depth_m (B, G, G) metres along the optical axis (0 = no return; such points are
+    meaningless and must be masked by the caller). K is the crop's intrinsics (crop x crop pixels)."""
+    B, G = depth_m.shape[0], depth_m.shape[-1]
+    c = (torch.arange(G, device=depth_m.device, dtype=torch.float32) + 0.5) * crop / G - 0.5
+    v, u = torch.meshgrid(c, c, indexing="ij")
+    pix = torch.stack([u.flatten(), v.flatten(), torch.ones_like(u.flatten())], 0)            # (3, G*G)
+    rays = torch.linalg.solve(K.float(), pix[None].expand(B, -1, -1))                          # z = 1
+    x_cam = rays * depth_m.reshape(B, 1, -1).float()                                            # (B, 3, N)
+    R_wc = cam_T_world[:, :3, :3].float().transpose(1, 2)
+    c_w = -(R_wc @ cam_T_world[:, :3, 3:].float())                                              # camera centre
+    x_w = R_wc @ x_cam + c_w
+    return (R_P.float().transpose(1, 2) @ (x_w - hand[:, :3, 3:].float())).transpose(1, 2)
+
+
+def _skew(v: torch.Tensor) -> torch.Tensor:
+    z = torch.zeros_like(v[..., 0])
+    return torch.stack([torch.stack([z, -v[..., 2], v[..., 1]], -1),
+                        torch.stack([v[..., 2], z, -v[..., 0]], -1),
+                        torch.stack([-v[..., 1], v[..., 0], z], -1)], -2)
+
+
+def _exp_so3(w: torch.Tensor) -> torch.Tensor:
+    """Rodrigues: rotation vector (B, 3) -> (B, 3, 3)."""
+    th = w.norm(dim=-1, keepdim=True).clamp(min=1e-12)[..., None]
+    Kx = _skew(w) / th
+    I = torch.eye(3, device=w.device, dtype=w.dtype).expand_as(Kx)
+    return I + torch.sin(th) * Kx + (1 - torch.cos(th)) * Kx @ Kx
+
+
+def weighted_rigid_fit(p: torch.Tensor, q: torch.Tensor, w: torch.Tensor, iters: int = 4, damping: float = 1e-6):
+    """Rigid motion (R, t) minimising sum_i w_i |R p_i + t - q_i|^2 (the Kabsch objective), solved by
+    damped Gauss-Newton on (rotation vector, translation) from the identity. Used instead of the SVD
+    solution because SVD gradients blow up for nearly planar point sets (the plug pins); for the
+    rotations here (a few degrees, < 30 deg) 4 steps converge to the Kabsch optimum. Differentiable.
+    p, q (B, N, 3) metres, w (B, N) >= 0; points are centred and scaled internally for conditioning."""
+    w = w.float().clamp(min=0) + 1e-8
+    wn = w / w.sum(1, keepdim=True)
+    mp = (wn[..., None] * p).sum(1, keepdim=True)
+    scale = ((wn * (p - mp).pow(2).sum(-1)).sum(1).sqrt().clamp(min=1e-4))[:, None, None]
+    P, Qs = (p - mp) / scale, (q - mp) / scale
+    R = torch.eye(3, device=p.device).expand(p.shape[0], 3, 3)
+    t = (wn[..., None] * (Qs - P)).sum(1)
+    I6 = torch.eye(6, device=p.device)
+    for _ in range(iters):
+        Pr = P @ R.transpose(1, 2)                                   # rotated points
+        r = Pr + t[:, None] - Qs                                     # residuals (B, N, 3)
+        J = torch.cat([-_skew(Pr), torch.eye(3, device=p.device).expand(*Pr.shape[:2], 3, 3)], -1)   # (B,N,3,6)
+        A = torch.einsum("bn,bnij,bnik->bjk", wn, J, J) + damping * I6
+        g = torch.einsum("bn,bnij,bni->bj", wn, J, r)
+        d = -torch.linalg.solve(A, g)
+        R = _exp_so3(d[:, :3]) @ R
+        t = t + d[:, 3:]
+    # back to the original frame: q ~ R (p - mp) + mp + scale * t
+    t_out = mp[:, 0] + scale[:, 0, 0, None] * t - (R @ mp[:, 0, :, None])[..., 0]
+    return R, t_out

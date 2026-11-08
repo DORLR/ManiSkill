@@ -21,7 +21,9 @@
     "rgb": 10.0,
     "dino": 1.0,
     "grid": 1.0,
-    "angle": 2.0
+    "angle": 2.0,
+    "motion": 1.0,
+    "weight": 1.0
   },
   "batch_size": 32,
   "workers": 12,

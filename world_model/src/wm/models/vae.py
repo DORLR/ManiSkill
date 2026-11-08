@@ -9,10 +9,14 @@ Decoder, from the latent only:
     patch decoder   one query per image patch (529) reads the latent and reconstructs that patch:
                     raw depth (incl. where the camera has no return: a validity logit per pixel),
                     raw RGB, and the frozen DINOv2 feature -- the whole frame as the camera gave it
-    pose head       the rigid motion the plug still needs to be fully inserted, in hand-centred
-                    port axes (6D rotation + translation); trained against FK of the one
-                    insertion of this grasp (training/losses.py). The world model's predictions
-                    are read through this head.
+    geometric pose  (v3g, replaces v3's direct pose regressor, which confused the grasp pitch with
+                    the plug's misalignment) every pixel also gets a predicted motion "where will this
+                    point be when the plug is inserted" (3-D, hand-centred port axes) and a weight;
+                    the rigid motion the plug still needs is then *solved* from the pixels' current
+                    3-D points p (decoded depth + intrinsics + camera pose) and p + motion by a
+                    weighted rigid fit (geometry.weighted_rigid_fit, the Kabsch objective). Nothing
+                    in the solver is learned. Trained against FK of the one insertion of this grasp
+                    (training/losses.py). The world model's predictions are read through it.
 """
 
 from __future__ import annotations
@@ -20,15 +24,15 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from ..geometry import rot6d_to_matrix
-from .encoder import N_PATCH, N_TOKENS, PATCH, ImageEncoder
+from ..geometry import pixel_points, weighted_rigid_fit
+from .encoder import DEPTH_SCALE_M, IMG, N_PATCH, N_TOKENS, PATCH, ImageEncoder
+
+MOTION_SCALE_M = 0.01      # predicted per-pixel motion in centimetres
 
 
-def mlp(dims):
-    layers = []
-    for a, b in zip(dims[:-1], dims[1:]):
-        layers += [nn.Linear(a, b), nn.SiLU()]
-    return nn.Sequential(*layers[:-1])
+def unpatchify(x: torch.Tensor, channels: int) -> torch.Tensor:
+    """(B, 529, channels * 14 * 14) row-major patches -> (B, channels, 322, 322) (inverse of encoder.patchify)."""
+    return torch.nn.functional.fold(x.transpose(1, 2), (IMG, IMG), kernel_size=PATCH, stride=PATCH)
 
 
 class TokenVAE(nn.Module):
@@ -54,10 +58,8 @@ class TokenVAE(nn.Module):
         self.out_valid = nn.Linear(dec_d, PATCH * PATCH)          # logit: camera returned a depth
         self.out_rgb = nn.Linear(dec_d, 3 * PATCH * PATCH)        # [0, 1]
         self.out_dino = nn.Linear(dec_d, self.encoder.dino.dim)
-        # pose head: attention pooling over the trunk, then 6D rotation + translation
-        self.pose_q = nn.Parameter(torch.randn(1, 1, dec_d) * 0.02)
-        self.pose_pool = nn.MultiheadAttention(dec_d, heads, batch_first=True)
-        self.pose_out = mlp((dec_d, 256, 9))
+        self.out_motion = nn.Linear(dec_d, 3 * PATCH * PATCH)      # per pixel: motion to inserted [cm]
+        self.out_weight = nn.Linear(dec_d, PATCH * PATCH)          # per pixel: weight logit in the fit
 
     # ------------------------------------------------------------------ encode
     def encode(self, batch: dict) -> tuple[torch.Tensor, dict]:
@@ -69,27 +71,47 @@ class TokenVAE(nn.Module):
     def _trunk(self, z: torch.Tensor) -> torch.Tensor:
         return self.trunk(self.from_latent(z) + self.pos)
 
-    def _pose(self, h: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        pooled = self.pose_pool(self.pose_q.expand(h.shape[0], -1, -1), h, h, need_weights=False)[0][:, 0]
-        pose = self.pose_out(pooled)
-        return rot6d_to_matrix(pose[:, :6]), pose[:, 6:] * 0.01          # translation in metres
-
-    def decode_pose(self, z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Only the pose head: (R, t) the plug still has to move to be inserted (cheap; used by the
-        world model's pose loss, the checks and the planner)."""
-        return self._pose(self._trunk(z))
-
     def decode(self, z: torch.Tensor) -> dict:
-        """z (B, 64, C) -> per-patch depth / validity / RGB / DINO and the plug pose (R, t)."""
+        """z (B, 64, C) -> per-patch depth / validity / RGB / DINO / motion / weight."""
         h = self._trunk(z)
         q = self.patch_dec(self.patch_queries[None].expand(z.shape[0], -1, -1), h)
-        R, t = self._pose(h)
-        return {"depth_patch": self.out_depth(q), "valid_logit": self.out_valid(q),
-                "rgb_patch": self.out_rgb(q), "dino": self.out_dino(q), "R": R, "t": t}
+        return {"depth_patch": self.out_depth(q), "valid_logit": self.out_valid(q), "rgb_patch": self.out_rgb(q),
+                "dino": self.out_dino(q), "motion_patch": self.out_motion(q), "weight_logit": self.out_weight(q)}
+
+    @staticmethod
+    def solve_pose(dec: dict, geom: dict, depth_patch: torch.Tensor | None = None):
+        """Rigid motion the plug still needs, (R, t in m), from decoded per-pixel motions and weights.
+
+        geom: K, cam_T_world, hand, R_P of the frame (FK, hand-eye mount, board-plane fit). Current 3-D
+        points come from `depth_patch` if given, else from the decoded depth (what is available for a
+        predicted latent); they are not differentiated through (depth has its own loss). Pixels count
+        with weight sigmoid(weight) x P(depth return)."""
+        with torch.autocast("cuda", enabled=False):      # geometry and the fit in fp32
+            return TokenVAE._solve_fp32(dec, geom, depth_patch)
+
+    @staticmethod
+    def _solve_fp32(dec: dict, geom: dict, depth_patch: torch.Tensor | None):
+        d = dec["depth_patch"] if depth_patch is None else depth_patch
+        depth_m = unpatchify(d.detach().float(), 1)[:, 0] * DEPTH_SCALE_M
+        p = pixel_points(depth_m, geom["K"], geom["cam_T_world"], geom["hand"], geom["R_P"], crop=320)
+        motion = unpatchify(dec["motion_patch"].float(), 3).flatten(2).transpose(1, 2) * MOTION_SCALE_M
+        w = torch.sigmoid(unpatchify(dec["weight_logit"].float(), 1).flatten(1))
+        if depth_patch is not None:
+            valid = (depth_m.flatten(1) > 0).float()
+        else:
+            valid = torch.sigmoid(unpatchify(dec["valid_logit"].detach().float(), 1).flatten(1))
+        return weighted_rigid_fit(p.detach(), p.detach() + motion, w * valid)
+
+    def decode_pose(self, z: torch.Tensor, geom: dict):
+        """What the world model and the checks need: (R, t) solved from the decoded frame."""
+        return self.solve_pose(self.decode(z), geom)
 
     def forward(self, batch: dict) -> dict:
         z, aux = self.encode(batch)
-        return {"z": z, "pred": self.decode(z), "target": aux}
+        dec = self.decode(z)
+        geom = {k: batch[k] for k in ("K", "cam_T_world", "hand", "R_P")}
+        R, t = self.solve_pose(dec, geom)
+        return {"z": z, "pred": {**dec, "R": R, "t": t}, "target": aux}
 
 
 def load_vae(path: str, device=None) -> TokenVAE:

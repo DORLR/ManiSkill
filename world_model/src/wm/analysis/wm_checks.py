@@ -28,6 +28,7 @@ import torch
 from ..data.conditions import rel_t_seconds, wm_condition
 from ..data.datasets import CONTEXT, WM_STRIDE, LatentWindowDataset, adapter_io
 from ..geometry import grid_pose_error_mm, plug_region_points, pose_loss_terms
+from .probes import frame_geometry
 from ..models.cdit import create_diffusion, grid_to_tokens, tokens_to_grid
 
 HORIZONS = {"+0.4s": 2, "+2s": 10, "+4s": 20, "+8s": 40, "+16s": 80, "-4s": -20}
@@ -42,20 +43,20 @@ class Reader:
         self.ref = plug_region_points(dev)
 
     @torch.no_grad()
-    def pose(self, z):
-        return self.vae.decode_pose(z / self.scale)
+    def pose(self, z, geom):
+        return self.vae.decode_pose(z / self.scale, geom)
 
     @torch.no_grad()
-    def distance(self, z) -> np.ndarray:
-        """Distance to inserted (mm) read from latents (B, 64, C)."""
-        R, t = self.pose(z)
+    def distance(self, z, geom) -> np.ndarray:
+        """Distance to inserted (mm) read from latents (B, 64, C) as frames with geometry `geom`."""
+        R, t = self.pose(z, geom)
         eye = torch.eye(3, device=z.device).expand(len(z), 3, 3)
         return grid_pose_error_mm(R.float(), t.float(), eye, torch.zeros_like(t).float(), self.ref).cpu().numpy()
 
     @torch.no_grad()
-    def errors(self, z_a, z_b) -> tuple[np.ndarray, np.ndarray]:
-        Ra, ta = self.pose(z_a)
-        Rb, tb = self.pose(z_b)
+    def errors(self, z_a, z_b, geom) -> tuple[np.ndarray, np.ndarray]:
+        Ra, ta = self.pose(z_a, geom)
+        Rb, tb = self.pose(z_b, geom)
         g, a = pose_loss_terms(Ra, ta, Rb, tb, self.ref)
         return g.cpu().numpy(), a.cpu().numpy()
 
@@ -82,9 +83,10 @@ def horizon_accuracy(rd: Reader, latent_root, entries, data_root, n_per_shift: i
         for b in range(0, len(idx), batch):
             items = [ds[int(i)] for i in idx[b:b + batch]]
             st = lambda k: torch.stack([it[k] for it in items]).to(rd.dev)
+            geom = {k: torch.stack([it["geom"][k] for it in items]).to(rd.dev) for k in items[0]["geom"]}
             pred = rd.predict(st("x_cond"), st("y"), st("rel_t"))
-            e = rd.errors(pred, st("x"))
-            c = rd.errors(st("x_cond")[:, -1], st("x"))
+            e = rd.errors(pred, st("x"), geom)
+            c = rd.errors(st("x_cond")[:, -1], st("x"), geom)
             g.append(e[0]), a.append(e[1]), gc.append(c[0]), ac.append(c[1])
         g, a, gc, ac = map(np.concatenate, (g, a, gc, ac))
         out[name] = {"windows": len(g), "pred_grid_mm": _med(g), "pred_angle_deg": _med(a),
@@ -111,9 +113,11 @@ def jam_separation(rd: Reader, trials: list[dict], shifts=(("+2s", 10), ("+4s", 
                 rel.append(rel_t_seconds(int(steps[j]), int(steps[j + m])))
             T = lambda v: torch.tensor(np.stack(v), dtype=torch.float32, device=rd.dev)
             ctx_t = T(ctx)
-            now = rd.distance(ctx_t[:, -1])
-            real = rd.distance(T(tgt))
-            pred = rd.distance(rd.predict(ctx_t, T(y), T(rel)))
+            g_now = frame_geometry(chunk, lambda t: t["j0"], rd.dev)
+            g_tgt = frame_geometry(chunk, lambda t: t["j0"] + m, rd.dev)
+            now = rd.distance(ctx_t[:, -1], g_now)
+            real = rd.distance(T(tgt), g_tgt)
+            pred = rd.distance(rd.predict(ctx_t, T(y), T(rel)), g_tgt)
             rows += [(t["y"], now[i] - real[i], now[i] - pred[i]) for i, t in enumerate(chunk)]
         r = np.array(rows)
         if not len(r):
@@ -164,7 +168,8 @@ def rollout_stability(rd: Reader, adapter, fk, trajs: list[dict], steps_ahead: i
             if k + 1 in report_at:
                 jt = j0 + WM_STRIDE * (k + 1)
                 real = T([t["lat"]["mean"][jt] * rd.scale for t in chunk])
-                g, a = rd.errors(z, real)
+                # read both as the real frame jt (its camera pose / hand pose from the recording)
+                g, a = rd.errors(z, real, frame_geometry(chunk, lambda t: jt, rd.dev))
                 st_t = [int(t["lat"]["img_step"][jt]) for t in chunk]
                 jerr = [np.abs(q_im[i][s, :7] - t["lat"]["qpos"][s, :7]).mean() * 1000 for i, (t, s) in enumerate(zip(chunk, st_t))]
                 herr = [np.linalg.norm(h_im[i][s][:3, 3] - t["lat"]["hand"][s][:3, 3]) * 1000 for i, (t, s) in enumerate(zip(chunk, st_t))]

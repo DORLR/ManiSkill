@@ -34,6 +34,7 @@ def main():
            "jam_probes": probes.jam_probes(tr, te, scale)}
     rep["offset_probes"] = probes.offset_probes(tr, te, scale, vae, dev)
     rep["angle_gate"] = probes.angle_gate(rep["offset_probes"])
+    rep["pose_by_condition"] = probes.pose_by_condition(te, vae, scale, dev)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     (out / "latents.json").write_text(json.dumps(rep, indent=1))

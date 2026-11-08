@@ -7,12 +7,12 @@ import torch
 
 from wm.data.conditions import COND_DIM, pose_feature, wm_condition
 from wm.geometry import (insertion_motion, plug_points_at_insertion, plug_region_points, pose_loss_terms,
-                         rot6d_to_matrix, rotation_angle_deg)
+                         rot6d_to_matrix, rotation_angle_deg, weighted_rigid_fit)
 from wm.models.adapter import IN_DIM, OUT_DIM, JointAdapter
 from wm.models.cdit import TokenCDiT, create_diffusion, grid_to_tokens, tokens_to_grid
 from wm.models.encoder import N_PATCH, prepare
 from wm.models.vae import TokenVAE
-from wm.training.losses import insertion_pose, reconstruction
+from wm.training.losses import geometric_pose, reconstruction
 
 ENC = dict(d=32, layers=1, query_layers=1, heads=4, dino=False)
 
@@ -23,7 +23,8 @@ def _batch(B=2):
     K = torch.tensor([[300.0, 0, 160], [0, 300.0, 160], [0, 0, 1]]).expand(B, 3, 3)
     eye = torch.eye(4).expand(B, 4, 4).clone()
     return {"rgb": torch.randint(0, 255, (B, 320, 320, 3), dtype=torch.uint8), "depth": torch.from_numpy(depth),
-            "K": K, "cam_T_world": eye, "hand": eye.clone(), "R_P": torch.eye(3).expand(B, 3, 3), "h_star": eye.clone()}
+            "K": K, "cam_T_world": eye, "hand": eye.clone(), "R_P": torch.eye(3).expand(B, 3, 3), "h_star": eye.clone(),
+            "seg": torch.from_numpy((depth > 0).astype(np.uint8))}       # "plug" = the pixels with depth
 
 
 def test_depth_kept_as_is():
@@ -40,7 +41,7 @@ def test_autoencoder_forward_backward():
     out = m(b)
     assert out["z"].shape == (2, 64, 8) and out["pred"]["depth_patch"].shape == (2, N_PATCH, 196)
     l = reconstruction(out["pred"], out["target"])
-    l.update(insertion_pose(out["pred"]["R"], out["pred"]["t"], b["hand"], b["h_star"], b["R_P"], plug_region_points()))
+    l.update(geometric_pose(out["pred"], out["target"], b, plug_region_points()))
     sum(l.values()).backward()
     assert all(torch.isfinite(v) for v in l.values())
 
@@ -58,6 +59,19 @@ def test_insertion_angle_and_grid_zero_for_true_motion():
     g, ang = pose_loss_terms(R_star, t_star, R_star, t_star, plug_region_points())
     assert float(g.max()) < 1e-4 and float(ang.max()) < 2e-2
     assert abs(float(rotation_angle_deg(R_star, torch.eye(3).expand(B, 3, 3))[0]) - math.degrees(a)) < 1e-2
+
+
+def test_rigid_fit_recovers_motion():
+    torch.manual_seed(0)
+    p = torch.randn(2, 300, 3) * 0.01 + torch.tensor([0.02, 0.0, 0.0])
+    p[:, :, 2] *= 0.05                                              # nearly planar, like the plug pins
+    R_true = rot6d_to_matrix(torch.tensor([[1.0, 0.03, -0.02, -0.03, 1.0, 0.04]]).expand(2, 6))
+    t_true = torch.tensor([[0.012, -0.003, 0.004]]).expand(2, 3)
+    q = p @ R_true.transpose(1, 2) + t_true[:, None]
+    w = torch.rand(2, 300)
+    R, t = weighted_rigid_fit(p, q, w)
+    assert float(rotation_angle_deg(R, R_true).max()) < 0.01 and float((t - t_true).abs().max()) < 1e-5
+    R.sum().backward() if R.requires_grad else None
 
 
 def test_rot6d_is_rotation():

@@ -42,14 +42,18 @@ from . import common
 VAL_SHIFTS = {"+0.4s": 2, "+2s": 10, "+4s": 20, "+8s": 40, "+16s": 80, "-4s": -20}   # images (0.2 s each)
 
 
-def pose_error(vae: TokenVAE, z_a, z_b, scale: float, ref, grad_a: bool = True) -> tuple[torch.Tensor, torch.Tensor]:
-    """(grid mm, angle deg) per sample between the poses read from latents z_a and z_b (B, 64, C).
-    Gradient flows into z_a only when grad_a."""
+def pose_error(vae: TokenVAE, z_a, z_b, scale: float, ref, geom: dict, grad_a: bool = True):
+    """(grid mm, angle deg) per sample between the plug poses solved from latents z_a and z_b (B, 64, C),
+    both read as the frame with geometry `geom` (the target frame). Gradient flows into z_a only."""
     with torch.set_grad_enabled(grad_a and torch.is_grad_enabled()):
-        Ra, ta = vae.decode_pose(z_a / scale)
+        Ra, ta = vae.decode_pose(z_a / scale, geom)
     with torch.no_grad():
-        Rb, tb = vae.decode_pose(z_b / scale)
+        Rb, tb = vae.decode_pose(z_b / scale, geom)
     return pose_loss_terms(Ra, ta, Rb, tb, ref)
+
+
+def _sub(geom: dict, mask) -> dict:
+    return {k: v[mask] for k, v in geom.items()}
 
 
 def noisy_context(x_cond: torch.Tensor, p: float, max_sigma: float) -> tuple[torch.Tensor, torch.Tensor]:
@@ -75,8 +79,8 @@ def evaluate(model, diffusion, sampler, vae, loaders: dict, device, scale, max_b
             vl = diffusion.training_losses(model, x, t, kw)["loss"].mean()
             pred = sampler.p_sample_loop(model.forward, x.shape, torch.randn_like(x), clip_denoised=False,
                                          model_kwargs=kw, progress=False, device=device)
-            g, a = pose_error(vae, grid_to_tokens(pred), batch["x"], scale, ref, grad_a=False)
-            gc, ac = pose_error(vae, batch["x_cond"][:, -1], batch["x"], scale, ref, grad_a=False)
+            g, a = pose_error(vae, grid_to_tokens(pred), batch["x"], scale, ref, batch["geom"], grad_a=False)
+            gc, ac = pose_error(vae, batch["x_cond"][:, -1], batch["x"], scale, ref, batch["geom"], grad_a=False)
             m = {"diffusion_loss": float(vl), "pred_grid_mm": float(g.mean()), "pred_angle_deg": float(a.mean()),
                  "copy_grid_mm": float(gc.mean()), "copy_angle_deg": float(ac.mean())}
             for k, v in m.items():
@@ -146,7 +150,7 @@ def train(cfg: dict, run_dir: Path, entries: list[dict] | None = None, max_steps
             if w_pose > 0 and low.any():
                 C = x.shape[1]
                 x0 = diffusion._predict_xstart_from_eps(cache["x_t"][low], t[low], cache["out"][low, :C])
-                g, a = pose_error(vae, grid_to_tokens(x0), batch["x"][low], scale, ref)
+                g, a = pose_error(vae, grid_to_tokens(x0), batch["x"][low], scale, ref, _sub(batch["geom"], low))
                 grid, angle = g.mean(), a.mean()
             loss = (diff + w_pose * (grid + w_angle * angle)) / accum
             loss.backward()

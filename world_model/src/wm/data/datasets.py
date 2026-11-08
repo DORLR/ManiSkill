@@ -1,7 +1,8 @@
 """Torch datasets (v3).
 
 FrameDataset         autoencoder: one wrist frame (RGB-D, intrinsics, camera pose, hand pose, port
-                     axes) + the label of the loss only (h_star, FK of this grasp's one insertion)
+                     axes) + labels used only by the loss (h_star: FK of this grasp's one insertion;
+                     seg: which pixels are the plug, a mask for the per-pixel motion loss)
 AdapterDataset       joint adapter: measured joints and tracking history at a control step, the
                      next 8 commanded targets -> the next 8 measured joints
 LatentWindowDataset  world model: 4 context latents, a target latent at a random time shift
@@ -75,7 +76,8 @@ class FrameDataset(Dataset):
             meta = json.loads(str(f["meta"]))
             step = int(f["img_step"][j])
             out = {"rgb": _jpeg(f, j), "depth": f["depth"][j].astype(np.int32), "K": f["K"].astype(np.float32),
-                   "cam_T_world": f["cam_T_world"][j].astype(np.float32), "hand": f["hand"][step].astype(np.float32)}
+                   "cam_T_world": f["cam_T_world"][j].astype(np.float32), "hand": f["hand"][step].astype(np.float32),
+                   "seg": f["seg"][j]}                                         # loss mask only
         out = _tensors(out)
         out["R_P"] = torch.tensor(e["R_P"], dtype=torch.float32)
         out["h_star"] = torch.tensor(meta["H_star"], dtype=torch.float32)      # loss label only
@@ -200,10 +202,21 @@ class LatentWindowDataset(Dataset):
         return {"x_cond": torch.from_numpy(d["mean"][ctx].astype(np.float32)) * self.scale,
                 "x": torch.from_numpy(d["mean"][j + m].astype(np.float32)) * self.scale,
                 "y": torch.from_numpy(y),
-                "rel_t": torch.tensor(rel_t_seconds(int(steps[j]), int(steps[j + m])), dtype=torch.float32)}
+                "rel_t": torch.tensor(rel_t_seconds(int(steps[j]), int(steps[j + m])), dtype=torch.float32),
+                # geometry of the target frame: only to read the plug pose from a latent in the loss
+                "geom": target_geometry(d, e, j + m)}
 
 
 assert COND_DIM == 216
+
+
+def target_geometry(d: dict, e: dict, j: int) -> dict:
+    """K, camera pose, hand pose (FK) and port axes of image j of a latent file: what is needed to solve
+    the plug pose from that frame's decoded latent (models/vae.py solve_pose). Real-robot quantities."""
+    return {"K": torch.from_numpy(d["K"].astype(np.float32)),
+            "cam_T_world": torch.from_numpy(d["cam_T_world"][j].astype(np.float32)),
+            "hand": torch.from_numpy(d["hand"][int(d["img_step"][j])].astype(np.float32)),
+            "R_P": torch.tensor(e["R_P"], dtype=torch.float32)}
 
 
 # ---------------------------------------------------------------------------- policies

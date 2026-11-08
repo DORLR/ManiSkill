@@ -12,7 +12,7 @@ from wm.models.encoder import ImageEncoder
 from wm.models.vae import TokenVAE
 
 MODEL_INPUTS = {"rgb", "depth", "K", "cam_T_world", "hand", "R_P"}
-LOSS_ONLY = {"h_star"}
+LOSS_ONLY = {"h_star", "seg"}
 # Label / metadata / truth accessors (the word "port" alone is legitimate: port axes, socket pixels).
 FORBIDDEN = ("h_star", "H_star", "eval_", "pitch", "grasp_pos", "condition", '["port"]', "meta",
              "goal_pose", "charger", "seg")
@@ -55,11 +55,13 @@ def test_world_model_samples_contain_no_labels(tmp_path):
     n, T = 12, 60
     np.savez(lat / "G00" / "g" / "t.npz", mean=np.zeros((n, 64, 8), np.float16), img_step=np.arange(n) * 4,
              qpos=np.zeros((T, 9), np.float32), action=np.zeros((T - 1, 7), np.float32),
-             hand=np.tile(np.eye(4, dtype=np.float32), (T, 1, 1)), hand_cmd=np.tile(np.eye(4, dtype=np.float32), (T - 1, 1, 1)))
+             hand=np.tile(np.eye(4, dtype=np.float32), (T, 1, 1)), hand_cmd=np.tile(np.eye(4, dtype=np.float32), (T - 1, 1, 1)),
+             cam_T_world=np.tile(np.eye(4, dtype=np.float32), (n, 1, 1)), K=np.eye(3, dtype=np.float32))
     e["n_images"] = n
     ds = LatentWindowDataset(lat, [e], "train", root, scale=1.0)
     item = ds[0]
-    assert set(item) == {"x_cond", "x", "y", "rel_t"}
+    assert set(item) == {"x_cond", "x", "y", "rel_t", "geom"}
+    assert set(item["geom"]) == {"K", "cam_T_world", "hand", "R_P"}        # real-robot geometry, for reading poses
     assert -16.0 <= float(item["rel_t"]) <= 16.0 and float(item["rel_t"]) != 0
 
 
