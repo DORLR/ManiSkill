@@ -42,10 +42,11 @@ def main():
     ap.add_argument("--starts", type=int, default=2)
     ap.add_argument("--only", nargs="+", help="smoke tests only: these shapes")
     ap.add_argument("--max-decisions", type=int, default=rollout.MAX_DECISIONS, help="0.4 s each")
+    ap.add_argument("--residual", help="residual policy trained in imagination (wm.rl.residual)")
     args = ap.parse_args()
     out = Path(args.out)
     rollout.run(args.vae, args.policy, args.split, out, args.workers, args.grasps_per_cell, args.starts, args.only,
-                args.max_decisions)
+                args.max_decisions, args.residual)
     (out / "summary.json").write_text(json.dumps(summarise(out / "results.jsonl"), indent=1))
 
 

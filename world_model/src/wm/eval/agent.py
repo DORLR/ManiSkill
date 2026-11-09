@@ -100,3 +100,27 @@ class ImagePolicyAgent(_Agent):
             a = self.policy.sample(obs, steps=self.flow_steps, n=n_samples)[0].float()
         a = a * self.std + self.mean
         return a.view(n_samples, CHUNK, ACTION_DIM).cpu().numpy() + f.qpos[:7]
+
+
+class ResidualAgent(LatentPolicyAgent):
+    """Latent FM + the residual trained in imagination (wm.rl.residual): the FM proposes 16 targets, the
+    residual policy's mean correction (deterministic at test time) is added to the 8 executed ones."""
+
+    def __init__(self, vae_ckpt: str, policy_ckpt: str, residual_ckpt: str, device: str = "cuda", flow_steps: int = 10):
+        super().__init__(vae_ckpt, policy_ckpt, device, flow_steps)
+        from ..rl.residual import ResidualActorCritic
+        ck = torch.load(residual_ckpt, map_location="cpu", weights_only=False)
+        self.residual = ResidualActorCritic()
+        self.residual.load_state_dict(ck["model"])
+        self.residual.to(self.device).eval()
+
+    @torch.no_grad()
+    def act(self, f: Frame, n_samples: int = 1) -> np.ndarray:
+        from ..rl.residual import RESIDUAL_RAD, ResidualActorCritic
+        self._push(self.encode(f))
+        z = torch.stack(list(self.context))[None]
+        q = _t(f.qpos[:7], self.device)
+        base = (self.policy.sample(z, q, steps=self.flow_steps, n=1)[0] * self.std + self.mean).view(1, CHUNK, ACTION_DIM)
+        a = self.residual.actor(ResidualActorCritic.features(z, q, base)).clamp(-1, 1)
+        base[:, :EXECUTE] += (a * RESIDUAL_RAD).view(1, EXECUTE, ACTION_DIM)
+        return base.cpu().numpy() + f.qpos[:7]

@@ -106,7 +106,7 @@ def episode(robot, expert, agent, start: Offset, seed: int, max_decisions: int =
 _STATE = {}
 
 
-def _init(vae_ckpt: str, policy_ckpt: str, max_decisions: int = MAX_DECISIONS):
+def _init(vae_ckpt: str, policy_ckpt: str, max_decisions: int = MAX_DECISIONS, residual_ckpt: str | None = None):
     """Never raise here: an exception in a Pool initializer makes the pool respawn workers forever."""
     _STATE.update(port=None, robot=None, agent=None, init_error=None, max_decisions=max_decisions)
     try:
@@ -117,6 +117,9 @@ def _init(vae_ckpt: str, policy_ckpt: str, max_decisions: int = MAX_DECISIONS):
         if kind == "image":
             from .agent import ImagePolicyAgent
             _STATE["agent"] = ImagePolicyAgent(policy_ckpt)
+        elif residual_ckpt:
+            from .agent import ResidualAgent
+            _STATE["agent"] = ResidualAgent(vae_ckpt, policy_ckpt, residual_ckpt)
         else:
             from .agent import LatentPolicyAgent
             _STATE["agent"] = LatentPolicyAgent(vae_ckpt, policy_ckpt)
@@ -154,7 +157,7 @@ def _work(g: EvalGrasp) -> dict:
 
 def run(vae_ckpt: str, policy_ckpt: str, split: str, out: Path, workers: int,
         grasps_per_cell: int, starts_per_grasp: int, only: list[str] | None = None,
-        max_decisions: int = MAX_DECISIONS) -> None:
+        max_decisions: int = MAX_DECISIONS, residual_ckpt: str | None = None) -> None:
     out.mkdir(parents=True, exist_ok=True)
     done = set()
     res_path = out / "results.jsonl"
@@ -165,7 +168,7 @@ def run(vae_ckpt: str, policy_ckpt: str, split: str, out: Path, workers: int,
     grasps.sort(key=lambda g: g.port)
     print(f"{len(grasps)} grasps x {starts_per_grasp} starts, {workers} workers", flush=True)
     t0 = time.time()
-    with mp.get_context("spawn").Pool(workers, initializer=_init, initargs=(vae_ckpt, policy_ckpt, max_decisions)) as pool, \
+    with mp.get_context("spawn").Pool(workers, initializer=_init, initargs=(vae_ckpt, policy_ckpt, max_decisions, residual_ckpt)) as pool, \
             open(res_path, "a") as f:
         for k, r in enumerate(pool.imap_unordered(_work, grasps)):
             f.write(json.dumps(r) + "\n")
