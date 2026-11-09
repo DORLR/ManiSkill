@@ -74,7 +74,7 @@ def _med(x) -> float:
     return round(float(np.median(x)), 3) if len(x) else float("nan")
 
 
-def horizon_accuracy(rd: Reader, latent_root, entries, data_root, n_per_shift: int = 1024, batch: int = 128) -> dict:
+def horizon_accuracy(rd: Reader, latent_root, entries, data_root, n_per_shift: int = 1024, batch: int = 32) -> dict:
     out = {}
     for name, m in HORIZONS.items():
         ds = LatentWindowDataset(latent_root, entries, "ood_val", data_root, rd.scale, fixed_shift=m)
@@ -94,7 +94,7 @@ def horizon_accuracy(rd: Reader, latent_root, entries, data_root, n_per_shift: i
     return out
 
 
-def jam_separation(rd: Reader, trials: list[dict], shifts=(("+2s", 10), ("+4s", 20)), batch: int = 128) -> dict:
+def jam_separation(rd: Reader, trials: list[dict], shifts=(("+2s", 10), ("+4s", 20)), batch: int = 32) -> dict:
     from .probes import _auc
     out = {}
     for name, m in shifts:

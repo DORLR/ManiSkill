@@ -26,10 +26,13 @@ run() {
     else stamp "FAILED $name (see logs/$name.log)"; return 1; fi
 }
 
+# finished stages are skipped when the pipeline is restarted (their outputs exist)
+[ -f $Q/runs/vae_v3g/best.pt ] && grep -q "early_stop_harm\|\"step\": 60000" $Q/runs/vae_v3g/log.jsonl && stamp "skip train_vae_v3g (done)" || \
 run train_vae_v3g 0.08 python $S/train/train_vae.py --config $C/vae.json --run $Q/runs/vae_v3g || { stamp "STOP"; exit 1; }
+[ -f $Q/data/wm_v3g_latents/stats.json ] && stamp "skip encode_v3g (done)" || \
 run encode_v3g 0.06 python $S/train/encode_latents.py --vae $Q/runs/vae_v3g/best.pt --data $Q/data/wm_v1 \
     --ee $Q/data/wm_v1_ee --out $Q/data/wm_v3g_latents || { stamp "STOP"; exit 1; }
-run check_latents_v3g 0.04 python $S/analysis/check_latents.py --latents $Q/data/wm_v3g_latents \
+run check_latents_v3g 0.06 python $S/analysis/check_latents.py --latents $Q/data/wm_v3g_latents \
     --vae $Q/runs/vae_v3g/best.pt --out $Q/runs/checks_v3g || { stamp "STOP"; exit 1; }
 verdict=$(python - <<PY
 import json

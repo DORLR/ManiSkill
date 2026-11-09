@@ -1,0 +1,64 @@
+{
+ "items": 1050,
+ "used": 838,
+ "errors": 0,
+ "first_errors": [],
+ "by_condition": {
+  "ood_val/combined": {
+   "trials": 121,
+   "pitch_corr": 0.049,
+   "yaw_corr": 0.011,
+   "pitch_corr_with_true_yaw": 0.011,
+   "median_icp_rms_mm": 0.639,
+   "median_plug_points": 1500
+  },
+  "ood_val/pitch_extrap": {
+   "trials": 119,
+   "pitch_corr": 0.008,
+   "yaw_corr": 0.122,
+   "pitch_corr_with_true_yaw": 0.002,
+   "median_icp_rms_mm": 0.353,
+   "median_plug_points": 1500
+  },
+  "ood_val/pitch_interp": {
+   "trials": 122,
+   "pitch_corr": 0.058,
+   "yaw_corr": 0.09,
+   "pitch_corr_with_true_yaw": 0.001,
+   "median_icp_rms_mm": 0.966,
+   "median_plug_points": 1500
+  },
+  "ood_val/pos_extrap": {
+   "trials": 128,
+   "pitch_corr": 0.132,
+   "yaw_corr": 0.011,
+   "pitch_corr_with_true_yaw": 0.008,
+   "median_icp_rms_mm": 0.339,
+   "median_plug_points": 1500
+  },
+  "ood_val/pos_interp": {
+   "trials": 121,
+   "pitch_corr": 0.055,
+   "yaw_corr": 0.012,
+   "pitch_corr_with_true_yaw": 0.017,
+   "median_icp_rms_mm": 1.546,
+   "median_plug_points": 1500
+  },
+  "ood_val/train": {
+   "trials": 105,
+   "pitch_corr": 0.117,
+   "yaw_corr": 0.092,
+   "pitch_corr_with_true_yaw": 0.037,
+   "median_icp_rms_mm": 1.864,
+   "median_plug_points": 1500
+  },
+  "train/train": {
+   "trials": 122,
+   "pitch_corr": 0.058,
+   "yaw_corr": 0.037,
+   "pitch_corr_with_true_yaw": 0.02,
+   "median_icp_rms_mm": 1.241,
+   "median_plug_points": 1500
+  }
+ }
+}

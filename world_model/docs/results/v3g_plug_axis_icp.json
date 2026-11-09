@@ -1,0 +1,47 @@
+{
+ "pairs": 212,
+ "true_axis_difference_deg": {
+  "median": 8.953,
+  "p25": 4.284,
+  "p75": 17.35,
+  "p90": 21.369
+ },
+ "icp_axis_error_deg": {
+  "median": 5.143,
+  "p25": 1.012,
+  "p75": 13.949,
+  "p90": 61.912
+ },
+ "by_axis_difference": {
+  "0-5deg": {
+   "pairs": 65,
+   "icp_axis_error_deg": {
+    "median": 1.101,
+    "p25": 0.452,
+    "p75": 4.76,
+    "p90": 13.75
+   },
+   "median_rms_mm": 0.288
+  },
+  "5-15deg": {
+   "pairs": 84,
+   "icp_axis_error_deg": {
+    "median": 5.203,
+    "p25": 1.132,
+    "p75": 11.5,
+    "p90": 61.417
+   },
+   "median_rms_mm": 0.534
+  },
+  "15-60deg": {
+   "pairs": 63,
+   "icp_axis_error_deg": {
+    "median": 13.142,
+    "p25": 5.322,
+    "p75": 32.136,
+    "p90": 87.909
+   },
+   "median_rms_mm": 1.693
+  }
+ }
+}

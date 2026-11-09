@@ -169,8 +169,8 @@ def frame_geometry(trials: list[dict], j_of, dev) -> dict:
 def _pose_reading(ts, vae, scale, dev) -> np.ndarray:
     """Plug pose solved from the push-start latent (rotation vector deg, translation mm)."""
     out = []
-    for b in range(0, len(ts), 256):
-        ch = ts[b:b + 256]
+    for b in range(0, len(ts), 32):          # the per-pixel pose solve needs ~100 MB per frame
+        ch = ts[b:b + 32]
         z = torch.tensor(np.stack([t["lat"]["mean"][t["j0"]] for t in ch]), dtype=torch.float32, device=dev)
         R, t = vae.decode_pose(z, frame_geometry(ch, lambda t: t["j0"], dev))
         out.append(torch.cat([_rotvec_deg(R.float()), t.float() * 1000], -1).cpu().numpy())

@@ -10,7 +10,7 @@ summaries) are copied into `results/`; run directories are on rs2 under `/mnt/st
 | [2026-11-07_v1.md](2026-11-07_v1.md) | v1: point-cloud VAE, one-step CDiT, latent FM 34%, WM-guided selection (no gain), videos, latent and stall checks |
 | [2026-11-08_baseline_v1.md](2026-11-08_baseline_v1.md) | latent-free baseline 6% vs latent FM 34%: what was compared, how to read it, budget caveat |
 | [2026-11-08_v2.md](2026-11-08_v2.md) | v2: angle loss, no KL, tracking history, predicted-pose loss; results; why stopped |
-| [2026-11-08_v3_runs.md](2026-11-08_v3_runs.md) | v3 runs: smoke test, timeline, results as they arrive |
+| [2026-11-08_v3_runs.md](2026-11-08_v3_runs.md) | v3 / v3g runs: smoke tests, gate failures on pitch and their analysis, decisions, results as they arrive |
 
 `results/`
 
@@ -26,4 +26,7 @@ summaries) are copied into `results/`; run directories are on rs2 under `/mnt/st
 | `v3_adapter.json` | joint adapter on the contact trials (free vs blocked) |
 | `v3_latents.json` | v3 latent checks: jam probes, offset regressions, gate |
 | `v3_pose_labels.json` | pose label vs true offset; spread of inserted poses within a grasp |
+| `v3g_latents.json` | v3g latent checks incl. per-condition table of the solved pose |
+| `v3g_pitch_geometry.json`, `v3g_plug_axis_icp.json` | learning-free pitch checks (ICP) |
+| `v3g_contact_signal.json` | can hand-pose signals during pushes reveal the offset (leaky: expert commands) |
 | `v1_wm_contact_rollout.json`, `v2_wm_contact_rollout.json` | multi-step checks -- **invalid** (decoded joints exploded), kept as the record of that failure |
