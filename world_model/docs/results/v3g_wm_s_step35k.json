@@ -1,0 +1,109 @@
+{
+ "wm": "/mnt/storage2/qingxin/runs/wm_v3g_s_step30k.pt",
+ "horizon_accuracy": {
+  "+0.4s": {
+   "windows": 1024,
+   "pred_grid_mm": 0.238,
+   "pred_angle_deg": 0.027,
+   "copy_grid_mm": 0.546,
+   "copy_angle_deg": 0.023
+  },
+  "+2s": {
+   "windows": 1024,
+   "pred_grid_mm": 0.318,
+   "pred_angle_deg": 0.034,
+   "copy_grid_mm": 2.419,
+   "copy_angle_deg": 0.046
+  },
+  "+4s": {
+   "windows": 1024,
+   "pred_grid_mm": 0.341,
+   "pred_angle_deg": 0.029,
+   "copy_grid_mm": 4.663,
+   "copy_angle_deg": 0.061
+  },
+  "+8s": {
+   "windows": 1024,
+   "pred_grid_mm": 0.341,
+   "pred_angle_deg": 0.022,
+   "copy_grid_mm": 8.769,
+   "copy_angle_deg": 0.078
+  },
+  "+16s": {
+   "windows": 1024,
+   "pred_grid_mm": 0.392,
+   "pred_angle_deg": 0.022,
+   "copy_grid_mm": 15.65,
+   "copy_angle_deg": 0.281
+  },
+  "-4s": {
+   "windows": 1024,
+   "pred_grid_mm": 0.493,
+   "pred_angle_deg": 0.098,
+   "copy_grid_mm": 4.902,
+   "copy_angle_deg": 0.098
+  }
+ },
+ "jam_separation": {
+  "+2s": {
+   "trials": 2429,
+   "jammed_real_progress_mm": 3.194,
+   "jammed_wm_progress_mm": 4.306,
+   "inserted_real_progress_mm": 5.549,
+   "inserted_wm_progress_mm": 5.304,
+   "auc_real_progress": 1.0,
+   "auc_wm_progress": 0.966
+  },
+  "+4s": {
+   "trials": 707,
+   "jammed_real_progress_mm": 11.255,
+   "jammed_wm_progress_mm": 11.229,
+   "inserted_real_progress_mm": 11.59,
+   "inserted_wm_progress_mm": 11.51,
+   "auc_real_progress": 0.789,
+   "auc_wm_progress": 0.734
+  }
+ },
+ "rollout_stability": {
+  "0.4s": {
+   "trajectories": 256,
+   "pose_grid_mm": 0.861,
+   "pose_angle_deg": 0.542,
+   "adapter_joint_err_mrad": 0.043,
+   "hand_pos_err_mm": 0.044,
+   "latent_rms_ratio": 0.998
+  },
+  "2s": {
+   "trajectories": 256,
+   "pose_grid_mm": 1.189,
+   "pose_angle_deg": 0.695,
+   "adapter_joint_err_mrad": 0.05,
+   "hand_pos_err_mm": 0.069,
+   "latent_rms_ratio": 0.986
+  },
+  "4s": {
+   "trajectories": 256,
+   "pose_grid_mm": 1.017,
+   "pose_angle_deg": 0.373,
+   "adapter_joint_err_mrad": 0.031,
+   "hand_pos_err_mm": 0.056,
+   "latent_rms_ratio": 0.991
+  },
+  "8s": {
+   "trajectories": 256,
+   "pose_grid_mm": 0.722,
+   "pose_angle_deg": 0.051,
+   "adapter_joint_err_mrad": 0.015,
+   "hand_pos_err_mm": 0.034,
+   "latent_rms_ratio": 0.991
+  },
+  "16s": {
+   "trajectories": 256,
+   "pose_grid_mm": 0.696,
+   "pose_angle_deg": 0.022,
+   "adapter_joint_err_mrad": 0.014,
+   "hand_pos_err_mm": 0.03,
+   "latent_rms_ratio": 0.968
+  }
+ }
+}

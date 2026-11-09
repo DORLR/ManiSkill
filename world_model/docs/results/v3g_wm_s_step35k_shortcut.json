@@ -1,0 +1,33 @@
+{
+ "wm": "/mnt/storage2/qingxin/runs/wm_v3g_s_step30k.pt",
+ "shortcut": {
+  "+2s": {
+   "trials": 2429,
+   "auc_expert_commands": 0.954,
+   "auc_truth_free_commands": 0.955,
+   "jammed_progress_mm_expert / truth_free": [
+    4.28,
+    4.328
+   ],
+   "inserted_progress_mm_expert / truth_free": [
+    5.315,
+    5.333
+   ],
+   "corr_expert_vs_truth_free": 0.645
+  },
+  "+4s": {
+   "trials": 707,
+   "auc_expert_commands": 0.931,
+   "auc_truth_free_commands": 0.834,
+   "jammed_progress_mm_expert / truth_free": [
+    10.784,
+    11.071
+   ],
+   "inserted_progress_mm_expert / truth_free": [
+    11.45,
+    11.504
+   ],
+   "corr_expert_vs_truth_free": 0.438
+  }
+ }
+}

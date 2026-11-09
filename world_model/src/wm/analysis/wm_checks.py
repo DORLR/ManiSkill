@@ -221,3 +221,62 @@ def adapter_on_contact(adapter, data_root: str, split: str = "ood_val", dev=None
                                    "follow_command_err_mrad": round(float((cmd - y).abs().mean() * 1000), 4),
                                    "joint_motion_mrad": round(float(y.abs().mean() * 1000), 4)}
     return out
+
+
+def truth_free_commands(hand: np.ndarray, hand_cmd: np.ndarray, s0: int, R_P: np.ndarray) -> np.ndarray:
+    """Commanded hand poses with the expert's knowledge removed from step s0 on: the hand keeps its
+    orientation at s0 and moves straight along the port axis (board normal, from the board-plane fit)
+    by the same distance per step as the expert's commands moved along it. Before s0 unchanged."""
+    out = hand_cmd.copy()
+    x = R_P[:, 0]
+    for s in range(s0, len(hand_cmd)):
+        d = float((hand_cmd[s][:3, 3] - hand[s0][:3, 3]) @ x)
+        out[s][:3, :3] = hand[s0][:3, :3]
+        out[s][:3, 3] = hand[s0][:3, 3] + d * x
+    return out
+
+
+def shortcut(rd: Reader, trials: list[dict], shifts=(("+2s", 10), ("+4s", 20)), batch: int = 32) -> dict:
+    """Does the world model read the misalignment from the expert's commands?
+
+    Contact trials, context ending at the push start: predicted progress with (a) the recorded expert
+    commands (which point along the true plug axis) and (b) truth-free commands (straight along the
+    board normal, same speed). Jams are mostly set by the lateral offset, which (b) leaves in place, so a
+    world model that reads the scene from the images separates jammed from inserted trials about as well
+    under (b) as under (a); one that reads it from the commands loses the separation under (b)."""
+    from .probes import _auc
+    out = {}
+    for name, m in shifts:
+        rows = []
+        usable = [t for t in trials if t["j0"] >= (CONTEXT - 1) * WM_STRIDE and t["j0"] + m < len(t["lat"]["img_step"])]
+        for b in range(0, len(usable), batch):
+            chunk = usable[b:b + batch]
+            ctx, ya, yb, rel = [], [], [], []
+            for t in chunk:
+                d, j = t["lat"], t["j0"]
+                steps = d["img_step"].astype(int)
+                c = [j - WM_STRIDE * k for k in range(CONTEXT - 1, -1, -1)]
+                s0, s1 = int(steps[j]), int(steps[j + m])
+                ctx.append(d["mean"][c] * rd.scale)
+                ya.append(wm_condition(d["hand"], d["hand_cmd"], steps[c], s0, s1, t["R_P"]))
+                yb.append(wm_condition(d["hand"], truth_free_commands(d["hand"], d["hand_cmd"], s0, t["R_P"]),
+                                       steps[c], s0, s1, t["R_P"]))
+                rel.append(rel_t_seconds(s0, s1))
+            T = lambda v: torch.tensor(np.stack(v), dtype=torch.float32, device=rd.dev)
+            ctx_t = T(ctx)
+            g_now = frame_geometry(chunk, lambda t: t["j0"], rd.dev)
+            g_tgt = frame_geometry(chunk, lambda t: t["j0"] + m, rd.dev)
+            now = rd.distance(ctx_t[:, -1], g_now)
+            pa = rd.distance(rd.predict(ctx_t, T(ya), T(rel)), g_tgt)
+            pb = rd.distance(rd.predict(ctx_t, T(yb), T(rel)), g_tgt)
+            rows += [(t["y"], now[i] - pa[i], now[i] - pb[i]) for i, t in enumerate(chunk)]
+        r = np.array(rows)
+        if not len(r):
+            continue
+        yv = r[:, 0].astype(int)
+        out[name] = {"trials": len(r),
+                     "auc_expert_commands": round(_auc(-r[:, 1], yv), 3), "auc_truth_free_commands": round(_auc(-r[:, 2], yv), 3),
+                     "jammed_progress_mm_expert / truth_free": [_med(r[yv == 1, 1]), _med(r[yv == 1, 2])],
+                     "inserted_progress_mm_expert / truth_free": [_med(r[yv == 0, 1]), _med(r[yv == 0, 2])],
+                     "corr_expert_vs_truth_free": round(float(np.corrcoef(r[:, 1], r[:, 2])[0, 1]), 3)}
+    return out
