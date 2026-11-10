@@ -1,0 +1,35 @@
+{
+ "grasps": 312,
+ "expert_could_not_insert": 41,
+ "errors": 0,
+ "inserted": {
+  "train": [
+   61,
+   98
+  ],
+  "ALL": [
+   306,
+   542
+  ],
+  "pitch_interp": [
+   78,
+   80
+  ],
+  "pitch_extrap": [
+   55,
+   98
+  ],
+  "pos_extrap": [
+   48,
+   90
+  ],
+  "pos_interp": [
+   49,
+   88
+  ],
+  "combined": [
+   15,
+   88
+  ]
+ }
+}
