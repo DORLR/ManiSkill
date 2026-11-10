@@ -93,7 +93,8 @@ def evaluate(model, loader, w, device, max_batches, ref) -> dict:
     return {k: v / max(acc["_w_" + k], 1e-9) for k, v in acc.items() if not k.startswith("_w_")}
 
 
-def train(cfg: dict, run_dir: Path, max_steps: int | None = None) -> Path:
+def train(cfg: dict, run_dir: Path, max_steps: int | None = None, resume: str | None = None) -> Path:
+    """`resume`: a last.pt of the same design (model + optimizer + step); training continues from its step."""
     common.seed_all(cfg["seed"])
     device = torch.device("cuda")
     entries = data_index.load(cfg["data"])
@@ -105,12 +106,20 @@ def train(cfg: dict, run_dir: Path, max_steps: int | None = None) -> Path:
     opt = torch.optim.AdamW(common.trainable(model), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
     warmup = cfg.get("warmup_steps", 0)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, (s + 1) / warmup) if warmup else 1.0)
+    start = 0
+    if resume:
+        ck = torch.load(resume, map_location="cpu", weights_only=False)
+        model.load_state_dict(ck["model"])
+        opt.load_state_dict(ck["opt"])
+        start = int(ck["step"])
+        for _ in range(start):                 # the warm-up schedule continues where it was
+            sched.step()
     log, w, ref = common.Logger(run_dir), cfg["loss_weights"], plug_region_points(device)
-    log(event="start", train_frames=len(train_loader.dataset), val_frames=len(val_loader.dataset),
-        params_m=sum(p.numel() for p in common.trainable(model)) / 1e6)
+    log(event="start", resume=resume, start_step=start, train_frames=len(train_loader.dataset),
+        val_frames=len(val_loader.dataset), params_m=sum(p.numel() for p in common.trainable(model)) / 1e6)
     best, bad, skipped = float("inf"), 0, 0
     steps = max_steps or cfg["steps"]
-    for step, batch in zip(range(1, steps + 1), common.cycle(train_loader)):
+    for step, batch in zip(range(start + 1, steps + 1), common.cycle(train_loader)):
         batch = common.to_device(batch, device)
         with torch.autocast("cuda", dtype=torch.bfloat16):
             l = losses(model, model(batch), batch, w, ref)

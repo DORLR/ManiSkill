@@ -17,9 +17,15 @@ a joint PD spring, 1-22 N/mm at the hand; the user kept it). Everything trained 
 * UNet (perception/unet.py): ImageNet ResNet-34 encoder, full-resolution decoder, RGB only, 7 classes.
   Result (ood_val shapes, 40k steps): opening IoU 0.97, centre error median 0.15 px (p90 1.5 px); pins
   IoU 0.84, centre median 2.7 px.
-* Crops (perception/crops.py): 128 x 128 px at native resolution around the predicted pins and the
-  predicted openings. The openings' 3-D point is remembered (ray x board depth around them); when the plug
-  covers them it is projected with the current camera pose (the socket does not move).
+* Crops (perception/crops.py): 128 x 128 px at native resolution. Plug crop: placed once per episode on the
+  predicted pins of the first frame, then fixed (the plug does not move in the image: 0 px drift measured).
+  Opening crop: on the predicted openings when at least half of the largest area seen is visible; that
+  sighting also updates the remembered 3-D point (ray x board depth around the openings); otherwise (covered
+  by the plug near contact, or a thin sliver) the remembered point is projected with the current camera pose
+  (the socket does not move). Changed on 2026-11-10 after the per-frame pin detection drifted off the tips
+  near contact (2026-11-10_v4_runs.md).
+* Known label limitation: the pins class paints pins that are inside the hole or behind the housing (no
+  occlusion test); it no longer affects the crops, and the UNet's pin metrics are reported per stage.
 * Encoder (models/crop_encoder.py): per crop 16 x 16 tokens of 8 x 8 px: ResNet-18 features (stride 8),
   raw RGB, raw depth + validity, frozen DINOv2 (for unseen shapes), the token's viewing ray in port axes
   with Fourier features (absolute geometry -> where the two crops are relative to each other), + one

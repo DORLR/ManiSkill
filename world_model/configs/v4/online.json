@@ -16,12 +16,20 @@
     "success_init": "/mnt/storage2/qingxin/runs/success_v4/best.pt",
     "success_init_last": "/mnt/storage2/qingxin/runs/success_v4/last.pt",
     "success_live": "/mnt/storage2/qingxin/runs/success_v4_online/current.pt",
-    "p_plan": 0.5,
+    "p_plan": 0.0,
     "p_explore": 0.1,
     "candidates": 8,
     "horizon": 5,
     "sampling_steps": 20,
-    "reload_every": 5
+    "reload_every": 5,
+    "planner": "select",
+    "cem_population": 32,
+    "cem_elites": 8,
+    "cem_iterations": 3,
+    "cem_sigma_a": 0.002,
+    "cem_sigma_b": 0.0003,
+    "cem_min_sigma_a": 0.0003,
+    "cem_min_sigma_b": 5e-05
   },
   "learner": {
     "online_fraction": 0.5,

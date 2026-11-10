@@ -3,14 +3,30 @@
   "crops": "/mnt/storage2/qingxin/data/wm_v1_crops",
   "seed": 0,
   "model": {
-    "encoder": {"d": 256, "heads": 8, "crop_layers": 2, "relation_layers": 3, "joint_layers": 4, "query_layers": 2},
+    "encoder": {
+      "d": 256,
+      "heads": 8,
+      "crop_layers": 2,
+      "relation_layers": 3,
+      "joint_layers": 4,
+      "query_layers": 2
+    },
     "latent_ch": 16,
     "dec_d": 256,
     "dec_layers": 2,
     "patch_layers": 3,
     "heads": 8
   },
-  "loss_weights": {"depth": 1.0, "valid": 1.0, "rgb": 10.0, "dino": 1.0, "grid": 1.0, "angle": 2.0, "motion": 1.0, "weight": 1.0},
+  "loss_weights": {
+    "depth": 1.0,
+    "valid": 1.0,
+    "rgb": 10.0,
+    "dino": 1.0,
+    "grid": 1.0,
+    "angle": 2.0,
+    "motion": 1.0,
+    "weight": 1.0
+  },
   "batch_size": 32,
   "workers": 12,
   "lr": 0.0001,
@@ -20,8 +36,8 @@
   "steps": 80000,
   "log_every": 100,
   "eval_every": 2000,
-  "eval_batches": 50,
-  "patience": 5,
+  "eval_batches": 200,
+  "patience": 10,
   "harm_margin": 0.05,
   "max_skipped": 50
 }

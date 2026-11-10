@@ -1,5 +1,6 @@
-"""Online learners (v4): the world model and the success classifier keep training while the actors
-(online/actor.py) add episodes.
+"""Online learners (v4): the world model and the success classifier train while the actors
+(online/actor.py) add episodes -- from scratch on the mixture (decided with the user 2026-11-10: no
+offline-only stage), or continuing a checkpoint.
 
 MixedBatches: every batch comes from the online episodes with probability `online_fraction` (once at
 least `min_online_files` exist), else from the offline data. The online file list is re-scanned every

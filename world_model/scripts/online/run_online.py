@@ -42,8 +42,10 @@ def main():
             o["wm_steps"] = args.steps
         run = Path(cfg["actor"]["wm_live"]).parent
         last = run / "last.pt"
-        if last.exists():
+        if last.exists():                          # continue this learner's own run
             o["wm_resume"] = str(last)
+        elif not Path(o["wm_resume"]).exists():    # no offline checkpoint: train from scratch on the mixture
+            o["wm_resume"] = None
         run_wm(wcfg, o, run)
     else:
         from wm.online.learner import run_success
@@ -56,6 +58,8 @@ def main():
         last = run / "last.pt"
         if last.exists():
             o["success_resume"] = str(last)
+        elif not Path(o["success_resume"]).exists():
+            o["success_resume"] = None
         run_success(scfg, o, run)
 
 

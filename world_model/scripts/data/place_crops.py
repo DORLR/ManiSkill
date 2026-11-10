@@ -20,7 +20,8 @@ from wm.data import index, store
 from wm.perception.crops import CropPlacer
 from wm.perception.unet import load_unet
 
-HOW = {"pins": 0, "plug": 1, "memory": 2, "opening": 0, "memory_3d": 1, "memory_2d": 2}
+HOW_PLUG = {"pins": 0, "plug": 1, "memory": 2, "fixed": 3}
+HOW_HOLE = {"opening": 0, "memory_3d": 1, "memory_2d": 2, "plug": 3}
 
 
 class Trajs(Dataset):
@@ -70,7 +71,7 @@ def main():
         for j in range(len(cls)):
             r = placer(cls[j], t["depth"][j], t["K"], t["cam_T_world"][j])
             for key in out:
-                out[key].append(HOW[r[key]] if key.startswith("how") else r[key])
+                out[key].append(HOW_PLUG[r[key]] if key == "how_plug" else HOW_HOLE[r[key]] if key == "how_hole" else r[key])
             counts[f"plug_{r['how_plug']}"] += 1
             counts[f"hole_{r['how_hole']}"] += 1
         dst = Path(t["dst"])

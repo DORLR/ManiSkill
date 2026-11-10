@@ -15,12 +15,13 @@ def main():
     ap.add_argument("--config", required=True)
     ap.add_argument("--run", required=True)
     ap.add_argument("--steps", type=int, help="smoke tests only")
+    ap.add_argument("--resume", help="last.pt of the same design to continue from")
     args = ap.parse_args()
     cfg = common.load_config(args.config)
     run = Path(args.run)
     run.mkdir(parents=True, exist_ok=True)
     (run / "config.json").write_text(json.dumps(cfg, indent=1))
-    crop_ae.train(cfg, run, max_steps=args.steps)
+    crop_ae.train(cfg, run, max_steps=args.steps, resume=args.resume)
 
 
 if __name__ == "__main__":

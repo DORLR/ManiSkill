@@ -10,9 +10,16 @@ Episode (train-split shapes and training-band grasps only; ood_val / test never)
     far start, port axes from the first image, then every control step is recorded (data/recorder.py,
     images every 0.2 s) and every image is encoded (UNet -> crops -> crop autoencoder).
     Every 0.4 s a decision:
-        mode "plan" (p_plan): K FM proposals; each is imagined H decisions ahead (the proposal, then the
-              FM acting in imagination); score = max over the steps of the success classifier; the
-              best is executed (with p_explore a random proposal instead)
+        mode "plan" (p_plan), planner "select": K FM proposals; each is imagined H decisions ahead (the
+              proposal, then the FM acting in imagination); score = max over the steps of the success
+              classifier; the best is executed (with p_explore a random proposal instead)
+        mode "plan", planner "cem": the cross-entropy method around the FM proposals, so candidates can
+              leave what the FM would do (InsertionWM plans with MPPI around its policy for the same
+              reason). A candidate = one FM proposal + a smooth offset per joint (constant a + slope b x
+              step over the 16 targets; 14 numbers). Iteration 1 contains the K unperturbed proposals;
+              each iteration scores `cem_population` candidates in imagination as above, keeps the
+              `cem_elites` best, refits mean / std of the offsets (std kept above a floor) and redraws
+              around the elites' proposals. The best candidate seen is executed.
         mode "fm": one FM sample (the policy as it is)
     up to MAX_DECISIONS or an outcome (eval/rollout.judge: inserted / beside_board / tilted).
 Saved per episode: the raw trajectory (data/store.py format, kind "online_<mode>") and its v4 latent
@@ -100,6 +107,56 @@ class Models:
             self._load_if_new(live if Path(live).exists() else self.cfg[f"{key}_init"], loader, attr)
 
 
+# ---------------------------------------------------------------------------- planners
+def imagined_scores(imag, models, start: dict, first_targets: np.ndarray, horizon: int) -> np.ndarray:
+    """Max P(inserted) over `horizon` imagined decisions: the candidate first, then the FM in imagination."""
+    imag.reset_from([start] * len(first_targets))
+    best = np.zeros(len(first_targets))
+    targets = first_targets
+    for _ in range(horizon):
+        info = imag.step(targets)
+        best = np.maximum(best, info["p_success"])
+        o = imag.obs()
+        targets = models.fm(o["z"], o["q"]).cpu().numpy().astype(np.float64) + imag.q[:, None, :7]
+    return best
+
+
+def smooth_offsets(params: np.ndarray, chunk: int) -> np.ndarray:
+    """(P, 14) = per joint constant a (7) and slope b (7) in rad -> (P, chunk, 7) offsets a + b * step."""
+    t = np.arange(chunk, dtype=np.float64)[None, :, None]
+    return params[:, None, :7] + params[:, None, 7:] * t
+
+
+def plan_cem(imag, models, start: dict, proposals: np.ndarray, q_now: np.ndarray, cfg: dict,
+             rng: np.random.Generator) -> tuple[np.ndarray, float, np.ndarray]:
+    """proposals (K, 16, 7) FM targets relative to q_now -> (best absolute targets (16, 7), its score,
+    scores of the unperturbed FM proposals)."""
+    K, chunk = proposals.shape[:2]
+    P, E = cfg["cem_population"], cfg["cem_elites"]
+    std = np.array([cfg["cem_sigma_a"]] * 7 + [cfg["cem_sigma_b"]] * 7)
+    floor = np.array([cfg["cem_min_sigma_a"]] * 7 + [cfg["cem_min_sigma_b"]] * 7)
+    mean = np.zeros(14)
+    base = np.arange(P) % K
+    best_score, best_targets, fm_scores = -1.0, None, None
+    for it in range(cfg["cem_iterations"]):
+        params = mean + std * rng.standard_normal((P, 14))
+        if it == 0:
+            params[:K] = 0.0                            # the FM's own proposals take part unchanged
+            base[:K] = np.arange(K)
+        targets = proposals[base] + smooth_offsets(params, chunk) + q_now[None, None, :7]
+        score = imagined_scores(imag, models, start, targets, cfg["horizon"])
+        if it == 0:
+            fm_scores = score[:K].copy()
+        order = np.argsort(-score)
+        if score[order[0]] > best_score:
+            best_score, best_targets = float(score[order[0]]), targets[order[0]].copy()
+        elite = order[:E]
+        mean = params[elite].mean(0)
+        std = np.maximum(params[elite].std(0), floor)
+        base = base[elite][np.arange(P) % E]
+    return best_targets, best_score, fm_scores
+
+
 def run_episode(robot, expert, models: Models, fk, port: str, condition: str, rng: np.random.Generator,
                 mode: str, out_dir: Path, name: str) -> dict:
     from ..env.sampling import sample_grasp, sample_start
@@ -156,17 +213,17 @@ def run_episode(robot, expert, models: Models, fk, port: str, condition: str, rn
             cmd_img = fk(np.concatenate([np.concatenate([action, cand[0, :1]])[np.minimum(steps, len(action))],
                                          qpos[steps, 7:9]], 1))
             st = start_from_record(lat, hand[steps], cmd_img, qpos, action, int(steps[-1]), R_P)
-            imag.reset_from([st] * K)
-            best = np.zeros(K)
-            targets = cand
-            for h in range(cfg["horizon"]):
-                info = imag.step(targets)
-                best = np.maximum(best, info["p_success"])
-                o = imag.obs()
-                targets = models.fm(o["z"], o["q"]).cpu().numpy().astype(np.float64) + imag.q[:, None, :7]
-            pick = int(rng.integers(K)) if rng.random() < cfg["p_explore"] else int(np.argmax(best))
-            chosen_scores.append(float(best[pick]))
-            a = cand[pick]
+            if rng.random() < cfg["p_explore"]:          # a random FM proposal, not judged
+                a = cand[int(rng.integers(K))]
+                chosen_scores.append(float("nan"))
+            elif cfg.get("planner", "select") == "cem":
+                a, score, _ = plan_cem(imag, models, st, rel, qpos[-1, :7], cfg, rng)
+                chosen_scores.append(score)
+            else:
+                best = imagined_scores(imag, models, st, cand, cfg["horizon"])
+                pick = int(np.argmax(best))
+                chosen_scores.append(float(best[pick]))
+                a = cand[pick]
         else:
             a = models.fm(z, q)[0].cpu().numpy().astype(np.float64) + qpos[-1, :7]
         for qq in a[:EXECUTE]:
@@ -195,7 +252,8 @@ def run_episode(robot, expert, models: Models, fk, port: str, condition: str, rn
     save_latent_file(out_dir / "latents" / port / f"{name}.npz", mean, t)
     return {"name": name, "port": port, "condition": condition, "mode": mode, "outcome": meta["outcome"],
             "decisions": k + 1, "seconds": round(time.time() - t0, 1),
-            "mean_chosen_score": float(np.mean(chosen_scores)) if chosen_scores else None}
+            "planner": cfg.get("planner", "select") if mode == "plan" else None,
+            "mean_chosen_score": float(np.nanmean(chosen_scores)) if chosen_scores else None}
 
 
 # ---------------------------------------------------------------------------- worker loop

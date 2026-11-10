@@ -64,7 +64,10 @@ def history(d: dict, j: int, R_P: np.ndarray, scale: float, seen: np.ndarray | N
     ref = d["hand"][steps[j]].astype(np.float64)
     st = steps[sl]
     meas = d["hand"][st].astype(np.float64)
-    cmd = d["hand_cmd"][np.clip(st, 0, len(d["hand_cmd"]) - 1)].astype(np.float64)
+    if len(d["hand_cmd"]):
+        cmd = d["hand_cmd"][np.clip(st, 0, len(d["hand_cmd"]) - 1)].astype(np.float64)
+    else:                                     # a trajectory without any command (a single image): nothing commanded
+        cmd = meas.copy()
     proprio = np.concatenate([pose_feature(meas, ref, R_P), pose_feature(cmd, ref, R_P)], -1)
     proprio[~avail] = 0
     dt = (st - steps[j]) / 20.0
