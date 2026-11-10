@@ -26,7 +26,7 @@ import torch
 from wm.env.expert import Expert
 from wm.env.robot import Robot
 from wm.eval import rollout
-from wm.eval.agent import LatentPolicyAgent, frame_batch
+from wm.eval.agent import LatentPolicyAgent, ResidualAgent, frame_batch
 
 
 class Logged:
@@ -58,8 +58,12 @@ class Logged:
         return a
 
 
-def pick(results: Path, n_stuck: int, n_success: int) -> list[tuple[str, int, str]]:
+def pick(results: Path, n_stuck: int, n_success: int, beside: int = 0) -> list[tuple[str, int, str]]:
     rows = [json.loads(l) for l in results.read_text().splitlines() if l.strip()]
+    if beside:                     # episodes that reached depth beside the board (fixed criterion)
+        b = [(r["key"], i, "beside") for r in rows for i, e in enumerate(r["episodes"]) if e["outcome"] == "beside_board"]
+        rng = np.random.default_rng(0)
+        return [b[i] for i in rng.choice(len(b), size=min(beside, len(b)), replace=False)]
     stuck = [(r["key"], i, "stuck") for r in rows for i, e in enumerate(r["episodes"])
              if e["outcome"] == "timeout" and e["depth_left_mm"] > 15 and e["lateral_mm"] > 3]
     ok = [(r["key"], i, "success") for r in rows for i, e in enumerate(r["episodes"]) if e["outcome"] == "inserted"]
@@ -78,14 +82,17 @@ def main():
     ap.add_argument("--success", type=int, default=6)
     ap.add_argument("--part", type=int, default=0)
     ap.add_argument("--parts", type=int, default=1)
+    ap.add_argument("--residual", help="diagnose FM + this residual")
+    ap.add_argument("--beside", type=int, default=0, help="pick this many beside-the-board episodes instead")
+    ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
     from wm.training.common import limit_gpu_memory
     limit_gpu_memory()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    plan = {g.key: g for g in rollout.plan("ood_val", 4, 2)}
-    items = sorted(pick(Path(args.results), args.stuck, args.success))[args.part::args.parts]
-    agent = LatentPolicyAgent(args.vae, args.policy)
+    plan = {g.key: g for g in rollout.plan("ood_val", 4, 2, args.seed)}
+    items = sorted(pick(Path(args.results), args.stuck, args.success, args.beside))[args.part::args.parts]
+    agent = ResidualAgent(args.vae, args.policy, args.residual) if args.residual else LatentPolicyAgent(args.vae, args.policy)
     robot, port = None, None
     for key, i, kind in items:
         g = plan[key]

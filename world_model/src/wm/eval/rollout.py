@@ -23,7 +23,11 @@ from ..env.sampling import CONDITIONS, Offset, sample_grasp, sample_start
 
 EVAL_SEED = 9_000_000                 # disjoint from collection seeds (4_000_000 + ...)
 MAX_DECISIONS = 150                   # 150 x 0.4 s = 60 s per episode (24 s cut off slow but correct insertions)
-INSERTED_MARGIN_M = 0.001             # success: within 1 mm of full depth
+INSERTED_MARGIN_M = 0.001             # success: within 1 mm of full depth ...
+INSERTED_LATERAL_M = 0.002            # ... AND within 2 mm of the hole axis (lateral + vertical; inserted: 0.3-0.5 mm)
+INSERTED_ANGLE_DEG = 2.0              # ... AND tilted by at most 2 deg relative to the hole
+# Until 2026-11-09 only the depth was checked: a plug moved past the board's edge reached "full depth"
+# beside the board and counted as inserted (found in the residual's videos; docs/2026-11-08_v3_runs.md).
 POS_EXTRAP_USED = (-0.030, -0.028)    # the [-12, -10] mm side is not insertable in this environment
 
 
@@ -103,7 +107,12 @@ def episode(robot, expert, agent, start: Offset, seed: int, max_decisions: int =
             if on_step is not None:
                 on_step(robot)
         if _depth_left_m(robot) <= INSERTED_MARGIN_M:
-            return {"outcome": "inserted", "decisions": k + 1}
+            d = _diagnosis(robot)
+            if d["lateral_mm"] > INSERTED_LATERAL_M * 1000:
+                return {"outcome": "beside_board", "decisions": k + 1, **d}  # reached depth outside the hole
+            if d["angle_deg"] > INSERTED_ANGLE_DEG:
+                return {"outcome": "tilted", "decisions": k + 1, **d}        # at depth, on the axis, but tilted
+            return {"outcome": "inserted", "decisions": k + 1, **d}
         f = robot.frame()
     return {"outcome": "timeout", "decisions": max_decisions, **_diagnosis(robot)}
 

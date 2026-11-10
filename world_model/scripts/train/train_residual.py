@@ -42,7 +42,7 @@ def main():
     env = ImaginedInsertion(load_vae(cfg["vae"], dev).requires_grad_(False), load_world_model(cfg["wm"], dev).requires_grad_(False),
                             load_adapter(cfg["adapter"], dev).requires_grad_(False), fk, scale, pool, dev,
                             n_envs=cfg["n_envs"], horizon=cfg["horizon"], sampling_steps=cfg["sampling_steps"],
-                            success_mm=cfg["success_mm"])
+                            success_mm=cfg["success_mm"], fence_mm=cfg.get("fence_mm"))
     base = residual.FrozenFM(cfg["policy"], dev)
     residual.train(env, base, cfg, run, log, dev)
     robot.env.close()

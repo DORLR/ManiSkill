@@ -113,14 +113,15 @@ class ResidualAgent(LatentPolicyAgent):
         self.residual = ResidualActorCritic()
         self.residual.load_state_dict(ck["model"])
         self.residual.to(self.device).eval()
+        self.bound = ck["cfg"].get("residual_rad", 0.004)
 
     @torch.no_grad()
     def act(self, f: Frame, n_samples: int = 1) -> np.ndarray:
-        from ..rl.residual import RESIDUAL_RAD, ResidualActorCritic
+        from ..rl.residual import ResidualActorCritic
         self._push(self.encode(f))
         z = torch.stack(list(self.context))[None]
         q = _t(f.qpos[:7], self.device)
         base = (self.policy.sample(z, q, steps=self.flow_steps, n=1)[0] * self.std + self.mean).view(1, CHUNK, ACTION_DIM)
         a = self.residual.actor(ResidualActorCritic.features(z, q, base)).clamp(-1, 1)
-        base[:, :EXECUTE] += (a * RESIDUAL_RAD).view(1, EXECUTE, ACTION_DIM)
+        base[:, :EXECUTE] += (a * self.bound).view(1, EXECUTE, ACTION_DIM)
         return base.cpu().numpy() + f.qpos[:7]

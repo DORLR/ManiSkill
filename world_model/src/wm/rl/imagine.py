@@ -70,10 +70,14 @@ class StartPool:
 
 class ImaginedInsertion:
     def __init__(self, vae, wm, adapter, fk, scale: float, pool: StartPool, device, n_envs: int = 64,
-                 horizon: int = 5, sampling_steps: int = 20, success_mm: float = 1.5):
+                 horizon: int = 5, sampling_steps: int = 20, success_mm: float = 1.5, fence_mm: float | None = None):
         self.vae, self.wm, self.adapter, self.fk = vae, wm, adapter, fk
         self.scale, self.pool, self.dev = scale, pool, device
         self.B, self.horizon, self.success_mm = n_envs, horizon, success_mm
+        # v2: an imagined episode ends ("fenced") when the hand has moved more than fence_mm across the
+        # insertion axis since the start (FK, port axes): the world model and the pose readout have never
+        # seen the plug beside / beyond the board, where v1's residual found readings it could exploit.
+        self.fence_mm = fence_mm
         self.sampler = create_diffusion(timestep_respacing=str(sampling_steps))
         self.ref = plug_region_points(device)
 
@@ -122,6 +126,7 @@ class ImaginedInsertion:
         hand_now = self.ctx_meas[:, -1]
         self.d_now = self.distance(self.ctx[:, -1], self._geom(hand_now, self.mount, self.K, self.R_P)).cpu().numpy()
         self.d_start = self.d_now.copy()
+        self.hand_start = hand_now.copy()
         # starts that already read as inserted carry no learning signal: they count as finished
         self.done = self.d_now < self.success_mm + 0.5
         return self.obs()
@@ -180,9 +185,14 @@ class ImaginedInsertion:
         self.s_now = self.s_now + WM_STEP
         self.t += 1
         gap = np.linalg.norm(cmd_poses[:, WM_STEP - 1, :3, 3] - meas_end[:, :3, 3], axis=1) * 1000
-        success = (self.d_now < self.success_mm) & ~self.done
-        info = {"d_before": d_before, "d_after": self.d_now.copy(), "uncertainty_mm": np.abs(d2[0] - d2[1]),
+        rel = np.einsum("bji,bj->bi", self.R_P, meas_end[:, :3, 3] - self.hand_start[:, :3, 3]) * 1000   # port axes, mm
+        lateral = np.linalg.norm(rel[:, 1:], axis=1)
+        step_lat = np.einsum("bji,bj->bi", self.R_P, meas_end[:, :3, 3] - self.ctx_meas[:, -2, :3, 3])[:, 1:]
+        fenced = (lateral > self.fence_mm) & ~self.done if self.fence_mm else np.zeros(B, bool)
+        success = (self.d_now < self.success_mm) & ~self.done & ~fenced
+        info = {"lateral_travel_mm": lateral, "lateral_step_mm": np.linalg.norm(step_lat, axis=1) * 1000, "fenced": fenced,
+                "d_before": d_before, "d_after": self.d_now.copy(), "uncertainty_mm": np.abs(d2[0] - d2[1]),
                 "push_gap_mm": gap, "success": success, "was_done": self.done.copy()}
-        self.done = self.done | success
+        self.done = self.done | success | fenced
         info["timeout"] = self.t >= self.horizon
         return self.obs(), info

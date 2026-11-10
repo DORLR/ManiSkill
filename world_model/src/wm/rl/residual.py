@@ -11,6 +11,8 @@ and the FM's proposal for the executed 8 targets (relative to the joints). Outpu
 Reward per 0.4 s step, all read from the imagined latent / imagined proprioception (no simulator truth):
     progress     distance to inserted before - after (mm)
     success      + success_bonus when the distance falls below the success threshold
+    fence (v2)   - fence_penalty once, when the hand leaves the region around its start (episode ends)
+    drift (v2)   - drift_coef * lateral hand motion of the step (mm), across the insertion axis
     hard push    - push_coef * max(0, gap - gap_free_mm), gap = |commanded - measured hand position| (mm):
                  pushing against something instead of probing
     uncertainty  - unc_coef * |distance(sample 1) - distance(sample 2)| (mm): the world model disagrees
@@ -31,7 +33,7 @@ import torch.nn as nn
 from ..models.policy import ACTION_DIM, CHUNK, LatentFMPolicy
 from ..data.datasets import WM_STEP
 
-RESIDUAL_RAD = 0.004          # max correction per executed joint target (rad; ~ a few mm at the hand)
+RESIDUAL_RAD = 0.004          # v1 default max correction per executed joint target (rad); v2 sets cfg["residual_rad"]
 N_RES = WM_STEP * ACTION_DIM  # 56
 
 
@@ -94,10 +96,11 @@ def train(env, base: FrozenFM, cfg: dict, run_dir: Path, log, device) -> Path:
     opt = torch.optim.Adam(ac.parameters(), lr=cfg["lr"])
     run_dir.mkdir(parents=True, exist_ok=True)
     w = cfg["reward"]
+    bound = cfg.get("residual_rad", RESIDUAL_RAD)
     for it in range(1, cfg["iterations"] + 1):
         obs = env.reset()
         F, A, LP, V, R, NT = [], [], [], [], [], []
-        stats = {"progress": 0.0, "success": 0.0, "gap": 0.0, "unc": 0.0, "res": 0.0}
+        stats = {"progress": 0.0, "success": 0.0, "gap": 0.0, "unc": 0.0, "res": 0.0, "fenced": 0.0}
         for t in range(env.horizon):
             base_rel = base(obs["z"], obs["q"])
             f = ResidualActorCritic.features(obs["z"], obs["q"], base_rel)
@@ -106,7 +109,7 @@ def train(env, base: FrozenFM, cfg: dict, run_dir: Path, log, device) -> Path:
                 a = d.sample()
                 lp = d.log_prob(a).sum(-1)
                 v = ac.value(f)
-            corr = (a.clamp(-1, 1) * RESIDUAL_RAD).view(-1, WM_STEP, ACTION_DIM)
+            corr = (a.clamp(-1, 1) * bound).view(-1, WM_STEP, ACTION_DIM)
             targets = (base_rel + obs["q"][:, None]).clone()
             targets[:, :WM_STEP] += corr
             obs, info = env.step(targets.cpu().numpy().astype(np.float64))
@@ -115,14 +118,16 @@ def train(env, base: FrozenFM, cfg: dict, run_dir: Path, log, device) -> Path:
             r = (w["progress"] * progress + w["success_bonus"] * info["success"]
                  - w["push_coef"] * np.maximum(0.0, info["push_gap_mm"] - w["gap_free_mm"])
                  - w["unc_coef"] * info["uncertainty_mm"]
-                 - w["size_coef"] * (a.clamp(-1, 1) ** 2).mean(-1).cpu().numpy() - w["time_cost"]) * alive
-            nonterm = (~(info["success"] | info["was_done"])).astype(np.float32)
+                 - w["size_coef"] * (a.clamp(-1, 1) ** 2).mean(-1).cpu().numpy() - w["time_cost"]
+                 - w.get("fence_penalty", 0.0) * info["fenced"] - w.get("drift_coef", 0.0) * info["lateral_step_mm"]) * alive
+            nonterm = (~(info["success"] | info["fenced"] | info["was_done"])).astype(np.float32)
             F.append(f), A.append(a), LP.append(lp), V.append(v)
             R.append(torch.tensor(r, dtype=torch.float32, device=device))
             NT.append(torch.tensor(nonterm, device=device))
             n_alive = max(1, int(alive.sum()))
             stats["progress"] += float((progress * alive).sum()) / n_alive
             stats["success"] += float(info["success"].mean())
+            stats["fenced"] += float(info["fenced"].mean())
             stats["gap"] += float((info["push_gap_mm"] * alive).sum()) / n_alive
             stats["unc"] += float((info["uncertainty_mm"] * alive).sum()) / n_alive
             stats["res"] += float(a.clamp(-1, 1).abs().mean())
@@ -151,7 +156,7 @@ def train(env, base: FrozenFM, cfg: dict, run_dir: Path, log, device) -> Path:
                 opt.step()
         H = env.horizon
         log(iteration=it, reward=float(R_.sum(0).mean()), progress_mm=stats["progress"], success_rate=stats["success"],
-            push_gap_mm=stats["gap"] / H, uncertainty_mm=stats["unc"] / H, residual_abs=stats["res"] / H,
+            push_gap_mm=stats["gap"] / H, fenced_rate=stats["fenced"], uncertainty_mm=stats["unc"] / H, residual_abs=stats["res"] / H,
             start_distance_mm=float(np.median(env.d_start)), std=float(ac.log_std.exp().mean()))
         if it % cfg["save_every"] == 0 or it == cfg["iterations"]:
             torch.save({"model": ac.state_dict(), "iteration": it, "cfg": cfg}, run_dir / f"residual_it{it}.pt")
