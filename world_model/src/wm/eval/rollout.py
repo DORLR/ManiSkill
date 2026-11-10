@@ -45,16 +45,22 @@ class EvalGrasp:
     starts: list[Offset] = field(default_factory=list)
 
 
-def plan(split: str, grasps_per_cell: int, starts_per_grasp: int) -> list[EvalGrasp]:
+SEED_STRIDE = 100_000      # evaluation seed k shifts every grasp / start / episode seed by k x this
+
+
+def plan(split: str, grasps_per_cell: int, starts_per_grasp: int, seed: int = 0) -> list[EvalGrasp]:
+    """Evaluation episodes. `seed` 0 is the original plan; other seeds draw new grasps, starts and
+    episode seeds (policy sampling), the same for every method evaluated with that seed."""
     ports = list(OOD_VAL_SHAPES) if split == "ood_val" else list(TEST_PORTS)
+    base = EVAL_SEED + SEED_STRIDE * seed
     out = []
     for si, port in enumerate(ports):
-        rng = np.random.default_rng(EVAL_SEED + si)
+        rng = np.random.default_rng(base + si)
         for ci, cond in enumerate(CONDITIONS):
             for g in range(grasps_per_cell):
                 pitch, pos = sample_eval_grasp(rng, cond)
                 out.append(EvalGrasp(f"{port}_{cond}_{g}", port, cond, pitch, pos,
-                                     EVAL_SEED + 1000 * si + 10 * ci + g,
+                                     base + 1000 * si + 10 * ci + g,
                                      [sample_start(rng) for _ in range(starts_per_grasp)]))
     return out
 
@@ -157,13 +163,13 @@ def _work(g: EvalGrasp) -> dict:
 
 def run(vae_ckpt: str, policy_ckpt: str, split: str, out: Path, workers: int,
         grasps_per_cell: int, starts_per_grasp: int, only: list[str] | None = None,
-        max_decisions: int = MAX_DECISIONS, residual_ckpt: str | None = None) -> None:
+        max_decisions: int = MAX_DECISIONS, residual_ckpt: str | None = None, seed: int = 0) -> None:
     out.mkdir(parents=True, exist_ok=True)
     done = set()
     res_path = out / "results.jsonl"
     if res_path.exists():
         done = {json.loads(l)["key"] for l in res_path.read_text().splitlines() if l.strip()}
-    grasps = [g for g in plan(split, grasps_per_cell, starts_per_grasp)
+    grasps = [g for g in plan(split, grasps_per_cell, starts_per_grasp, seed)
               if g.key not in done and (not only or g.port in only)]
     grasps.sort(key=lambda g: g.port)
     print(f"{len(grasps)} grasps x {starts_per_grasp} starts, {workers} workers", flush=True)
