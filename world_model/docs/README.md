@@ -11,6 +11,7 @@ summaries) are copied into `results/`; run directories are on rs2 under `/mnt/st
 | [2026-11-08_baseline_v1.md](2026-11-08_baseline_v1.md) | latent-free baseline 6% vs latent FM 34%: what was compared, how to read it, budget caveat |
 | [2026-11-08_v2.md](2026-11-08_v2.md) | v2: angle loss, no KL, tracking history, predicted-pose loss; results; why stopped |
 | [2026-11-08_v3_runs.md](2026-11-08_v3_runs.md) | v3 / v3g runs: smoke tests, gate failures on pitch and their analysis, decisions, results as they arrive |
+| [2026-11-09_imagination_check.md](2026-11-09_imagination_check.md) | imagination vs simulator on the FM's own trajectories: readout, open-loop prediction, outcome agreement |
 
 `results/`
 

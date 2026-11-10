@@ -27,7 +27,7 @@ INSERTED_MARGIN_M = 0.001             # success: within 1 mm of full depth ...
 INSERTED_LATERAL_M = 0.002            # ... AND within 2 mm of the hole axis (lateral + vertical; inserted: 0.3-0.5 mm)
 INSERTED_ANGLE_DEG = 2.0              # ... AND tilted by at most 2 deg relative to the hole
 # Until 2026-11-09 only the depth was checked: a plug moved past the board's edge reached "full depth"
-# beside the board and counted as inserted (found in the residual's videos; docs/2026-11-08_v3_runs.md).
+# beside the board and counted as inserted (found in closed-loop videos; docs/2026-11-08_v3_runs.md).
 POS_EXTRAP_USED = (-0.030, -0.028)    # the [-12, -10] mm side is not insertable in this environment
 
 
@@ -87,6 +87,19 @@ def _diagnosis(robot) -> dict:
             "angle_deg": float(np.degrees(2 * np.arccos(w)))}
 
 
+def judge(robot) -> dict | None:
+    """None while the plug has not reached full depth; else the outcome with the diagnosis:
+    inserted, beside_board (reached depth outside the hole) or tilted (on the axis, tilted)."""
+    if _depth_left_m(robot) > INSERTED_MARGIN_M:
+        return None
+    d = _diagnosis(robot)
+    if d["lateral_mm"] > INSERTED_LATERAL_M * 1000:
+        return {"outcome": "beside_board", **d}
+    if d["angle_deg"] > INSERTED_ANGLE_DEG:
+        return {"outcome": "tilted", **d}
+    return {"outcome": "inserted", **d}
+
+
 def episode(robot, expert, agent, start: Offset, seed: int, max_decisions: int = MAX_DECISIONS,
             on_step=None) -> dict:
     """on_step(robot): optional hook after every control step (used to record videos).
@@ -106,13 +119,9 @@ def episode(robot, expert, agent, start: Offset, seed: int, max_decisions: int =
             robot._command(q, 1)
             if on_step is not None:
                 on_step(robot)
-        if _depth_left_m(robot) <= INSERTED_MARGIN_M:
-            d = _diagnosis(robot)
-            if d["lateral_mm"] > INSERTED_LATERAL_M * 1000:
-                return {"outcome": "beside_board", "decisions": k + 1, **d}  # reached depth outside the hole
-            if d["angle_deg"] > INSERTED_ANGLE_DEG:
-                return {"outcome": "tilted", "decisions": k + 1, **d}        # at depth, on the axis, but tilted
-            return {"outcome": "inserted", "decisions": k + 1, **d}
+        j = judge(robot)
+        if j is not None:
+            return {**j, "decisions": k + 1}
         f = robot.frame()
     return {"outcome": "timeout", "decisions": max_decisions, **_diagnosis(robot)}
 
@@ -121,7 +130,7 @@ def episode(robot, expert, agent, start: Offset, seed: int, max_decisions: int =
 _STATE = {}
 
 
-def _init(vae_ckpt: str, policy_ckpt: str, max_decisions: int = MAX_DECISIONS, residual_ckpt: str | None = None):
+def _init(vae_ckpt: str, policy_ckpt: str, max_decisions: int = MAX_DECISIONS):
     """Never raise here: an exception in a Pool initializer makes the pool respawn workers forever."""
     _STATE.update(port=None, robot=None, agent=None, init_error=None, max_decisions=max_decisions)
     try:
@@ -132,9 +141,6 @@ def _init(vae_ckpt: str, policy_ckpt: str, max_decisions: int = MAX_DECISIONS, r
         if kind == "image":
             from .agent import ImagePolicyAgent
             _STATE["agent"] = ImagePolicyAgent(policy_ckpt)
-        elif residual_ckpt:
-            from .agent import ResidualAgent
-            _STATE["agent"] = ResidualAgent(vae_ckpt, policy_ckpt, residual_ckpt)
         else:
             from .agent import LatentPolicyAgent
             _STATE["agent"] = LatentPolicyAgent(vae_ckpt, policy_ckpt)
@@ -172,7 +178,7 @@ def _work(g: EvalGrasp) -> dict:
 
 def run(vae_ckpt: str, policy_ckpt: str, split: str, out: Path, workers: int,
         grasps_per_cell: int, starts_per_grasp: int, only: list[str] | None = None,
-        max_decisions: int = MAX_DECISIONS, residual_ckpt: str | None = None, seed: int = 0) -> None:
+        max_decisions: int = MAX_DECISIONS, seed: int = 0) -> None:
     out.mkdir(parents=True, exist_ok=True)
     done = set()
     res_path = out / "results.jsonl"
@@ -183,7 +189,7 @@ def run(vae_ckpt: str, policy_ckpt: str, split: str, out: Path, workers: int,
     grasps.sort(key=lambda g: g.port)
     print(f"{len(grasps)} grasps x {starts_per_grasp} starts, {workers} workers", flush=True)
     t0 = time.time()
-    with mp.get_context("spawn").Pool(workers, initializer=_init, initargs=(vae_ckpt, policy_ckpt, max_decisions, residual_ckpt)) as pool, \
+    with mp.get_context("spawn").Pool(workers, initializer=_init, initargs=(vae_ckpt, policy_ckpt, max_decisions)) as pool, \
             open(res_path, "a") as f:
         for k, r in enumerate(pool.imap_unordered(_work, grasps)):
             f.write(json.dumps(r) + "\n")
