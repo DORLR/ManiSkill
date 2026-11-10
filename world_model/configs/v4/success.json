@@ -1,0 +1,23 @@
+{
+  "data": "/mnt/storage2/qingxin/data/wm_v1",
+  "latents": "/mnt/storage2/qingxin/data/wm_v4_latents",
+  "seed": 0,
+  "model": {"latent_ch": 16, "d": 256, "layers": 6, "heads": 8},
+  "mask": {"p_tail": 0.5, "p_mid": 0.2, "p_drop": 0.15},
+  "pos_fraction": 0.25,
+  "batch_size": 128,
+  "workers": 8,
+  "lr": 0.0002,
+  "weight_decay": 0.01,
+  "grad_clip": 1.0,
+  "ema_decay": 0.999,
+  "steps": 60000,
+  "p_ctx_noise": 0.5,
+  "ctx_noise_max": 0.1,
+  "log_every": 100,
+  "save_every": 1000,
+  "eval_every": 2000,
+  "eval_batches": 40,
+  "patience": 8,
+  "harm_margin": 0.02
+}

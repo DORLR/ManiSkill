@@ -285,3 +285,86 @@ class ImagePolicyDataset(Dataset):
         out = _tensors(out)
         out["R_P"] = torch.tensor(e["R_P"], dtype=torch.float32)
         return out
+
+
+# ---------------------------------------------------------------------------- segmentation (v4)
+class SegDataset(Dataset):
+    """UNet samples: one wrist RGB image and its class map (perception/labels.py: the recorded classes
+    + plug pins + socket openings drawn from the port geometry). Every image of every trajectory of
+    the split. Photometric augmentation (train): colour jitter, sensor noise, blur, JPEG-like
+    quantisation, so the network does not rely on the renderer's exact colours."""
+
+    def __init__(self, entries: list[dict], split: str, data_root: str, geom_root: str, augment: bool):
+        from ..perception.labels import load_geometry
+        self.entries = [e for e in entries if e["split"] == split and e["n_images"]]
+        self.geoms = [load_geometry(geom_root, data_root, e["path"]) for e in self.entries]
+        self.items = [(i, j) for i, e in enumerate(self.entries) for j in range(e["n_images"])]
+        self.augment = augment
+
+    def __len__(self):
+        return len(self.items)
+
+    def _augment(self, rgb: np.ndarray) -> np.ndarray:
+        g = torch.Generator().manual_seed(int(torch.randint(0, 2 ** 31 - 1, ())))
+        u = lambda a, b: float(torch.empty(()).uniform_(a, b, generator=g))
+        x = rgb.astype(np.float32) / 255.0
+        x = x * u(0.7, 1.3) + u(-0.1, 0.1)                                   # brightness / offset
+        mean = x.mean((0, 1), keepdims=True)
+        x = (x - mean) * u(0.7, 1.3) + mean                                  # contrast
+        gray = x.mean(2, keepdims=True)
+        x = gray + (x - gray) * u(0.6, 1.4)                                  # saturation
+        x = x * np.array([u(0.9, 1.1), u(0.9, 1.1), u(0.9, 1.1)], np.float32)   # white balance
+        x = x + np.random.default_rng(int(torch.randint(0, 2 ** 31 - 1, ()))).normal(0, u(0.0, 0.03), x.shape).astype(np.float32)
+        x = np.clip(x, 0, 1)
+        if u(0, 1) < 0.3:
+            import cv2
+            k = 3 if u(0, 1) < 0.7 else 5
+            x = cv2.GaussianBlur(x, (k, k), 0)
+        return (x * 255).round().astype(np.uint8)
+
+    def __getitem__(self, k: int) -> dict:
+        from ..perception.labels import label_map
+        i, j = self.items[k]
+        e = self.entries[i]
+        with np.load(e["path"]) as f:
+            rgb, seg = _jpeg(f, j), f["seg"][j]
+            step = int(f["img_step"][j])
+            lab = label_map(seg, f["eval_rel"][step], f["cam_T_world"][j].astype(np.float64),
+                            f["K"].astype(np.float64), self.geoms[i])
+        if self.augment:
+            rgb = self._augment(rgb)
+        return {"rgb": torch.from_numpy(np.ascontiguousarray(rgb)), "label": torch.from_numpy(lab.astype(np.int64))}
+
+
+def crops_path(crops_root, data_root, traj_path) -> Path:
+    return Path(crops_root) / Path(traj_path).relative_to(data_root)
+
+
+class CropFrameDataset(FrameDataset):
+    """Autoencoder v4 samples: FrameDataset + the two crop origins placed from the UNet's prediction
+    (scripts/data/place_crops.py; real-robot computable)."""
+
+    def __init__(self, entries, split, data_root, crops_root, kinds=None):
+        super().__init__(entries, split, kinds)
+        keep = [i for i, e in enumerate(self.entries) if crops_path(crops_root, data_root, e["path"]).exists()]
+        remap = {old: new for new, old in enumerate(keep)}
+        self.entries = [self.entries[i] for i in keep]
+        self.items = [(remap[i], j) for i, j in self.items if i in remap]
+        self.crops_root, self.data_root = crops_root, data_root
+        self._crops = {}
+
+    def _origins(self, i):
+        if i not in self._crops:
+            if len(self._crops) > 4096:
+                self._crops.clear()
+            with np.load(crops_path(self.crops_root, self.data_root, self.entries[i]["path"])) as f:
+                self._crops[i] = (f["plug_uv0"], f["hole_uv0"])
+        return self._crops[i]
+
+    def __getitem__(self, k: int) -> dict:
+        out = super().__getitem__(k)
+        i, j = self.items[k]
+        p, h = self._origins(i)
+        out["plug_uv0"] = torch.from_numpy(p[j].astype(np.int64))
+        out["hole_uv0"] = torch.from_numpy(h[j].astype(np.int64))
+        return out

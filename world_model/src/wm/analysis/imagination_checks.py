@@ -194,8 +194,20 @@ class Comparison:
     def __init__(self, env, fm, batch: int = 64):
         self.env, self.fm, self.batch = env, fm, batch
 
-    def real_reading(self, ep: dict) -> dict:
-        """Reading of every real decision frame + the final frame of an episode."""
+    def real_reading(self, ep: dict, cache: Path | None = None) -> dict:
+        """Reading of every real decision frame + the final frame of an episode (cached in `cache`)."""
+        if cache is not None and cache.exists():
+            with np.load(cache) as f:
+                return {k: f[k] for k in f.files}
+        r = self._real_reading(ep)
+        if cache is not None:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            tmp = cache.with_suffix(".tmp.npz")
+            np.savez(tmp, **r)
+            tmp.rename(cache)
+        return r
+
+    def _real_reading(self, ep: dict) -> dict:
         z = torch.tensor(np.concatenate([ep["z"], ep["z_final"][None]]), dtype=torch.float32, device=self.env.dev)
         hands = np.concatenate([ep["hand"][ep["step"]], ep["hand"][-1:]])
         cams = np.concatenate([ep["cam"], ep["cam_final"][None]])

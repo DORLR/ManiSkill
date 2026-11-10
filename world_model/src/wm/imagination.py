@@ -104,7 +104,7 @@ class ImaginedInsertion:
                  success_mm: float = 1.5, wm_samples: int = 1, pool: StartPool | None = None):
         self.vae, self.wm, self.adapter, self.fk = vae, wm, adapter, fk
         self.scale, self.pool, self.dev = scale, pool, device
-        self.success_mm, self.wm_samples = success_mm, wm_samples
+        self.success_mm, self.wm_samples, self.read_batch = success_mm, wm_samples, 32
         self.sampler = create_diffusion(timestep_respacing=str(sampling_steps))
         self.ref = plug_region_points(device)
 
@@ -119,8 +119,12 @@ class ImaginedInsertion:
     def readout(self, z: torch.Tensor, geom: dict) -> dict:
         """Pose read from scaled latents (B, 64, C): distance to inserted (mm, reference-grid error),
         depth left along the insertion axis, offset across it (mm) and angle (deg), as numpy."""
-        R, t = self.vae.decode_pose(z / self.scale, geom)
-        R, t = R.float(), t.float()
+        Rs, ts = [], []
+        for a in range(0, len(z), self.read_batch):              # the pose solve needs memory: 32 frames at a time
+            sl = slice(a, a + self.read_batch)
+            R, t = self.vae.decode_pose(z[sl] / self.scale, {k: v[sl] for k, v in geom.items()})
+            Rs.append(R.float()), ts.append(t.float())
+        R, t = torch.cat(Rs), torch.cat(ts)
         eye = torch.eye(3, device=z.device).expand(len(z), 3, 3)
         dist = grid_pose_error_mm(R, t, eye, torch.zeros_like(t), self.ref)
         t = t.cpu().numpy() * 1000

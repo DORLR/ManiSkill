@@ -1,0 +1,38 @@
+{
+  "data": "/mnt/storage2/qingxin/data/wm_v1",
+  "latents": "/mnt/storage2/qingxin/data/wm_v4_latents",
+  "dir": "/mnt/storage2/qingxin/data/wm_v4_online",
+  "seed": 0,
+  "wm_config": "world_model/configs/v4/wm.json",
+  "success_config": "world_model/configs/v4/success.json",
+  "actor": {
+    "unet": "/mnt/storage2/qingxin/runs/unet_v4/best.pt",
+    "ae": "/mnt/storage2/qingxin/runs/crop_ae_v4/best.pt",
+    "policy": "/mnt/storage2/qingxin/runs/policy_v4/best.pt",
+    "adapter": "/mnt/storage2/qingxin/runs/adapter_v3/best.pt",
+    "wm_init": "/mnt/storage2/qingxin/runs/wm_v4/best.pt",
+    "wm_init_last": "/mnt/storage2/qingxin/runs/wm_v4/last.pt",
+    "wm_live": "/mnt/storage2/qingxin/runs/wm_v4_online/current.pt",
+    "success_init": "/mnt/storage2/qingxin/runs/success_v4/best.pt",
+    "success_init_last": "/mnt/storage2/qingxin/runs/success_v4/last.pt",
+    "success_live": "/mnt/storage2/qingxin/runs/success_v4_online/current.pt",
+    "p_plan": 0.5,
+    "p_explore": 0.1,
+    "candidates": 8,
+    "horizon": 5,
+    "sampling_steps": 20,
+    "reload_every": 5
+  },
+  "learner": {
+    "online_fraction": 0.5,
+    "min_online_files": 50,
+    "refresh_every": 500,
+    "online_workers": 4,
+    "save_every": 1000,
+    "wm_steps": 400000,
+    "success_steps": 200000,
+    "sampling_steps": 20,
+    "imagined_every": 4,
+    "imagined_batch": 32
+  }
+}

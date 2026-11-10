@@ -29,6 +29,10 @@ def record(args):
     out.mkdir(parents=True, exist_ok=True)
     plan = [g for g in rollout.plan("ood_val", 4, 2, 0) if g.key.endswith("_0") and (not args.only or g.port in args.only)]
     items = [(g, i, str(out)) for g in plan for i in range(len(g.starts))]
+    if args.reverse:                       # a second process from the other end (finished episodes are skipped)
+        items = items[::-1]
+    if args.offset:                        # a further process starting in the middle
+        items = items[args.offset:] + items[:args.offset]
     print(f"{len(items)} starts x {len(ic.BRANCHES)} branches x {ic.REPS} continuations, {args.workers} workers", flush=True)
     t0 = time.time()
     with mp.get_context("spawn").Pool(args.workers, initializer=ic._init, initargs=(args.vae, args.policy)) as pool:
@@ -55,12 +59,12 @@ def compare(args):
                             sampling_steps=args.sampling_steps, success_mm=ic.SUCCESS_MM, wm_samples=1)
     cmp = ic.Comparison(env, fm, batch=args.batch)
 
-    eps = [ic._load(p) for p in sorted(Path(args.episodes).glob("*.npz"))]
+    eps = [{**ic._load(p), "name": p.stem} for p in sorted(Path(args.episodes).glob("*.npz"))]
     if args.max_episodes:
         eps = eps[:args.max_episodes]
     for ep in eps:
         ep["hand_cmd"] = ic._hand_cmd(fk, ep)
-        ep["reading"] = cmp.real_reading(ep)
+        ep["reading"] = cmp.real_reading(ep, Path(args.episodes) / "readings" / (ep["name"] + ".npz"))
         n = len(ep["step"])
         ep["truth"] = {k: np.concatenate([ep[k], [ep["end_" + k]]]) for k in ("depth_left_mm", "lateral_mm", "angle_deg")}
         assert len(ep["reading"]["distance_mm"]) == n + 1
@@ -68,6 +72,7 @@ def compare(args):
     report = {"episodes": len(eps), "settings": {"branches": ic.BRANCHES, "horizon": ic.HORIZON, "reps": ic.REPS,
               "imagined_per_branch": args.imagined, "success_mm": ic.SUCCESS_MM, "sampling_steps": args.sampling_steps}}
 
+    secs = set(args.sections.split(","))
     # ------------------------------------------------------------ 1. readout of real frames vs truth
     rd = defaultdict(lambda: defaultdict(list))
     fin = defaultdict(int)
@@ -82,15 +87,16 @@ def compare(args):
             rd[st]["read_lateral_mm"].append(r["lateral_mm"])
         reads_in = bool(ep["reading"]["distance_mm"][-1] < ic.SUCCESS_MM)
         fin[f"{ep['outcome']}|reading_inserted={reads_in}"] += 1
-    report["1_readout"] = {st: {k: ic.stats(v) for k, v in d.items()} for st, d in rd.items()}
-    report["1_readout_final_frame"] = dict(fin)
+    if "readout" in secs:
+        report["1_readout"] = {st: {k: ic.stats(v) for k, v in d.items()} for st, d in rd.items()}
+        report["1_readout_final_frame"] = dict(fin)
     print("readout done", flush=True)
 
     # ------------------------------------------------------------ 2a. open loop from the branch points
     rep0 = [ep for ep in eps if ep["rep"] == 0]
     items = [(ep, ep["k_branch"], ic.HORIZON) for ep in rep0]
     ol = {}
-    for given in (False, True):
+    for given in ((False, True) if "open" in secs else ()):
         preds = cmp.open_loop(items, [ep["hand_cmd"] for ep, _, _ in items], ic.HORIZON, given)
         acc = defaultdict(lambda: defaultdict(list))
         for (ep, k, _), p in zip(items, preds):
@@ -112,13 +118,14 @@ def compare(args):
                 hand_j = ep["hand"][int(ep["step"][j])] if j < n else ep["hand"][-1]
                 acc[h]["hand_pos_err_mm"].append(float(np.linalg.norm(p[t - 1]["hand_pos"] - hand_j[:3, 3]) * 1000))
         ol["real_joints" if given else "adapter_joints"] = {h: {k: ic.stats(v) for k, v in d.items()} for h, d in acc.items()}
-    report["2a_open_loop_from_branch_points"] = ol
+    if ol:
+        report["2a_open_loop_from_branch_points"] = ol
     print("open loop (branch points) done", flush=True)
 
     # ------------------------------------------------------------ 2b. 0.4 s ahead from every decision
     items = [(ep, k, 1) for ep in eps for k in range(0 if ep["rep"] == 0 else ep["k_branch"], len(ep["step"]))]
     one = {}
-    for given in (False, True):
+    for given in ((False, True) if "one" in secs else ()):
         preds = cmp.open_loop(items, [ep["hand_cmd"] for ep, _, _ in items], 1, given)
         acc = defaultdict(lambda: defaultdict(list))
         for (ep, k, _), p in zip(items, preds):
@@ -133,12 +140,19 @@ def compare(args):
             hand_j = ep["hand"][int(ep["step"][j])] if j < len(ep["step"]) else ep["hand"][-1]
             acc[st]["hand_pos_err_mm"].append(float(np.linalg.norm(p[0]["hand_pos"] - hand_j[:3, 3]) * 1000))
         one["real_joints" if given else "adapter_joints"] = {st: {k: ic.stats(v) for k, v in d.items()} for st, d in acc.items()}
-    report["2b_one_step_by_true_state"] = one
+    if one:
+        report["2b_one_step_by_true_state"] = one
     print("open loop (every decision) done", flush=True)
 
     # ------------------------------------------------------------ 3. closed loop: imagined vs simulated outcome
+    if "closed" not in secs:
+        Path(args.out).write_text(json.dumps(report, indent=1))
+        robot.env.close()
+        return
     groups = defaultdict(list)
     for ep in eps:
+        if args.branches and ep["k_branch"] not in args.branches:
+            continue
         groups[(ep["key"], ep["start"], ep["k_branch"])].append(ep)
     branch_rows, starts = [], []
     for (key, s, k), g in sorted(groups.items()):
@@ -161,7 +175,7 @@ def compare(args):
     imag = cmp.closed_loop(starts, ic.HORIZON)
     for b, row in enumerate(branch_rows):
         row["imagined"] = imag[b * args.imagined:(b + 1) * args.imagined]
-    (Path(args.out).parent / "branches.json").write_text(json.dumps(branch_rows))
+    (Path(args.out).with_suffix(".branches.json")).write_text(json.dumps(branch_rows))
 
     def summary(rows):
         sim = [x for r in rows for x in r["sim"]]
@@ -185,7 +199,7 @@ def compare(args):
                 "lateral_travel_mm_imagined": ic.stats([x["lateral_travel_mm"] for x in im])}
 
     report["3_closed_loop"] = {"all": summary(branch_rows),
-                               **{f"branch_k{k}": summary([r for r in branch_rows if r["k"] == k]) for k in ic.BRANCHES},
+                               **{f"branch_k{k}": summary([r for r in branch_rows if r["k"] == k]) for k in ic.BRANCHES if any(r["k"] == k for r in branch_rows)},
                                **{f"cond_{c}": summary([r for r in branch_rows if r["condition"] == c])
                                   for c in sorted({r["condition"] for r in branch_rows})}}
     report["prefix_joint_spread_rad_max"] = max(r["prefix_joint_spread_rad"] for r in branch_rows)
@@ -203,6 +217,8 @@ def main():
     r.add_argument("--out", required=True)
     r.add_argument("--workers", type=int, default=10)
     r.add_argument("--only", nargs="+", help="smoke tests only: these shapes")
+    r.add_argument("--reverse", action="store_true", help="process the starts from the last one")
+    r.add_argument("--offset", type=int, default=0, help="process the starts from this one on")
     c = sub.add_parser("compare")
     for a in ("--episodes", "--vae", "--policy", "--wm", "--adapter", "--latents", "--out"):
         c.add_argument(a, required=True)
@@ -210,6 +226,9 @@ def main():
     c.add_argument("--sampling-steps", type=int, default=20)
     c.add_argument("--batch", type=int, default=64)
     c.add_argument("--max-episodes", type=int, help="smoke tests only")
+    c.add_argument("--sections", default="readout,open,one,closed",
+                   help="comma list of readout / open / one / closed, to run parts in parallel processes")
+    c.add_argument("--branches", type=int, nargs="+", help="closed loop: only these branch points")
     args = ap.parse_args()
     record(args) if args.cmd == "record" else compare(args)
 
