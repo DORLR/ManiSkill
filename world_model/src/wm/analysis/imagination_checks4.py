@@ -184,10 +184,14 @@ def start_at_image(ep: dict, j: int, cmd_img: np.ndarray, scale: float) -> dict:
                              ep["action"][:s], s, ep["R_P"])
 
 
-def truth_at(ep: dict, j: int) -> dict:
+def truth_at(ep: dict, j: int, horizon: int = 0) -> dict:
+    """Truth at image j; `inserted_within`: inserted at j or at one of the next `horizon` images (the
+    classifier's label; an episode ends at its outcome, so later images do not exist)."""
     rel = ep["eval_rel"][int(ep["img_step"][j])]
     d = diagnosis(rel)
-    return {"inserted": bool(inserted(rel)), "depth_left_mm": float(d["depth_left_m"] * 1000),
+    fut = ep["eval_rel"][ep["img_step"][j:j + horizon + 1].astype(int)]
+    return {"inserted": bool(inserted(rel)), "inserted_within": bool(np.any(inserted(fut))),
+            "depth_left_mm": float(d["depth_left_m"] * 1000),
             "lateral_mm": float(d["lateral_m"] * 1000), "angle_deg": float(d["angle_deg"])}
 
 

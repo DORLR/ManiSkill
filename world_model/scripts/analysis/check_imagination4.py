@@ -72,6 +72,8 @@ def compare(args, cfg):
               "settings": {"branches": ic.BRANCHES, "horizon": ic.HORIZON, "reps": ic.REPS, "imagined": args.imagined}}
     print(len(eps), "episodes; world model step", wm_step, flush=True)
     B = args.batch
+    horizon = int(round(torch.load(args.success, map_location="cpu", weights_only=False)["cfg"].get("label_horizon_s", 0.0) / 0.2))
+    report["classifier_label_horizon_images"] = horizon
 
     # ------------------------------------------------ 1. classifier on real histories
     # every decision image (prefixes once) + the final image of every episode, taken after the outcome
@@ -83,9 +85,9 @@ def compare(args, cfg):
         chunk = items[s0:s0 + B]
         imag.reset_from([ic.start_at_image(ep, j, ep["cmd_img"], scale) for ep, j in chunk])
         probs += imag.p_success.tolist()
-        truths += [ic.truth_at(ep, j) for ep, j in chunk]
+        truths += [ic.truth_at(ep, j, horizon) for ep, j in chunk]
     p = np.array(probs)
-    ins = np.array([t["inserted"] for t in truths])
+    ins = np.array([t["inserted_within"] for t in truths])       # the classifier's label: inserted within its horizon
     at_depth_wrong = np.array([(t["depth_left_mm"] <= 1.0) and not t["inserted"] for t in truths])
     near = np.array([t["depth_left_mm"] <= 5.0 for t in truths])
     final = np.array([j == len(ep["img_step"]) - 1 for ep, j in items])
@@ -95,7 +97,7 @@ def compare(args, cfg):
                                                "called_inserted_pct": round(100 * float(np.mean([q > 0.5 for q, x in zip(pf, outcome_final) if x == o])), 1)}
                                            for o in sorted(set(outcome_final))}
     report["1_classifier"] = {
-        "frames": int(len(p)), "inserted_frames": int(ins.sum()),
+        "frames": int(len(p)), "positive_frames_inserted_within_horizon": int(ins.sum()),
         "auc": round(ic.auc(p[ins], p[~ins]), 4),
         "auc_within_5mm": round(ic.auc(p[ins & near], p[~ins & near]), 4),
         "precision_at_0.5": round(float(((p > 0.5) & ins).sum() / max(1, (p > 0.5).sum())), 4),
