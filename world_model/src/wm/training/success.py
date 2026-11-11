@@ -87,13 +87,21 @@ def evaluate(model, loaders: dict, device, max_batches: int) -> dict:
     return out
 
 
+def horizon_images(cfg: dict) -> int:
+    return int(round(cfg.get("label_horizon_s", 0.0) / 0.2))
+
+
 def val_loaders(cfg: dict, scale: float) -> dict:
-    files = offline_files(cfg, "ood_val")
-    items = SuccessDataset.index(files)
-    full = SuccessDataset(files, scale, None, items=items)
-    tail = TailMaskedSuccess(files, scale, items=items, tail=10)
+    """Held-out samples per source: full history and the last 2 s of vision masked."""
+    from .wm4 import sources
+    out, h = {}, horizon_images(cfg)
     vcfg = {**cfg, "workers": 2}
-    return {"full": balanced_loader(full, vcfg), "tail2s": balanced_loader(tail, vcfg)}
+    for src, _, _ in sources(cfg):
+        files = offline_files(cfg, "ood_val", src)
+        items = SuccessDataset.index(files, h)
+        out[f"{src}:full"] = balanced_loader(SuccessDataset(files, scale, None, items=items, horizon=h), vcfg)
+        out[f"{src}:tail2s"] = balanced_loader(TailMaskedSuccess(files, scale, items=items, tail=10, horizon=h), vcfg)
+    return out
 
 
 def train(cfg: dict, run_dir: Path, batches, max_steps: int | None = None, resume: str | None = None,
@@ -102,7 +110,8 @@ def train(cfg: dict, run_dir: Path, batches, max_steps: int | None = None, resum
     (online: world-model predictions labelled with the real frame's outcome) or None."""
     common.seed_all(cfg["seed"])
     device = torch.device("cuda")
-    scale = json.loads((Path(cfg["latents"]) / "stats.json").read_text())["scale"]
+    from .wm4 import latent_scale
+    scale = latent_scale(cfg)
     model = SuccessHead(**cfg["model"]).to(device)
     ema = common.EMA(model, cfg["ema_decay"])
     opt = torch.optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
@@ -149,7 +158,9 @@ def train(cfg: dict, run_dir: Path, batches, max_steps: int | None = None, resum
             log(step=step, **{f"val_{k}": x for k, x in v.items()})
             common.save_checkpoint(run_dir / "last.pt", model=model.state_dict(), ema=ema.model.state_dict(), ema_n=ema.n,
                                    opt=opt.state_dict(), step=step, cfg=cfg)
-            key = v["tail2s/auc"]
+            aucs = [x for k, x in v.items() if k.endswith(":tail2s/auc") and math.isfinite(x)]
+            key = sum(aucs) / len(aucs) if aucs else float("nan")        # mean over the sources, vision masked
+            log(step=step, val_selection_auc=key)
             if math.isfinite(key) and key > best:
                 best, bad = key, 0
                 common.save_checkpoint(run_dir / "best.pt", ema=ema.model.state_dict(), step=step, cfg=cfg)

@@ -180,30 +180,44 @@ class HistoryWindowDataset(torch.utils.data.Dataset):
 
 
 class SuccessDataset(torch.utils.data.Dataset):
-    """Success-classifier samples: history ending at image j (same masking) and the label "inserted at
-    image j" (simulator truth at training time; the contact switch on the real robot)."""
+    """Success-classifier samples: history ending at image j (same masking) and the label "the plug is
+    inserted at image j or within the next `horizon` images" (0.2 s each; simulator truth at training
+    time, the contact switch on a real robot). With horizon 0 it is "inserted now".
 
-    def __init__(self, files: LatentFiles, scale: float, mask: dict, items: list | None = None):
-        self.files, self.scale, self.mask = files, scale, mask
-        self.items = items if items is not None else self.index(files)
+    Why a horizon (decided with the user 2026-11-10): "inserted now" is 0 for every action while the plug
+    is stuck, so a search has nothing to compare. Every contact-exploration trajectory ends with a straight
+    push and the demonstrations end with the expert's insertion, so "inserted within ~8 s" means: from
+    here, does continuing with a push get it in."""
+
+    def __init__(self, files: LatentFiles, scale: float, mask: dict, items: list | None = None, horizon: int = 0):
+        self.files, self.scale, self.mask, self.horizon = files, scale, mask, horizon
+        self.items = items if items is not None else self.index(files, horizon)
 
     @staticmethod
-    def index(files: LatentFiles, first: int = 0) -> list:
+    def labels(ins: np.ndarray, horizon: int) -> np.ndarray:
+        """ins (N,) bool -> (N,) bool: inserted at j or at any of the next `horizon` images."""
+        ins = np.asarray(ins, bool)
+        c = np.concatenate([[0], np.cumsum(ins)])
+        hi = np.minimum(np.arange(len(ins)) + horizon + 1, len(ins))
+        return (c[hi] - c[np.arange(len(ins))]) > 0
+
+    @staticmethod
+    def index(files: LatentFiles, horizon: int = 0, first: int = 0) -> list:
         out = []
         for fi in range(first, len(files)):
-            d = files.load(fi)
-            out += [(fi, j, bool(d["inserted"][j])) for j in range(len(d["img_step"]))]
+            lab = SuccessDataset.labels(files.load(fi)["inserted"], horizon)
+            out += [(fi, j, bool(lab[j])) for j in range(len(lab))]
         return out
 
     def __len__(self):
         return len(self.items)
 
     def __getitem__(self, k):
-        fi, j, _ = self.items[k]
+        fi, j, lab = self.items[k]
         d = self.files.load(fi)
         rng = _rng()
         avail = (j - np.arange(HIST - 1, -1, -1)) >= 0
         seen = vision_mask(avail, rng, **self.mask) if self.mask else avail
         out = to_tensors(history(d, j, d["R_P"].astype(np.float64), self.scale, seen))
-        out["label"] = torch.tensor(float(d["inserted"][j]))
+        out["label"] = torch.tensor(float(lab))
         return out

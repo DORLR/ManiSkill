@@ -23,12 +23,13 @@ def main():
     run = Path(args.run)
     run.mkdir(parents=True, exist_ok=True)
     (run / "config.json").write_text(json.dumps(cfg, indent=1))
-    scale = json.loads((Path(cfg["latents"]) / "stats.json").read_text())["scale"]
-    ds = HistoryWindowDataset(wm4.offline_files(cfg, "train"), scale, cfg["mask"], p_step=cfg["p_step"])
-    loader = DataLoader(ds, batch_size=cfg["batch_size"], shuffle=True, drop_last=True, num_workers=cfg["workers"],
-                        persistent_workers=True, pin_memory=True)
+    scale = wm4.latent_scale(cfg)
+    mk = lambda files: DataLoader(HistoryWindowDataset(files, scale, cfg["mask"], p_step=cfg["p_step"]),
+                                  batch_size=cfg["batch_size"], shuffle=True, drop_last=True, num_workers=cfg["workers"],
+                                  persistent_workers=True, pin_memory=True)
+    batches = wm4.train_batches(cfg, mk)
     resume = str(run / "last.pt") if (run / "last.pt").exists() else None
-    wm4.train(cfg, run, common.cycle(loader), max_steps=args.steps, resume=resume)
+    wm4.train(cfg, run, batches, max_steps=args.steps, resume=resume)
 
 
 if __name__ == "__main__":

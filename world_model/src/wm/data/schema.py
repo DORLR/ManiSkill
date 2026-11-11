@@ -37,6 +37,8 @@ TRAJECTORY_KINDS = (
     "perturbed",  # expert from a far start with stochastic perturbation, recovery, insert
     "contact",    # align, offset by 0-3 mm / 0-3 deg, straight push until inserted or jammed
     "random",     # random motion in front of the board (no insertion)
+    "explore",    # policy-independent contact exploration (collect/explore.py): random start near the
+                  # board, truth-free random maneuver, straight push until inserted or blocked
 )
 
 PHASES = (
@@ -49,6 +51,9 @@ PHASES = (
     "contact_offset",
     "contact_push",
     "random_motion",
+    "explore_maneuver",
+    "explore_hold",
+    "explore_push",
 )
 _PHASE_ID = {p: i for i, p in enumerate(PHASES)}
 

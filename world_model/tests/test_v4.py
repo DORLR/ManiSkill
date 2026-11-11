@@ -69,3 +69,26 @@ def test_crop_placer_uses_memory_when_opening_hidden():
     assert r2["how_hole"] == "memory_3d"
     assert np.abs(r1["hole_uv0"] - r2["hole_uv0"]).max() <= 1
     assert r1["how_plug"] == "pins"
+
+
+def test_success_label_horizon():
+    from wm.data.history import SuccessDataset
+    ins = np.array([0, 0, 0, 0, 0, 1, 1, 0, 0, 0], bool)
+    assert SuccessDataset.labels(ins, 0).tolist() == ins.tolist()                       # "inserted now"
+    assert SuccessDataset.labels(ins, 2).tolist() == [0, 0, 0, 1, 1, 1, 1, 0, 0, 0]     # now or within 2 images
+    assert SuccessDataset.labels(ins, 100).tolist() == [1] * 7 + [0] * 3                # never looks back
+    assert SuccessDataset.labels(np.zeros(5, bool), 40).sum() == 0
+
+
+def test_exploration_segments_do_not_use_the_scene():
+    """Starts and maneuvers are drawn from a random generator only (no robot, no simulator state)."""
+    import inspect
+    from wm.collect import explore
+    for fn in (explore.sample_start, explore.sample_segments):
+        assert list(inspect.signature(fn).parameters) == ["rng"]
+    a = explore.sample_segments(np.random.default_rng(3))
+    b = explore.sample_segments(np.random.default_rng(3))
+    assert a == b
+    src = inspect.getsource(explore.Explorer)
+    for w in ("goal_pose", "charger", "eval_rel", "relative("):
+        assert w not in src, w

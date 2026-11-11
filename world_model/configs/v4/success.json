@@ -1,9 +1,24 @@
 {
-  "data": "/mnt/storage2/qingxin/data/wm_v1",
-  "latents": "/mnt/storage2/qingxin/data/wm_v4_latents",
+  "data": [
+    "/mnt/storage2/qingxin/data/wm_v1",
+    "/mnt/storage2/qingxin/data/wm_v1x"
+  ],
+  "latents": [
+    "/mnt/storage2/qingxin/data/wm_v4_latents",
+    "/mnt/storage2/qingxin/data/wm_v4x_latents"
+  ],
   "seed": 0,
-  "model": {"latent_ch": 16, "d": 256, "layers": 6, "heads": 8},
-  "mask": {"p_tail": 0.5, "p_mid": 0.2, "p_drop": 0.15},
+  "model": {
+    "latent_ch": 16,
+    "d": 256,
+    "layers": 6,
+    "heads": 8
+  },
+  "mask": {
+    "p_tail": 0.5,
+    "p_mid": 0.2,
+    "p_drop": 0.15
+  },
   "pos_fraction": 0.25,
   "batch_size": 128,
   "workers": 8,
@@ -19,5 +34,10 @@
   "eval_every": 2000,
   "eval_batches": 40,
   "patience": 8,
-  "harm_margin": 0.02
+  "harm_margin": 0.02,
+  "source_weights": [
+    0.6,
+    0.4
+  ],
+  "label_horizon_s": 8.0
 }

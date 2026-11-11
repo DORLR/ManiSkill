@@ -115,34 +115,72 @@ class FixedTailDataset(HistoryWindowDataset):
         return out
 
 
-def offline_files(cfg: dict, split: str) -> LatentFiles:
+def sources(cfg: dict) -> list[tuple[str, str, str]]:
+    """(name, data root, latent root) of every data source. `data` / `latents` in the config are one path or
+    two parallel lists (demonstrations first, then contact exploration); the first source defines the
+    latent scale (the autoencoder and the FM were trained with it)."""
+    d, l = cfg["data"], cfg["latents"]
+    if isinstance(d, str):
+        return [(Path(d).name, d, l)]
+    return [(Path(x).name, x, y) for x, y in zip(d, l)]
+
+
+def latent_scale(cfg: dict) -> float:
+    return json.loads((Path(sources(cfg)[0][2]) / "stats.json").read_text())["scale"]
+
+
+def offline_files(cfg: dict, split: str, source: str | None = None) -> LatentFiles:
+    """Latent files of a split, of all sources or of one (by name)."""
     from ..data import index as data_index
-    root, data = Path(cfg["latents"]), Path(cfg["data"])
     paths = []
-    for e in data_index.load(cfg["data"]):
-        if e["split"] == split:
-            p = root / Path(e["path"]).relative_to(data)
-            if p.exists():
-                paths.append(str(p))
+    for name, data, root in sources(cfg):
+        if source is not None and name != source:
+            continue
+        for e in data_index.load(data):
+            if e["split"] == split:
+                q = Path(root) / Path(e["path"]).relative_to(data)
+                if q.exists():
+                    paths.append(str(q))
     return LatentFiles(paths)
 
 
+def mixed_batches(loaders: list, weights: list[float], seed: int):
+    """Endless batches; each batch comes from one source, drawn with the given probabilities."""
+    its = [common.cycle(l) for l in loaders]
+    rng = __import__("numpy").random.default_rng(seed)
+    w = [x / sum(weights) for x in weights]
+    while True:
+        yield next(its[int(rng.choice(len(its), p=w))])
+
+
+def train_batches(cfg: dict, make_dataset):
+    """One loader per source (make_dataset(files) -> dataset, loader), mixed by cfg["source_weights"]."""
+    loaders = [make_dataset(offline_files(cfg, "train", name)) for name, _, _ in sources(cfg)]
+    weights = cfg.get("source_weights") or [1.0] * len(loaders)
+    return mixed_batches(loaders, weights, cfg["seed"] + 5)
+
+
 def build(cfg: dict, device):
-    scale = json.loads((Path(cfg["latents"]) / "stats.json").read_text())["scale"]
+    scale = latent_scale(cfg)
     ae = load_crop_ae(cfg["ae_checkpoint"], device).requires_grad_(False)
     model = HistoryCDiT(latent_ch=ae.latent_ch, size=cfg["size"]).to(device)
     return scale, ae, model
 
 
 def val_loaders(cfg: dict, scale: float) -> dict:
-    files = offline_files(cfg, "ood_val")
+    """Held-out (ood_val) windows per source and fixed shift, with the full history and with the last 2 s of
+    vision masked. Shifts a source has too few windows for (short exploration trajectories) are left out."""
     out = {}
-    for name, m in VAL_SHIFTS.items():
-        items = HistoryWindowDataset.index(files, fixed_shift=m)
-        for tail_name, ds in (("full", HistoryWindowDataset(files, scale, None, fixed_shift=m, items=items)),
-                              ("tail2s", FixedTailDataset(files, scale, fixed_shift=m, items=items, tail=10))):
-            out[f"{name}_{tail_name}"] = DataLoader(ds, batch_size=cfg["batch_size"], shuffle=True, drop_last=True,
-                                                    num_workers=2)
+    for src, _, _ in sources(cfg):
+        files = offline_files(cfg, "ood_val", src)
+        for name, m in VAL_SHIFTS.items():
+            items = HistoryWindowDataset.index(files, fixed_shift=m)
+            if len(items) < 4 * cfg["batch_size"]:
+                continue
+            for tail_name, ds in (("full", HistoryWindowDataset(files, scale, None, fixed_shift=m, items=items)),
+                                  ("tail2s", FixedTailDataset(files, scale, fixed_shift=m, items=items, tail=10))):
+                out[f"{src}:{name}_{tail_name}"] = DataLoader(ds, batch_size=cfg["batch_size"], shuffle=True,
+                                                             drop_last=True, num_workers=2)
     return out
 
 

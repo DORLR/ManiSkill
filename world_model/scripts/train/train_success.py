@@ -9,7 +9,7 @@ from pathlib import Path
 
 from wm.data.history import SuccessDataset
 from wm.training import common, success
-from wm.training.wm4 import offline_files
+from wm.training.wm4 import latent_scale, train_batches
 
 
 def main():
@@ -22,10 +22,12 @@ def main():
     run = Path(args.run)
     run.mkdir(parents=True, exist_ok=True)
     (run / "config.json").write_text(json.dumps(cfg, indent=1))
-    scale = json.loads((Path(cfg["latents"]) / "stats.json").read_text())["scale"]
-    ds = SuccessDataset(offline_files(cfg, "train"), scale, cfg["mask"])
+    scale = latent_scale(cfg)
+    h = success.horizon_images(cfg)
+    mk = lambda files: success.balanced_loader(SuccessDataset(files, scale, cfg["mask"], horizon=h), cfg)
+    batches = train_batches(cfg, mk)
     resume = str(run / "last.pt") if (run / "last.pt").exists() else None
-    success.train(cfg, run, common.cycle(success.balanced_loader(ds, cfg)), max_steps=args.steps, resume=resume)
+    success.train(cfg, run, batches, max_steps=args.steps, resume=resume)
 
 
 if __name__ == "__main__":
