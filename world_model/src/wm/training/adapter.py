@@ -56,7 +56,9 @@ def evaluate(model, loader, device, max_batches) -> dict:
 def train(cfg: dict, run_dir: Path, entries: list[dict] | None = None, max_steps: int | None = None) -> Path:
     common.seed_all(cfg["seed"])
     device = torch.device("cuda")
-    entries = entries if entries is not None else data_index.load(cfg["data"])
+    if entries is None:                      # one data root or several (demonstrations, contact exploration)
+        roots = [cfg["data"]] if isinstance(cfg["data"], str) else cfg["data"]
+        entries = [e for r in roots for e in data_index.load(r)]
     train_ds, val_ds = AdapterDataset(entries, "train"), AdapterDataset(entries, "ood_val")
     mk = lambda ds: DataLoader(ds, batch_size=cfg["batch_size"], shuffle=True, drop_last=True,
                                num_workers=cfg["workers"], persistent_workers=cfg["workers"] > 0)

@@ -9,7 +9,7 @@
     "unet": "/mnt/storage2/qingxin/runs/unet_v4/best.pt",
     "ae": "/mnt/storage2/qingxin/runs/crop_ae_v4e/best.pt",
     "policy": "/mnt/storage2/qingxin/runs/policy_v4e/best.pt",
-    "adapter": "/mnt/storage2/qingxin/runs/adapter_v3/best.pt",
+    "adapter": "/mnt/storage2/qingxin/runs/adapter_v4e/best.pt",
     "wm_init": "/mnt/storage2/qingxin/runs/wm_v4/best.pt",
     "wm_init_last": "/mnt/storage2/qingxin/runs/wm_v4/last.pt",
     "wm_live": "/mnt/storage2/qingxin/runs/wm_v4_online/current.pt",
