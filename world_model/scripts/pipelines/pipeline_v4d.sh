@@ -1,7 +1,7 @@
 #!/bin/bash
 # v4d (2026-11-11): policy-independent world model. After the contact-exploration collection (tmux
 # qingxin-explore): index -> commanded hand poses -> crops -> crop coverage gate -> exploration data gate
-# (physics sanity, no truth in commands) -> latents -> smoke tests -> world model + success classifier from
+# (physics sanity, no truth in commands), autoencoder readout gate on exploration frames -> latents -> smoke tests -> world model + success classifier from
 # scratch on demonstrations + exploration (no policy data). Stops at the first failure.
 set -uo pipefail
 source /mnt/storage2/qingxin/env.sh
@@ -29,6 +29,7 @@ run ee 0.02 python $S/data/compute_ee.py $X --out ${X}_ee --workers 8
 stamp "commanded hand poses: $(tail -1 $Q/logs/v4d_ee.log | cut -c1-200)"
 run crops 0.08 python $S/data/place_crops.py --data $X --unet $Q/runs/unet_v4/best.pt --out ${X}_crops --workers 12
 run crop_gate 0.02 python $S/analysis/check_crop_coverage.py --data $X --crops ${X}_crops --geometry $Q/data/wm_v1_labelgeom --out $CK/crops --n 800
+run ae_gate 0.06 python $S/analysis/check_ae_on_exploration.py --ae $Q/runs/crop_ae_v4b/best.pt --demos $Q/data/wm_v1 --demo-crops $Q/data/wm_v1_crops --explore $X --explore-crops ${X}_crops --out $CK/ae_readout.json
 run data_gate 0.02 python $S/analysis/check_exploration.py --data $X --ee ${X}_ee --policy-episodes $Q/runs/checks_v4/imagination/episodes --out $CK/report.json
 python $CK/explore_viz.py $X $CK/full_sheet > /dev/null 2>&1
 run encode 0.10 python $S/train/encode_latents_v4.py --ae $Q/runs/crop_ae_v4b/best.pt --data $X --ee ${X}_ee --crops ${X}_crops --out $Q/data/wm_v4x_latents --workers 12

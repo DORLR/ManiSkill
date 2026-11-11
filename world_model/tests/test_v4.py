@@ -92,3 +92,18 @@ def test_exploration_segments_do_not_use_the_scene():
     src = inspect.getsource(explore.Explorer)
     for w in ("goal_pose", "charger", "eval_rel", "relative("):
         assert w not in src, w
+
+
+def test_alternating_mask_matches_imagination():
+    from wm.data.history import HIST, vision_mask
+    avail = np.ones(HIST, bool)
+    hits = 0
+    for seed in range(200):
+        seen = vision_mask(avail, np.random.default_rng(seed), p_tail=0.0, p_mid=0.0, p_drop=0.0, p_alt=1.0)
+        assert seen[-1]                                   # "now" always has its frame
+        k = 1
+        while k < HIST and seen[-1 - k] != seen[-k]:      # alternating run counted back from now
+            k += 1
+        assert k >= 2 and not seen[-2]
+        hits += 1
+    assert hits == 200

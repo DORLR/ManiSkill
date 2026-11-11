@@ -15,6 +15,8 @@ Vision masking when training (the model must not depend on seeing the last frame
 plug covers the opening for the rest of the insertion):
     with p_tail   the last L slots, L uniform in 1..(available - 1)   (main case: occlusion until the end)
     with p_mid    a random contiguous block, not touching the oldest available slot
+    with p_alt    the last L slots keep a frame only every 0.4 s (now, -0.4 s, -0.8 s, ...): exactly what the
+                  history looks like in imagination, where the world model produces one frame per 0.4 s
     always        each remaining slot dropped with p_drop (irregular sampling)
 At least one slot keeps its latent.
 """
@@ -31,7 +33,8 @@ PROPRIO_DIM = 2 * POSE_DIM    # measured + commanded hand pose
 PATH_DIM = N_WAYPOINTS * POSE_DIM
 
 
-def vision_mask(avail: np.ndarray, rng: np.random.Generator, p_tail: float, p_mid: float, p_drop: float) -> np.ndarray:
+def vision_mask(avail: np.ndarray, rng: np.random.Generator, p_tail: float, p_mid: float, p_drop: float,
+                p_alt: float = 0.0) -> np.ndarray:
     """avail (HIST,) bool, oldest first -> seen (HIST,) bool (a subset of avail, never empty)."""
     seen = avail.copy()
     idx = np.nonzero(avail)[0]
@@ -45,6 +48,9 @@ def vision_mask(avail: np.ndarray, rng: np.random.Generator, p_tail: float, p_mi
             L = int(rng.integers(1, n))
             a = int(rng.integers(1, n - L + 1))
             seen[idx[a:a + L]] = False
+        elif u < p_tail + p_mid + p_alt:          # as in imagination: the last L slots hold a frame every 0.4 s only
+            L = int(rng.integers(2, n + 1))
+            seen[idx[n - L:][::-1][1::2]] = False   # now seen, -0.2 s not, -0.4 s seen, ...
         drop = rng.random(HIST) < p_drop
         keep_one = seen.copy()
         seen &= ~drop

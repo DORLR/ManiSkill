@@ -17,7 +17,8 @@
   "mask": {
     "p_tail": 0.5,
     "p_mid": 0.2,
-    "p_drop": 0.15
+    "p_drop": 0.15,
+    "p_alt": 0.15
   },
   "pos_fraction": 0.25,
   "batch_size": 128,
