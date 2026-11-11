@@ -96,9 +96,17 @@ def train(cfg: dict, run_dir: Path, entries: list[dict] | None = None, max_steps
     return run_dir / "best.pt"
 
 
-def load_adapter(path: str, device=None) -> JointAdapter:
-    ck = torch.load(path, map_location="cpu")
-    m = JointAdapter(**ck["cfg"]["model"])
-    m.load_state_dict(ck["model"])
+def load_adapter(path: str, device=None):
+    """A blind JointAdapter or, when the checkpoint's model config says kind = "vision", a VisionJointAdapter
+    (training/adapter_vision.py; called with the history, see imagination4.HistoryImagination.step)."""
+    ck = torch.load(path, map_location="cpu", weights_only=False)
+    mcfg = dict(ck["cfg"]["model"])
+    if mcfg.pop("kind", "blind") == "vision":
+        from ..models.adapter import VisionJointAdapter
+        m = VisionJointAdapter(**mcfg)
+        m.load_state_dict(ck["ema"])
+    else:
+        m = JointAdapter(**mcfg)
+        m.load_state_dict(ck["model"])
     m.eval()
     return m.to(device) if device is not None else m

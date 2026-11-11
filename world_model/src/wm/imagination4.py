@@ -2,7 +2,8 @@
 
 Batched (B episodes), one step = one policy decision = 0.4 s = two history slots of 0.2 s:
     joints   the joint adapter predicts the measured joints after each of the 8 executed commands
-             (models/adapter.py), unless the real ones are given (checks)
+             (models/adapter.py; the vision-conditioned one also gets the history and the commanded
+             path), unless the real ones are given (checks)
     poses    FK: commanded hand poses of the targets, measured hand poses of the predicted joints
     slots    two new slots: +0.2 s (proprioception only: no image is imagined there) and +0.4 s
              (the world model's predicted latent + proprioception); the oldest two drop out
@@ -89,22 +90,27 @@ class HistoryImagination:
         """targets (B, 16, 7) absolute joint targets (first 8 executed); q_steps (B, 8, 7) real joints
         (checks) or None (adapter). Returns the predicted latent, P(success) and the new hand pose."""
         B = self.B
-        if q_steps is None:
-            x = np.concatenate([self.q[:, :7], self.hist.reshape(B, -1), (targets[:, :WM_STEP] - self.q[:, None, :7]).reshape(B, -1)], 1)
-            dq = self.adapter(torch.tensor(x, dtype=torch.float32, device=self.dev)).view(B, WM_STEP, 7).cpu().numpy()
-            q_steps = self.q[:, None, :7] + dq
         fingers = self.q[:, 7:9]
         cmd = np.stack([self.fk(np.concatenate([targets[b, :WM_STEP + 1], np.repeat(fingers[b][None], WM_STEP + 1, 0)], 1))
                         for b in range(B)])                                         # commands at steps s .. s+8
-        meas = np.stack([self.fk(np.concatenate([q_steps[b, [SLOT_STEPS - 1, WM_STEP - 1]], np.repeat(fingers[b][None], 2, 0)], 1))
-                         for b in range(B)])                                        # measured at s+4, s+8
         self.cmd[:, -1] = cmd[:, 0]                                                 # the newest slot's command = this chunk's first
         h = self.tensors()
         ref = self.meas[:, -1]
         off = np.rint(np.linspace(0, WM_STEP, N_WAYPOINTS + 1)[1:]).astype(int)
-        path = np.stack([pose_feature(cmd[b, off], ref[b], self.R_P[b]).reshape(-1) for b in range(B)])
+        path = torch.tensor(np.stack([pose_feature(cmd[b, off], ref[b], self.R_P[b]).reshape(-1) for b in range(B)]),
+                            dtype=torch.float32, device=self.dev)
+        if q_steps is None:
+            x = np.concatenate([self.q[:, :7], self.hist.reshape(B, -1), (targets[:, :WM_STEP] - self.q[:, None, :7]).reshape(B, -1)], 1)
+            x = torch.tensor(x, dtype=torch.float32, device=self.dev)
+            if getattr(self.adapter, "takes_history", False):       # vision-conditioned: the history and the commanded path too
+                dq = self.adapter(x, h["z_hist"], h["seen"], h["proprio"], h["dt"], h["avail"], path)
+            else:
+                dq = self.adapter(x)
+            q_steps = self.q[:, None, :7] + dq.view(B, WM_STEP, 7).cpu().numpy().astype(np.float64)
+        meas = np.stack([self.fk(np.concatenate([q_steps[b, [SLOT_STEPS - 1, WM_STEP - 1]], np.repeat(fingers[b][None], 2, 0)], 1))
+                         for b in range(B)])                                        # measured at s+4, s+8
         C = self.z.shape[-1]
-        kw = dict(path=torch.tensor(path, dtype=torch.float32, device=self.dev),
+        kw = dict(path=path,
                   rel_t=torch.full((B,), WM_STEP / 20.0, device=self.dev), **h)
         x = self.sampler.p_sample_loop(self.wm.forward, (B, C, 8, 8), torch.randn(B, C, 8, 8, device=self.dev),
                                        clip_denoised=False, model_kwargs=kw, progress=False, device=self.dev)

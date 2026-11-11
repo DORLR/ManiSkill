@@ -84,6 +84,15 @@ def history(d: dict, j: int, R_P: np.ndarray, scale: float, seen: np.ndarray | N
     return {"z": z, "seen": seen, "proprio": proprio.astype(np.float32), "dt": dt.astype(np.float32), "avail": avail}
 
 
+def commanded_path(d: dict, s_now: int, s_tgt: int, R_P: np.ndarray) -> np.ndarray:
+    """Commanded hand path from control step s_now to s_tgt: N_WAYPOINTS poses relative to the hand measured at
+    s_now, port axes, flattened (PATH_DIM,)."""
+    ref = d["hand"][s_now].astype(np.float64)
+    wp = np.rint(np.linspace(s_now, s_tgt, N_WAYPOINTS + 1)[1:]).astype(int)
+    cmd = d["hand_cmd"][np.clip(wp, 0, len(d["hand_cmd"]) - 1)].astype(np.float64)
+    return pose_feature(cmd, ref, R_P).reshape(-1)
+
+
 def to_tensors(h: dict) -> dict:
     return {k: torch.from_numpy(np.ascontiguousarray(v)) for k, v in h.items()}
 
@@ -168,10 +177,7 @@ class HistoryWindowDataset(torch.utils.data.Dataset):
         h = history(d, j, R_P, self.scale, seen)
         steps = d["img_step"].astype(int)
         s_now, s_tgt = int(steps[j]), int(steps[j + m])
-        ref = d["hand"][s_now].astype(np.float64)
-        wp = np.rint(np.linspace(s_now, s_tgt, N_WAYPOINTS + 1)[1:]).astype(int)
-        cmd = d["hand_cmd"][np.clip(wp, 0, len(d["hand_cmd"]) - 1)].astype(np.float64)
-        path = pose_feature(cmd, ref, R_P).reshape(-1)
+        path = commanded_path(d, s_now, s_tgt, R_P)
         t = int(j + m)
         out = to_tensors(h)
         out.update(x=torch.from_numpy(d["mean"][t].astype(np.float32)) * self.scale, path=torch.from_numpy(path),
@@ -226,4 +232,47 @@ class SuccessDataset(torch.utils.data.Dataset):
         seen = vision_mask(avail, rng, **self.mask) if self.mask else avail
         out = to_tensors(history(d, j, d["R_P"].astype(np.float64), self.scale, seen))
         out["label"] = torch.tensor(float(lab))
+        return out
+
+
+class AdapterHistoryDataset(torch.utils.data.Dataset):
+    """Samples of the vision-conditioned joint adapter (models/adapter.py VisionJointAdapter): at the control step
+    of image j, the blind adapter's input and output (datasets.adapter_io), the history ending at image j (the same
+    vision masking as the world model) and the commanded hand path of the next 8 commands. Only images taken
+    before the last command (a decision starts there)."""
+
+    STEPS = 8          # one decision (imagination4.WM_STEP)
+
+    def __init__(self, files: LatentFiles, scale: float, mask: dict | None, items: list | None = None):
+        self.files, self.scale, self.mask = files, scale, mask
+        self.items = items if items is not None else self.index(files)
+
+    @staticmethod
+    def index(files: LatentFiles) -> list:
+        out = []
+        for fi in range(len(files)):
+            d = files.load(fi)
+            out += [(fi, j) for j, s in enumerate(d["img_step"].astype(int)) if s < len(d["action"])]
+        return out
+
+    def __len__(self):
+        return len(self.items)
+
+    def io(self, k: int):
+        from .datasets import adapter_io
+        fi, j = self.items[k]
+        d = self.files.load(fi)
+        return adapter_io(d["qpos"].astype(np.float32), d["action"].astype(np.float32), int(d["img_step"][j]))
+
+    def __getitem__(self, k):
+        fi, j = self.items[k]
+        d = self.files.load(fi)
+        s = int(d["img_step"][j])
+        R_P = d["R_P"].astype(np.float64)
+        avail = (j - np.arange(HIST - 1, -1, -1)) >= 0
+        seen = vision_mask(avail, _rng(), **self.mask) if self.mask else avail
+        out = to_tensors(history(d, j, R_P, self.scale, seen))
+        x, y = self.io(k)
+        out.update(x=torch.from_numpy(x), y=torch.from_numpy(y),
+                   path=torch.from_numpy(commanded_path(d, s, s + self.STEPS, R_P).astype(np.float32)))
         return out

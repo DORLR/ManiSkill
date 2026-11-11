@@ -107,3 +107,41 @@ def test_alternating_mask_matches_imagination():
         assert k >= 2 and not seen[-2]
         hits += 1
     assert hits == 200
+
+
+def test_vision_adapter_ignores_unseen_slots_and_keeps_the_blind_path():
+    """The vision-conditioned joint adapter: output shape; latents of unseen slots do not matter (attention over
+    the seen slots only, no flag); seen latents, the commanded path and the numeric input do."""
+    from wm.data.history import HIST, PATH_DIM, PROPRIO_DIM
+    from wm.models.adapter import IN_DIM, OUT_DIM, VisionJointAdapter
+    torch.manual_seed(0)
+    m = VisionJointAdapter(latent_ch=16, d=64, layers=2, heads=4, hidden=64).eval()
+    B = 3
+    x, path = torch.randn(B, IN_DIM), torch.randn(B, PATH_DIM)
+    z, prop, dt = torch.randn(B, HIST, 64, 16), torch.randn(B, HIST, PROPRIO_DIM), -torch.rand(B, HIST)
+    avail = torch.ones(B, HIST, dtype=torch.bool)
+    seen = avail.clone()
+    seen[:, -6:] = False
+    with torch.no_grad():
+        y = m(x, z, seen, prop, dt, avail, path)
+        z2 = z.clone()
+        z2[:, -6:] = torch.randn(B, 6, 64, 16)
+        assert y.shape == (B, OUT_DIM)
+        assert torch.allclose(y, m(x, z2, seen, prop, dt, avail, path), atol=1e-5)
+        z3 = z.clone()
+        z3[:, 0] += 1.0
+        assert not torch.allclose(y, m(x, z3, seen, prop, dt, avail, path), atol=1e-5)
+        assert not torch.allclose(y, m(x, z, seen, prop, dt, avail, path + 1.0), atol=1e-5)
+        assert not torch.allclose(y, m(x + 1.0, z, seen, prop, dt, avail, path), atol=1e-5)
+
+
+def test_success_head_features_unchanged_by_refactor():
+    """SuccessHead.forward = out(features): the logit of a checkpoint does not depend on the refactor."""
+    from wm.data.history import HIST, PROPRIO_DIM
+    from wm.models.success import SuccessHead
+    torch.manual_seed(0)
+    m = SuccessHead(latent_ch=16, d=64, layers=2, heads=4).eval()
+    z, prop, dt = torch.randn(2, HIST, 64, 16), torch.randn(2, HIST, PROPRIO_DIM), -torch.rand(2, HIST)
+    seen = torch.ones(2, HIST, dtype=torch.bool)
+    with torch.no_grad():
+        assert torch.equal(m(z, seen, prop, dt, seen), m.out(m.features(z, seen, prop, dt, seen))[:, 0])

@@ -38,8 +38,9 @@ class SuccessHead(nn.Module):
         self.enc = nn.TransformerEncoder(nn.TransformerEncoderLayer(d, heads, 4 * d, batch_first=True, norm_first=True), layers)
         self.out = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, 1))
 
-    def forward(self, z_hist, seen, proprio, dt, avail) -> torch.Tensor:
-        """z_hist (B,HIST,64,C), seen / avail (B,HIST) bool, proprio (B,HIST,18), dt (B,HIST) -> logit (B,)."""
+    def features(self, z_hist, seen, proprio, dt, avail, extra=None) -> torch.Tensor:
+        """The CLS output (B, d). `extra` (B, n, d): further tokens, always attended (the vision-conditioned joint
+        adapter adds its numeric input and the commanded path, models/adapter.py)."""
         B, S = seen.shape
         te = self.slot_time((-dt * DT_SCALE).reshape(-1, 1)).view(B, S, -1)
         tok = self.inp(z_hist) + self.token_pos                                       # (B, S, 64, d)
@@ -47,7 +48,12 @@ class SuccessHead(nn.Module):
         pooled = self.pool(q, tok.flatten(0, 1), tok.flatten(0, 1), need_weights=False)[0]
         v = self.pool_norm(pooled).view(B, S, POOL, -1) + te[:, :, None] + self.type_emb[1]
         p = self.proprio(proprio) + te + self.type_emb[2]
-        x = torch.cat([self.cls.expand(B, -1, -1) + self.type_emb[0], v.flatten(1, 2), p], 1)
+        x = torch.cat([self.cls.expand(B, -1, -1) + self.type_emb[0], v.flatten(1, 2), p] + ([extra] if extra is not None else []), 1)
         ignore = torch.cat([torch.zeros(B, 1, dtype=torch.bool, device=seen.device),
-                            (~seen).repeat_interleave(POOL, 1), ~avail], 1)
-        return self.out(self.enc(x, src_key_padding_mask=ignore)[:, 0])[:, 0]
+                            (~seen).repeat_interleave(POOL, 1), ~avail]
+                           + ([torch.zeros(B, extra.shape[1], dtype=torch.bool, device=seen.device)] if extra is not None else []), 1)
+        return self.enc(x, src_key_padding_mask=ignore)[:, 0]
+
+    def forward(self, z_hist, seen, proprio, dt, avail) -> torch.Tensor:
+        """z_hist (B,HIST,64,C), seen / avail (B,HIST) bool, proprio (B,HIST,18), dt (B,HIST) -> logit (B,)."""
+        return self.out(self.features(z_hist, seen, proprio, dt, avail))[:, 0]
