@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from ..data.history import HIST, PATH_DIM, PROPRIO_DIM
 from ..third_party.nwm.diffusion import create_diffusion  # noqa: F401  (re-exported)
@@ -75,6 +76,25 @@ class HistoryCDiT(CDiT):
         return self.unpatchify(x)
 
 
+def masked_cross_attention(mha: nn.MultiheadAttention, query, key, ignore):
+    """nn.MultiheadAttention(add_bias_kv=True, batch_first=True)(query, key, key, key_padding_mask=ignore),
+    computed with the same weights by torch's fused scaled_dot_product_attention (memory-efficient
+    kernels; nn.MultiheadAttention falls back to its slow path when a padding mask is given).
+    tests/test_history_cdit.py checks that both give the same output."""
+    B, Lq, E = query.shape
+    H = mha.num_heads
+    w, bias = mha.in_proj_weight, mha.in_proj_bias
+    q = F.linear(query, w[:E], bias[:E])
+    k = F.linear(key, w[E:2 * E], bias[E:2 * E])
+    v = F.linear(key, w[2 * E:], bias[2 * E:])
+    k = torch.cat([k, mha.bias_k.expand(B, 1, E)], 1)                  # add_bias_kv: one extra key / value,
+    v = torch.cat([v, mha.bias_v.expand(B, 1, E)], 1)                  # never masked
+    keep = torch.cat([~ignore, ignore.new_ones(B, 1)], 1)              # True = attend
+    split = lambda t: t.view(B, -1, H, E // H).transpose(1, 2)
+    o = F.scaled_dot_product_attention(split(q), split(k), split(v), attn_mask=keep[:, None, None, :])
+    return mha.out_proj(o.transpose(1, 2).reshape(B, Lq, E))
+
+
 def _block_forward(blk, x, c, x_cond, ignore):
     """CDiTBlock.forward (third_party/nwm/models.py) with a key padding mask in the cross-attention.
     The block's own bias key (add_bias_kv) is always attendable, so a sample with no key left is fine."""
@@ -82,7 +102,7 @@ def _block_forward(blk, x, c, x_cond, ignore):
      shift_mlp, scale_mlp, gate_mlp) = blk.adaLN_modulation(c).chunk(11, dim=1)
     x = x + gate_msa.unsqueeze(1) * blk.attn(modulate(blk.norm1(x), shift_msa, scale_msa))
     x_cond_norm = modulate(blk.norm_cond(x_cond), shift_ca_xcond, scale_ca_xcond)
-    x = x + gate_ca_x.unsqueeze(1) * blk.cttn(query=modulate(blk.norm2(x), shift_ca_x, scale_ca_x), key=x_cond_norm,
-                                              value=x_cond_norm, key_padding_mask=ignore, need_weights=False)[0]
+    x = x + gate_ca_x.unsqueeze(1) * masked_cross_attention(blk.cttn, modulate(blk.norm2(x), shift_ca_x, scale_ca_x),
+                                                            x_cond_norm, ignore)
     x = x + gate_mlp.unsqueeze(1) * blk.mlp(modulate(blk.norm3(x), shift_mlp, scale_mlp))
     return x

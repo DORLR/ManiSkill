@@ -1,6 +1,6 @@
 """Encode every recorded image with the frozen crop autoencoder (v4, wm/training/encode4.py).
 
-    python world_model/scripts/train/encode_latents_v4.py --ae $Q/runs/crop_ae_v4/best.pt --data $Q/data/wm_v1 \
+    python world_model/scripts/train/encode_latents_v4.py --ae $Q/runs/crop_ae_v4b/best.pt --data $Q/data/wm_v1 \
         --ee $Q/data/wm_v1_ee --crops $Q/data/wm_v1_crops --out $Q/data/wm_v4_latents
 """
 

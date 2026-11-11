@@ -1,7 +1,7 @@
 {
   "data": "/mnt/storage2/qingxin/data/wm_v1",
   "latents": "/mnt/storage2/qingxin/data/wm_v4_latents",
-  "ae_checkpoint": "/mnt/storage2/qingxin/runs/crop_ae_v4/best.pt",
+  "ae_checkpoint": "/mnt/storage2/qingxin/runs/crop_ae_v4b/best.pt",
   "seed": 0,
   "size": "S",
   "latent_ch": 16,

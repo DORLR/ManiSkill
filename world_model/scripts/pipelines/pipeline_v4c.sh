@@ -59,7 +59,7 @@ cfg $C/wm.json $SM/wm.json latents=\"$SM/latents\" ae_checkpoint=\"$Q/runs/crop_
 cfg $C/success.json $SM/success.json latents=\"$SM/latents\" workers=2 batch_size=8 eval_batches=2 eval_every=20 save_every=10
 cfg $C/policy.json $SM/policy.json latents=\"$SM/latents\" workers=2 batch_size=16 eval_batches=2 eval_every=20
 run smoke_policy 0.05 python $S/train/train_policy.py --config $SM/policy.json --run $SM/policy --max-steps 20
-cfg $C/online.json $SM/online.json dir=\"$SM/online\" latents=\"$Q/data/wm_v4_latents\" wm_config=\"$SM/wm.json\" success_config=\"$SM/success.json\" \
+cfg $C/online.json $SM/online.json dir=\"$SM/online\" latents=\"$SM/latents\" wm_config=\"$SM/wm.json\" success_config=\"$SM/success.json\" \
     actor.policy=\"$SM/policy/best.pt\" actor.ae=\"$Q/runs/crop_ae_v4b/best.pt\" actor.wm_init=\"$SM/none.pt\" actor.wm_init_last=\"$SM/none.pt\" \
     actor.success_init=\"$SM/none.pt\" actor.success_init_last=\"$SM/none.pt\" actor.wm_live=\"$SM/online_wm/current.pt\" \
     actor.success_live=\"$SM/online_success/current.pt\" learner.min_online_files=1 learner.refresh_every=5 learner.save_every=5 learner.online_workers=1

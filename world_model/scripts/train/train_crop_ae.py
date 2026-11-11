@@ -1,6 +1,6 @@
 """Train the crop autoencoder (v4, wm/training/crop_ae.py).
 
-    python world_model/scripts/train/train_crop_ae.py --config world_model/configs/v4/crop_ae.json --run $Q/runs/crop_ae_v4
+    python world_model/scripts/train/train_crop_ae.py --config world_model/configs/v4/crop_ae.json --run $Q/runs/crop_ae_v4b
 """
 
 import argparse
