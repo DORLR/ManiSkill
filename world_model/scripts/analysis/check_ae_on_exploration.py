@@ -27,6 +27,7 @@ ap = argparse.ArgumentParser()
 for a in ("--ae", "--demos", "--demo-crops", "--explore", "--explore-crops", "--out"):
     ap.add_argument(a, required=True)
 ap.add_argument("--batches", type=int, default=400)
+ap.add_argument("--no-gate", action="store_true", help="report only (exit code 0)")
 args = ap.parse_args()
 limit_gpu_memory()
 dev = torch.device("cuda")
@@ -79,4 +80,4 @@ for name in ("demonstrations", "exploration"):
         if isinstance(v, dict) and "within 3 mm" in k:
             print("   %-60s %s" % (k, v))
 print("GATE", rep["gate"], fail)
-sys.exit(1 if fail else 0)
+sys.exit(1 if fail and not args.no_gate else 0)

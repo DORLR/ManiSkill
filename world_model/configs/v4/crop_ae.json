@@ -1,6 +1,12 @@
 {
-  "data": "/mnt/storage2/qingxin/data/wm_v1",
-  "crops": "/mnt/storage2/qingxin/data/wm_v1_crops",
+  "data": [
+    "/mnt/storage2/qingxin/data/wm_v1",
+    "/mnt/storage2/qingxin/data/wm_v1x"
+  ],
+  "crops": [
+    "/mnt/storage2/qingxin/data/wm_v1_crops",
+    "/mnt/storage2/qingxin/data/wm_v1x_crops"
+  ],
   "seed": 0,
   "model": {
     "encoder": {
@@ -39,5 +45,9 @@
   "eval_batches": 200,
   "patience": 10,
   "harm_margin": 0.05,
-  "max_skipped": 50
+  "max_skipped": 50,
+  "source_weights": [
+    0.6,
+    0.4
+  ]
 }

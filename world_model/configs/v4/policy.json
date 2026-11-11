@@ -1,7 +1,7 @@
 {
   "input": "latent",
   "data": "/mnt/storage2/qingxin/data/wm_v1",
-  "latents": "/mnt/storage2/qingxin/data/wm_v4_latents",
+  "latents": "/mnt/storage2/qingxin/data/wm_v4e_latents",
   "seed": 0,
   "model": {
     "latent_ch": 16,

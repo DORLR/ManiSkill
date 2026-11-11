@@ -4,8 +4,8 @@
     "/mnt/storage2/qingxin/data/wm_v1x"
   ],
   "latents": [
-    "/mnt/storage2/qingxin/data/wm_v4_latents",
-    "/mnt/storage2/qingxin/data/wm_v4x_latents"
+    "/mnt/storage2/qingxin/data/wm_v4e_latents",
+    "/mnt/storage2/qingxin/data/wm_v4ex_latents"
   ],
   "seed": 0,
   "model": {

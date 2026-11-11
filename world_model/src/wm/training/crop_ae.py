@@ -9,7 +9,8 @@ Loss, summed over the two crops:
                 motion and R* p + t* - p, (R*, t*) = FK of the grasp's one insertion
     weight_bce  per pixel with depth: weight logit vs "is plug"
 and for the pose solved from both crops: reference-grid error (mm) + angle error (deg).
-Validation on ood_val; model selection / harm-only early stop on pose score = grid + w_angle * angle.
+Validation on ood_val per data source; model selection / harm-only early stop on the pose score
+(grid + w_angle * angle) averaged over the sources.
 """
 
 from __future__ import annotations
@@ -97,11 +98,18 @@ def train(cfg: dict, run_dir: Path, max_steps: int | None = None, resume: str | 
     """`resume`: a last.pt of the same design (model + optimizer + step); training continues from its step."""
     common.seed_all(cfg["seed"])
     device = torch.device("cuda")
-    entries = data_index.load(cfg["data"])
-    mk = lambda split: DataLoader(CropFrameDataset(entries, split, cfg["data"], cfg["crops"]), batch_size=cfg["batch_size"],
-                                  shuffle=True, drop_last=True, num_workers=cfg["workers"],
-                                  persistent_workers=cfg["workers"] > 0, pin_memory=True)
-    train_loader, val_loader = mk("train"), mk("ood_val")
+    # one or several data sources (demonstrations, contact exploration): `data` / `crops` are a path or parallel
+    # lists; training batches are drawn from the sources with `source_weights`, validation is per source
+    srcs = list(zip(*[[cfg[k]] if isinstance(cfg[k], str) else cfg[k] for k in ("data", "crops")]))
+    names = [Path(d).name for d, _ in srcs]
+    mk = lambda d, c, split, workers: DataLoader(CropFrameDataset(data_index.load(d), split, d, c), batch_size=cfg["batch_size"],
+                                                 shuffle=True, drop_last=True, num_workers=workers,
+                                                 persistent_workers=workers > 0, pin_memory=True)
+    train_loaders = [mk(d, c, "train", cfg["workers"]) for d, c in srcs]
+    val_loaders = {n: mk(d, c, "ood_val", 6) for n, (d, c) in zip(names, srcs)}
+    weights = cfg.get("source_weights") or [1.0] * len(srcs)
+    from .wm4 import mixed_batches
+    batches = mixed_batches(train_loaders, weights, cfg["seed"] + 3)
     model = CropAE(**cfg["model"]).to(device)
     opt = torch.optim.AdamW(common.trainable(model), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
     warmup = cfg.get("warmup_steps", 0)
@@ -115,11 +123,12 @@ def train(cfg: dict, run_dir: Path, max_steps: int | None = None, resume: str | 
         for _ in range(start):                 # the warm-up schedule continues where it was
             sched.step()
     log, w, ref = common.Logger(run_dir), cfg["loss_weights"], plug_region_points(device)
-    log(event="start", resume=resume, start_step=start, train_frames=len(train_loader.dataset),
-        val_frames=len(val_loader.dataset), params_m=sum(p.numel() for p in common.trainable(model)) / 1e6)
+    log(event="start", resume=resume, start_step=start, sources=names, source_weights=weights,
+        train_frames=[len(l.dataset) for l in train_loaders], val_frames=[len(l.dataset) for l in val_loaders.values()],
+        params_m=sum(p.numel() for p in common.trainable(model)) / 1e6)
     best, bad, skipped = float("inf"), 0, 0
     steps = max_steps or cfg["steps"]
-    for step, batch in zip(range(start + 1, steps + 1), common.cycle(train_loader)):
+    for step, batch in zip(range(start + 1, steps + 1), batches):
         batch = common.to_device(batch, device)
         with torch.autocast("cuda", dtype=torch.bfloat16):
             l = losses(model, model(batch), batch, w, ref)
@@ -138,8 +147,10 @@ def train(cfg: dict, run_dir: Path, max_steps: int | None = None, resume: str | 
         if step % cfg["log_every"] == 0 or step == steps:
             log(step=step, grad_norm=float(gn), **{f"train_{k}": float(v) for k, v in l.items()})
         if step % cfg["eval_every"] == 0 or step == steps:
-            v = evaluate(model, val_loader, w, device, cfg["eval_batches"], ref)
-            log(step=step, **{f"val_{k}": x for k, x in v.items()})
+            per = {n: evaluate(model, l, w, device, cfg["eval_batches"], ref) for n, l in val_loaders.items()}
+            v = {"pose_score": sum(x["pose_score"] for x in per.values()) / len(per)}     # selection: mean over the sources
+            log(step=step, val_pose_score=v["pose_score"],
+                **{f"val_{n}/{k}": x for n, m in per.items() for k, x in m.items()})
             if not math.isfinite(v["pose_score"]):
                 log(event="stop_nonfinite_validation", step=step)
                 break
