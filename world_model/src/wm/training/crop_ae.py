@@ -25,6 +25,20 @@ total loss, whose gradient is clipped all the time.
                 the training step)
     selection   pose score + near_lateral * (error across the axis within 5 mm of inserted) + key_rgb * (RGB error
                 on the key pixels): the pose alone is one global quantity and says nothing about kept detail
+v5b (decided with the user 2026-11-12; model `rgb: false`, `seg_classes: 7`; loss weights `seg`, `lateral`, `close_weight`):
+v5 at 10 000 steps had tokens that differ (token-specific share 36-55 %) and twice v4e's reconstruction, but the pose
+terms had not moved since step 4000 (v4e's fell steadily): RGB + edge weights, 8 times v4e's RGB weight in all, own
+the clipped gradient. And an RGB reconstruction is blocky at the 8 px patch size -- no way to a one-pixel edge.
+    no RGB target   colour is an input (the edges are read from it: without RGB a dedicated reader is blind within
+                    1 mm) but not something the latent has to give back
+    seg_ce          instead the decoder gives every pixel's class (the frozen UNet's prediction on the image, a
+                    real-robot quantity): cross-entropy, key pixels weighted as before. An edge off by a pixel costs.
+                    Logged: IoU of the decoded pins / openings with the UNet's.
+    depth_w         depth L1 weighted towards the pins, the openings and the board around them (15 px): where depth
+                    is needed (the gap to the board, the tilt; without depth the reader loses the vertical direction)
+    close samples   frames whose remaining motion across the axis is under 3 mm (FK label) count `1 + close_weight`
+                    times in the pose terms, and `lateral` weighs their error across the axis (mm) directly
+    weights         otherwise v4e's, under which the pose was learned
 Logged at validation: latent_specific_share = the part of the latent's frame-to-frame variation that differs
 between the tokens of a frame (v4e: under 1 %: the tokens were copies).
 """
@@ -64,20 +78,22 @@ class KeyPixels:
             self.lpips = lpips.LPIPS(net=cfg.get("lpips_net", "alex"), verbose=False).to(device).eval().requires_grad_(False)
 
     @torch.no_grad()
-    def __call__(self, batch: dict) -> torch.Tensor | None:
-        """(B, 320, 320) weight of every image pixel: 1, and 1 + key_weight on the predicted pins and openings."""
+    def __call__(self, batch: dict) -> dict | None:
+        """Per image pixel (B, 320, 320): `w` = 1, and 1 + key_weight on the predicted pins and openings (dilated);
+        `wd` the same with a wide margin (the board around them; for the depth); `cls` the predicted class."""
         if self.unet is None:
             return None
         with torch.autocast("cuda", dtype=torch.bfloat16):
             cls = self.unet(batch["rgb"]).argmax(1)
         m = ((cls == PINS) | (cls == OPENING)).float()[:, None]
-        return 1 + self.weight * F.max_pool2d(m, self.dilate, 1, self.dilate // 2)[:, 0]
+        return {"w": 1 + self.weight * F.max_pool2d(m, self.dilate, 1, self.dilate // 2)[:, 0],
+                "wd": 1 + self.weight * F.max_pool2d(m, 31, 1, 15)[:, 0], "cls": cls}
 
 
-def losses(model: CropAE, out: dict, batch: dict, w: dict, ref: torch.Tensor, key: torch.Tensor | None = None,
+def losses(model: CropAE, out: dict, batch: dict, w: dict, ref: torch.Tensor, key: dict | None = None,
            perceptual=None) -> dict:
-    l = {k: 0.0 for k in ("depth_mm", "valid_bce", "rgb_l1", "rgb_w", "key_rgb_l1", "edge_l1", "lpips", "dino_cos",
-                          "motion_mm", "weight_bce")}
+    l = {k: 0.0 for k in ("depth_mm", "depth_w", "key_depth_mm", "valid_bce", "rgb_l1", "rgb_w", "key_rgb_l1", "edge_l1",
+                          "lpips", "seg_ce", "seg_iou_pins", "seg_iou_opening", "dino_cos", "motion_mm", "weight_bce")}
     with torch.autocast("cuda", enabled=False):
         R_star, t_star = insertion_motion(batch["hand"].float(), batch["h_star"].float(), batch["R_P"].float())
         geom = {k: batch[k] for k in ("K", "cam_T_world", "hand", "R_P", "plug_uv0", "hole_uv0")}
@@ -87,24 +103,41 @@ def losses(model: CropAE, out: dict, batch: dict, w: dict, ref: torch.Tensor, ke
             d_err = (pred["depth_patch"].float() - tgt["depth_patch"].float()).abs() * DEPTH_SCALE_M * 1000
             l["depth_mm"] = l["depth_mm"] + (d_err * valid).sum() / valid.sum().clamp(min=1)
             l["valid_bce"] = l["valid_bce"] + F.binary_cross_entropy_with_logits(pred["valid_logit"].float(), valid.float())
-            rgb_err = (pred["rgb_patch"].float() - tgt["rgb_patch"].float()).abs()
-            l["rgb_l1"] = l["rgb_l1"] + rgb_err.mean()
+            Wk = cut(key["w"], batch[f"{k}_uv0"]).float() if key is not None else None      # (B, 128, 128)
             if key is None:
-                l["rgb_w"] = l["rgb_w"] + rgb_err.mean()
+                l["depth_w"] = l["depth_w"] + (d_err * valid).sum() / valid.sum().clamp(min=1)
             else:
-                Wk = cut(key, batch[f"{k}_uv0"]).float()                          # (B, 128, 128)
-                wp = patches(Wk[:, None])                                         # (B, 256, 64), as the patches' pixels
-                e_pix = rgb_err.unflatten(-1, (3, -1)).mean(2)                    # per pixel, mean over the 3 colours
-                l["rgb_w"] = l["rgb_w"] + (e_pix * wp).sum() / wp.sum()
-                is_key = (wp > 1).float()
-                l["key_rgb_l1"] = l["key_rgb_l1"] + (e_pix * is_key).sum() / is_key.sum().clamp(min=1)
-                P, T = unpatch(pred["rgb_patch"].float(), 3), unpatch(tgt["rgb_patch"].float(), 3)
-                for ax in (-1, -2):
-                    d = (P.diff(dim=ax) - T.diff(dim=ax)).abs().mean(1)
-                    wd = torch.maximum(Wk.narrow(ax, 1, Wk.shape[ax] - 1), Wk.narrow(ax, 0, Wk.shape[ax] - 1))
-                    l["edge_l1"] = l["edge_l1"] + (d * wd).sum() / wd.sum()
-                if perceptual is not None:
-                    l["lpips"] = l["lpips"] + perceptual(P * 2 - 1, T * 2 - 1).mean()
+                wdp = patches(cut(key["wd"], batch[f"{k}_uv0"]).float()[:, None]) * valid   # (B, 256, 64), valid pixels only
+                l["depth_w"] = l["depth_w"] + (d_err * wdp).sum() / wdp.sum().clamp(min=1)
+                kd = (wdp > 1).float()
+                l["key_depth_mm"] = l["key_depth_mm"] + (d_err * kd).sum() / kd.sum().clamp(min=1)
+            if "rgb_patch" in pred:
+                rgb_err = (pred["rgb_patch"].float() - tgt["rgb_patch"].float()).abs()
+                l["rgb_l1"] = l["rgb_l1"] + rgb_err.mean()
+                if key is None:
+                    l["rgb_w"] = l["rgb_w"] + rgb_err.mean()
+                else:
+                    wp = patches(Wk[:, None])                                     # (B, 256, 64), as the patches' pixels
+                    e_pix = rgb_err.unflatten(-1, (3, -1)).mean(2)                # per pixel, mean over the 3 colours
+                    l["rgb_w"] = l["rgb_w"] + (e_pix * wp).sum() / wp.sum()
+                    is_key = (wp > 1).float()
+                    l["key_rgb_l1"] = l["key_rgb_l1"] + (e_pix * is_key).sum() / is_key.sum().clamp(min=1)
+                    P, T = unpatch(pred["rgb_patch"].float(), 3), unpatch(tgt["rgb_patch"].float(), 3)
+                    for ax in (-1, -2):
+                        d = (P.diff(dim=ax) - T.diff(dim=ax)).abs().mean(1)
+                        wd = torch.maximum(Wk.narrow(ax, 1, Wk.shape[ax] - 1), Wk.narrow(ax, 0, Wk.shape[ax] - 1))
+                        l["edge_l1"] = l["edge_l1"] + (d * wd).sum() / wd.sum()
+                    if perceptual is not None:
+                        l["lpips"] = l["lpips"] + perceptual(P * 2 - 1, T * 2 - 1).mean()
+            if "seg_patch" in pred and key is not None:
+                cls_t = cut(key["cls"], batch[f"{k}_uv0"])                         # (B, 128, 128) the UNet's classes
+                logits = unpatch(pred["seg_patch"].float(), model.seg_classes)     # (B, classes, 128, 128)
+                ce = F.cross_entropy(logits, cls_t, reduction="none")
+                l["seg_ce"] = l["seg_ce"] + (ce * Wk).sum() / Wk.sum()
+                cls_p = logits.argmax(1)
+                for name, c in (("pins", PINS), ("opening", OPENING)):
+                    a, b = cls_p == c, cls_t == c
+                    l[f"seg_iou_{name}"] = l[f"seg_iou_{name}"] + 0.5 * (a & b).sum() / (a | b).sum().clamp(min=1)
             l["dino_cos"] = l["dino_cos"] + 1 - F.cosine_similarity(pred["dino"].float(), tgt["dino"].float(), dim=-1).mean()
             p = CropAE.crop_points(tgt["depth_patch"], geom, k)
             motion_star = apply_rigid(p, R_star, t_star) - p
@@ -126,12 +159,18 @@ def losses(model: CropAE, out: dict, batch: dict, w: dict, ref: torch.Tensor, ke
         l["near_lateral_err_mm"] = (lat_err * near).sum() / near.sum().clamp(min=1)
         l["near_angle_deg"] = (angle * near).sum() / near.sum().clamp(min=1)
         l["lateral_err_mm"] = lat_err.mean()
+        # close to the hole axis (under 3 mm across it left to go, at any depth): where insert / jam is decided
+        close = (t_star[:, 1:].norm(dim=-1) < 0.003).float()
+        sw = 1 + w.get("close_weight", 0.0) * close
+        l["close_frac"] = close.mean()
+        l["close_lateral_err_mm"] = (lat_err * close).sum() / close.sum().clamp(min=1)
+        grid_w, angle_w = (grid * sw).sum() / sw.sum(), (angle * sw).sum() / sw.sum()
     l["grid_mm"], l["angle_deg"] = grid.mean(), angle.mean()
     l["pose_score"] = l["grid_mm"] + w["angle"] * l["angle_deg"]
-    l["total"] = (w["depth"] * l["depth_mm"] + w["valid"] * l["valid_bce"] + w["rgb"] * l["rgb_w"]
-                  + w.get("edge", 0.0) * l["edge_l1"] + w.get("lpips", 0.0) * l["lpips"]
+    l["total"] = (w["depth"] * l["depth_w"] + w["valid"] * l["valid_bce"] + w.get("rgb", 0.0) * l["rgb_w"]
+                  + w.get("edge", 0.0) * l["edge_l1"] + w.get("lpips", 0.0) * l["lpips"] + w.get("seg", 0.0) * l["seg_ce"]
                   + w["dino"] * l["dino_cos"] + w["motion"] * l["motion_mm"] + w["weight"] * l["weight_bce"]
-                  + w["grid"] * l["grid_mm"] + w["angle"] * l["angle_deg"])
+                  + w["grid"] * grid_w + w["angle"] * angle_w + w.get("lateral", 0.0) * l["close_lateral_err_mm"])
     return l
 
 
@@ -148,9 +187,9 @@ def evaluate(model, loader, w, device, max_batches, ref, key=None) -> dict:
             l = losses(model, out, batch, w, ref, key(batch) if key else None, key.lpips if key else None)
         r = out["z"].float() - out["z"].float().mean(0, keepdim=True)         # frame-to-frame variation of every token
         l["latent_specific_share"] = (r - r.mean(1, keepdim=True)).pow(2).sum() / r.pow(2).sum().clamp(min=1e-12)
-        nf = float(l["near_frac"])
+        nf, cf = float(l["near_frac"]), float(l["close_frac"])
         for k, v in l.items():
-            wk = nf if (k.startswith("near_") and k != "near_frac") else 1.0     # near-hole metrics: per near sample
+            wk = nf if (k.startswith("near_") and k != "near_frac") else cf if k == "close_lateral_err_mm" else 1.0
             acc[k] = acc.get(k, 0.0) + float(v) * wk
             acc["_w_" + k] = acc.get("_w_" + k, 0.0) + wk
         n += 1
@@ -177,7 +216,9 @@ def train(cfg: dict, run_dir: Path, max_steps: int | None = None, resume: str | 
     model = CropAE(**cfg["model"]).to(device)
     key = KeyPixels(cfg, device)
     sel = cfg.get("selection") or {}
-    score = lambda x: x["pose_score"] + sel.get("near_lateral", 0.0) * x["near_lateral_err_mm"] + sel.get("key_rgb", 0.0) * x["key_rgb_l1"]
+    score = lambda x: (x["pose_score"] + sel.get("near_lateral", 0.0) * x["near_lateral_err_mm"] + sel.get("key_rgb", 0.0) * x["key_rgb_l1"]
+                       + sel.get("close_lateral", 0.0) * x["close_lateral_err_mm"]
+                       + sel.get("seg_iou", 0.0) * (2 - x["seg_iou_pins"] - x["seg_iou_opening"]))
     opt = torch.optim.AdamW(common.trainable(model), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
     warmup = cfg.get("warmup_steps", 0)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, (s + 1) / warmup) if warmup else 1.0)

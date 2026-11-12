@@ -43,7 +43,7 @@ GEOM_KEYS = ("K", "cam_T_world", "hand", "R_P", "plug_uv0", "hole_uv0")
 
 class CropAE(nn.Module):
     def __init__(self, encoder: dict | None = None, latent_ch: int = 16, dec_d: int = 256, dec_layers: int = 2,
-                 patch_layers: int = 3, heads: int = 8):
+                 patch_layers: int = 3, heads: int = 8, rgb: bool = True, seg_classes: int = 0):
         super().__init__()
         self.encoder = CropEncoder(**(encoder or {}))
         d = self.encoder.d
@@ -63,7 +63,13 @@ class CropAE(nn.Module):
             self.patch_dec = nn.TransformerDecoder(
                 nn.TransformerDecoderLayer(dec_d, heads, 2 * dec_d, batch_first=True, norm_first=True), patch_layers)
         px = TOK * TOK
-        self.out_rgb = nn.Linear(dec_d, 3 * px)
+        # v5b: no RGB reconstruction (colour is not what the task needs); instead the class of every pixel
+        # (perception/labels.CLASSES, the frozen UNet's prediction): the outlines of pins and openings
+        self.rgb, self.seg_classes = rgb, seg_classes
+        if rgb:
+            self.out_rgb = nn.Linear(dec_d, 3 * px)
+        if seg_classes:
+            self.out_seg = nn.Linear(dec_d, seg_classes * px)
         self.out_depth = nn.Linear(dec_d, px)
         self.out_valid = nn.Linear(dec_d, px)
         self.out_dino = nn.Linear(dec_d, self.encoder.dino_dim)
@@ -95,8 +101,12 @@ class CropAE(nn.Module):
         out = {}
         for k, sl in (("plug", slice(0, N_CROP_TOK)), ("hole", slice(N_CROP_TOK, 2 * N_CROP_TOK))):
             qq = q[:, sl]
-            out[k] = {"rgb_patch": self.out_rgb(qq), "depth_patch": self.out_depth(qq), "valid_logit": self.out_valid(qq),
+            out[k] = {"depth_patch": self.out_depth(qq), "valid_logit": self.out_valid(qq),
                       "dino": self.out_dino(qq), "motion_patch": self.out_motion(qq), "weight_logit": self.out_weight(qq)}
+            if self.rgb:
+                out[k]["rgb_patch"] = self.out_rgb(qq)
+            if self.seg_classes:
+                out[k]["seg_patch"] = self.out_seg(qq)                       # logits, (B, 256, classes * 64)
         return out
 
     # ------------------------------------------------------------------ pose

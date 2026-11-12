@@ -70,6 +70,18 @@ def test_grid_autoencoder_tokens_belong_to_regions():
     assert torch.equal(m.split_tokens(merged), idx)
 
 
+def test_autoencoder_without_rgb_target_gives_classes():
+    """v5b: no RGB head; every crop pixel's class instead (7 classes, 8 x 8 pixels per crop token)."""
+    torch.manual_seed(0)
+    m = CropAE(encoder={"dino": False, "d": 64, "heads": 4, "crop_layers": 1, "relation_layers": 1, "joint_layers": 1,
+                        "query_layers": 1, "readout": "grid"}, latent_ch=16, dec_d=64, dec_layers=1, patch_layers=1, heads=4,
+               rgb=False, seg_classes=7)
+    out = m(_batch())
+    for k in ("plug", "hole"):
+        assert "rgb_patch" not in out["pred"][k] and out["pred"][k]["seg_patch"].shape == (2, 256, 7 * 64)
+    assert not any("out_rgb" in k for k in m.state_dict())
+
+
 def test_crop_placer_uses_memory_when_opening_hidden():
     K = np.array([[337.0, 0, 160], [0, 337.0, 160], [0, 0, 1]])
     cam = np.eye(4)

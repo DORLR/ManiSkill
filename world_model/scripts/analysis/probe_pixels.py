@@ -38,6 +38,7 @@ for a in ("--data", "--crops", "--geometry", "--out"):
 ap.add_argument("--steps", type=int, default=6000)
 ap.add_argument("--batch", type=int, default=64)
 ap.add_argument("--eval-batches", type=int, default=150)
+ap.add_argument("--drop", choices=["depth", "rgb"], help="ablation: this input is blanked (what does the reader lose?)")
 args = ap.parse_args()
 limit_gpu_memory()
 torch.manual_seed(0)
@@ -81,6 +82,10 @@ def inputs(b):
         d = cut(b["depth"], uv0).float()[:, None] * (DEPTH_UNIT_M / DEPTH_SCALE_M)
         u = ((uv0[:, 0, None].float() + grid[None]) / 160.0 - 1)[:, None, None, :].expand(-1, 1, CROP, CROP)
         v = ((uv0[:, 1, None].float() + grid[None]) / 160.0 - 1)[:, None, :, None].expand(-1, 1, CROP, CROP)
+        if args.drop == "depth":
+            d = torch.zeros_like(d)
+        if args.drop == "rgb":
+            rgb = torch.zeros_like(rgb)
         chans += [rgb, d, (d > 0).float(), u, v]
     R_s, t_s = insertion_motion(b["hand"].float(), b["h_star"].float(), b["R_P"].float())
     p = b["tip"][:, None]

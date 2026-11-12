@@ -39,6 +39,7 @@ out = Path(args.out)
 out.mkdir(parents=True, exist_ok=True)
 T = lambda x, dt=torch.float32: torch.as_tensor(np.ascontiguousarray(x), dtype=dt, device=dev)[None]
 COLORS = {"plug": (255, 150, 60), "robot": (200, 60, 60), "pins": (255, 235, 0), "opening": (0, 230, 255)}   # RGB
+PALETTE = np.array([{"other": (40, 40, 40), "board": (150, 150, 150), "table": (90, 110, 90)}.get(c, COLORS.get(c)) for c in CLASSES], np.uint8)
 
 
 @torch.no_grad()
@@ -62,8 +63,11 @@ def run(path: str) -> dict:
         f = {"rgb": rgb, "cls": cls, "c": c, "z": z.float()[0].cpu().numpy(), "t": s / 20.0,
              "depth_left_mm": diagnosis(a["eval_rel"][s])["depth_left_m"] * 1000}
         for k in ("plug", "hole"):
+            u0, v0 = [int(x) for x in c[f"{k}_uv0"]]
             f[k] = {"rgb_in": unpatch(aux[k]["rgb_patch"].float(), 3)[0].permute(1, 2, 0).cpu().numpy(),
-                    "rgb_out": unpatch(dec[k]["rgb_patch"].float(), 3)[0].permute(1, 2, 0).clamp(0, 1).cpu().numpy(),
+                    "rgb_out": unpatch(dec[k]["rgb_patch"].float(), 3)[0].permute(1, 2, 0).clamp(0, 1).cpu().numpy() if "rgb_patch" in dec[k] else None,
+                    "cls_in": cls[v0:v0 + CROP, u0:u0 + CROP],
+                    "cls_out": unpatch(dec[k]["seg_patch"].float(), len(CLASSES))[0].argmax(0).cpu().numpy() if "seg_patch" in dec[k] else None,
                     "d_in": unpatch(aux[k]["depth_patch"].float(), 1)[0, 0].cpu().numpy() * DEPTH_SCALE_M * 1000,
                     "v_in": unpatch(aux[k]["valid_patch"].float(), 1)[0, 0].cpu().numpy() > 0.5,
                     "d_out": unpatch(dec[k]["depth_patch"].float(), 1)[0, 0].cpu().numpy() * DEPTH_SCALE_M * 1000,
@@ -132,7 +136,11 @@ def sheet_reconstruction(r, tag, idx):
         for k, nm in (("plug", "plug crop"), ("hole", "opening crop")):
             c = f[k]
             tiles.append(label(up((c["rgb_in"] * 255).astype(np.uint8), 3), f"{nm}: RGB in"))
-            tiles.append(label(up((c["rgb_out"] * 255).astype(np.uint8), 3), "RGB from latent"))
+            if c["rgb_out"] is not None:
+                tiles.append(label(up((c["rgb_out"] * 255).astype(np.uint8), 3), "RGB from latent"))
+            if c["cls_out"] is not None:                     # v5b: the decoder gives classes, not colours
+                tiles.append(label(up(PALETTE[c["cls_in"]], 3), "UNet classes (target)"))
+                tiles.append(label(up(PALETTE[c["cls_out"]], 3), "classes from latent"))
             v = c["v_in"]
             lo, hi = (np.percentile(c["d_in"][v], [2, 98]) if v.sum() > 20 else (60.0, 200.0))
             tiles.append(label(up(depth_tile(c["d_in"], v, lo, hi), 3), f"depth in {lo:.0f}-{hi:.0f} mm"))
@@ -142,18 +150,26 @@ def sheet_reconstruction(r, tag, idx):
 
 
 def errors(paths) -> dict:
-    e_rgb, e_d, v_acc, how = [], [], [], {}
+    e_rgb, e_d, v_acc, how, iou = [], [], [], {}, {"pins": [0, 0], "opening": [0, 0]}
     for p in paths:
         for f in run(p)["frames"]:
             how[f["c"]["how_hole"]] = how.get(f["c"]["how_hole"], 0) + 1
             for k in ("plug", "hole"):
                 c = f[k]
-                e_rgb.append(np.abs(c["rgb_in"] - c["rgb_out"]).mean() * 255)
+                if c["rgb_out"] is not None:
+                    e_rgb.append(np.abs(c["rgb_in"] - c["rgb_out"]).mean() * 255)
+                if c["cls_out"] is not None:
+                    for n in iou:
+                        a, b = c["cls_out"] == CLASSES.index(n), c["cls_in"] == CLASSES.index(n)
+                        iou[n][0] += int((a & b).sum())
+                        iou[n][1] += int((a | b).sum())
                 both = c["v_in"] & c["v_out"]
                 if both.sum() > 20:
                     e_d.append(np.abs(c["d_in"] - c["d_out"])[both].mean())
                 v_acc.append((c["v_in"] == c["v_out"]).mean())
-    return {"trajectories": len(paths), "crops": len(e_rgb), "rgb_abs_error_levels_of_255_mean": round(float(np.mean(e_rgb)), 2),
+    return {"trajectories": len(paths), "crops": len(v_acc),
+            "rgb_abs_error_levels_of_255_mean": round(float(np.mean(e_rgb)), 2) if e_rgb else None,
+            "classes_from_latent_iou": {n: round(v[0] / max(v[1], 1), 3) for n, v in iou.items()} if any(v[1] for v in iou.values()) else None,
             "depth_abs_error_mm_mean": round(float(np.mean(e_d)), 3), "depth_abs_error_mm_median_over_crops": round(float(np.median(e_d)), 3),
             "depth_validity_agreement": round(float(np.mean(v_acc)), 4), "opening_crop_placed_by": how}
 
