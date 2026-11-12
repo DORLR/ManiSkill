@@ -24,10 +24,10 @@ POOL = 4
 
 
 class SuccessHead(nn.Module):
-    def __init__(self, latent_ch: int = 16, d: int = 256, layers: int = 6, heads: int = 8):
+    def __init__(self, latent_ch: int = 16, d: int = 256, layers: int = 6, heads: int = 8, n_tokens: int = 64):
         super().__init__()
         self.inp = nn.Linear(latent_ch, d)
-        self.token_pos = nn.Parameter(torch.randn(64, d) * 0.02)
+        self.token_pos = nn.Parameter(torch.randn(n_tokens, d) * 0.02)       # 64: v4 latents; 128: v5 (region tokens)
         self.pool_q = nn.Parameter(torch.randn(POOL, d) * 0.02)
         self.pool = nn.MultiheadAttention(d, heads, batch_first=True)
         self.pool_norm = nn.LayerNorm(d)

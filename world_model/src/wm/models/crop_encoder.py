@@ -23,7 +23,14 @@ Attention:
     2 relation: cross-attention both ways, plug tokens attend to opening tokens and opening tokens to
       plug tokens (3 layers each direction, separate weights)
     3 joint self-attention over [geometry, 2 position tokens, 256 plug, 256 opening tokens] (4 layers)
-    4 64 learned queries read the result (2 layers) -> 64 latent tokens
+    4 read-out -> latent tokens
+        "queries" (v4): 64 learned queries read the result (2 layers) -> 64 tokens. Measured 2026-11-11 on
+            crop_ae_v4e: the 64 tokens came out as near copies of one vector (token-specific share of the
+            variance 0.4 %, ~15 effective dimensions) -- nothing makes the queries read different places.
+        "grid" (v5): no queries. The 2 x 2 neighbouring crop tokens are merged (concatenated, one linear
+            layer), so every latent token belongs to one 16 x 16 px region of one crop: 8 x 8 tokens for
+            the plug crop, then 8 x 8 for the opening crop (row-major), 128 in all; 2 more self-attention
+            layers over them.
 """
 
 from __future__ import annotations
@@ -117,9 +124,12 @@ def _dec(d, heads, n):
 
 class CropEncoder(nn.Module):
     def __init__(self, d: int = 256, heads: int = 8, crop_layers: int = 2, relation_layers: int = 3,
-                 joint_layers: int = 4, query_layers: int = 2, dino: bool = True):
+                 joint_layers: int = 4, query_layers: int = 2, dino: bool = True, readout: str = "queries",
+                 merge: int = 2):
         super().__init__()
-        self.d = d
+        assert readout in ("queries", "grid") and G % merge == 0
+        self.d, self.readout, self.merge = d, readout, merge
+        self.n_tokens = N_TOKENS if readout == "queries" else 2 * (G // merge) ** 2
         self.backbone = CropBackbone()
         self.dino = Dinov2() if dino else None
         self.dino_dim = 384
@@ -137,9 +147,21 @@ class CropEncoder(nn.Module):
         self.plug_to_hole = _dec(d, heads, relation_layers)
         self.hole_to_plug = _dec(d, heads, relation_layers)
         self.joint = _enc(d, heads, joint_layers)
-        self.queries = nn.Parameter(torch.randn(N_TOKENS, d) * 0.02)
-        self.query_layers = _dec(d, heads, query_layers)
+        if readout == "queries":
+            self.queries = nn.Parameter(torch.randn(N_TOKENS, d) * 0.02)
+            self.query_layers = _dec(d, heads, query_layers)
+        else:
+            self.merge_proj = nn.Linear(merge * merge * d, d)
+            self.grid_pos = nn.Parameter(torch.randn(self.n_tokens, d) * 0.02)
+            self.grid_layers = _enc(d, heads, query_layers)
         self.norm = nn.LayerNorm(d)
+
+    def merge_tokens(self, t: torch.Tensor) -> torch.Tensor:
+        """One crop's tokens (B, 16 * 16, c), row-major -> (B, 8 * 8, merge^2 * c): the tokens of each
+        merge x merge block side by side (inverse: crop_ae.CropAE.split_tokens)."""
+        B, _, c = t.shape
+        m, g = self.merge, G // self.merge
+        return t.view(B, g, m, g, m, c).permute(0, 1, 3, 2, 4, 5).reshape(B, g * g, m * m * c)
 
     def _dino(self, rgb01: torch.Tensor) -> torch.Tensor:
         """(B, 3, 128, 128) -> (B, 256, 384) frozen DINOv2 features on a 16 x 16 grid."""
@@ -168,12 +190,17 @@ class CropEncoder(nn.Module):
 
     def forward(self, rgb, depth, plug_uv0, hole_uv0, K, cam_T_world, hand, R_P) -> dict:
         """rgb (B,320,320,3) uint8, depth (B,320,320) int [0.1 mm], plug_uv0 / hole_uv0 (B,2) crop
-        origins, K (B,3,3), cam_T_world / hand (B,4,4), R_P (B,3,3) -> 64 tokens + per-crop targets."""
+        origins, K (B,3,3), cam_T_world / hand (B,4,4), R_P (B,3,3) -> n_tokens tokens + per-crop targets."""
         p = self.crop_tokens(rgb, depth, plug_uv0, K, cam_T_world, R_P, 0)
         h = self.crop_tokens(rgb, depth, hole_uv0, K, cam_T_world, R_P, 1)
         tp, th = self.crop_attn(p["tokens"]), self.crop_attn(h["tokens"])
         tp, th = self.plug_to_hole(tp, th), self.hole_to_plug(th, tp)                  # relation, both ways
         g = self.geom(geometry_features(cam_T_world, hand, R_P))[:, None] + self.geom_type
         x = self.joint(torch.cat([g, p["pos"], h["pos"], tp, th], 1))
-        q = self.query_layers(self.queries[None].expand(rgb.shape[0], -1, -1), x)
+        if self.readout == "queries":
+            q = self.query_layers(self.queries[None].expand(rgb.shape[0], -1, -1), x)
+        else:
+            tp, th = x[:, 3:3 + N_CROP_TOK], x[:, 3 + N_CROP_TOK:]
+            q = self.merge_proj(torch.cat([self.merge_tokens(tp), self.merge_tokens(th)], 1))
+            q = self.grid_layers(q + self.grid_pos)
         return {"tokens": self.norm(q), "plug": p, "hole": h}

@@ -70,11 +70,11 @@ class VisionJointAdapter(nn.Module):
     takes_history = True
 
     def __init__(self, latent_ch: int = 16, d: int = 256, layers: int = 6, heads: int = 8, hidden: int = 512,
-                 outcome: bool = False):
+                 outcome: bool = False, n_tokens: int = 64):
         super().__init__()
         self.takes_outcome = outcome
         from .success import SuccessHead
-        self.hist = SuccessHead(latent_ch, d, layers, heads)
+        self.hist = SuccessHead(latent_ch, d, layers, heads, n_tokens)
         self.hist.out = nn.Identity()                                   # the classifier's logit head is not used
         self.x_tok = nn.Sequential(nn.Linear(IN_DIM, d), nn.SiLU(), nn.Linear(d, d))
         self.path_tok = nn.Sequential(nn.Linear(PATH_DIM, d), nn.SiLU(), nn.Linear(d, d))

@@ -31,12 +31,13 @@ SIZES = {"S": dict(depth=12, hidden_size=384, num_heads=6),
 
 
 def tokens_to_grid(z: torch.Tensor) -> torch.Tensor:
-    """(..., 64, C) -> (..., C, 8, 8)."""
-    return z.unflatten(-2, (GRID, GRID)).movedim(-1, -3)
+    """(..., 64, C) -> (..., C, 8, 8); v5 latents (..., 128, C) -> (..., C, 16, 8): the plug crop's 8 x 8 region
+    tokens above the opening crop's 8 x 8."""
+    return z.unflatten(-2, (z.shape[-2] // GRID, GRID)).movedim(-1, -3)
 
 
 def grid_to_tokens(x: torch.Tensor) -> torch.Tensor:
-    """(..., C, 8, 8) -> (..., 64, C)."""
+    """(..., C, 8, 8) -> (..., 64, C); (..., C, 16, 8) -> (..., 128, C)."""
     return x.movedim(-3, -1).flatten(-3, -2)
 
 

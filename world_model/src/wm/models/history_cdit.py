@@ -39,9 +39,13 @@ class HistoryCDiT(CDiT):
     seen (B,HIST) bool slot has a latent, proprio (B,HIST,18), dt (B,HIST) seconds (<= 0),
     avail (B,HIST) bool slot exists (after the trajectory start), rel_t (B,) s, ctx_noise (B,)."""
 
-    def __init__(self, latent_ch: int = 16, size: str = "S"):
-        super().__init__(input_size=GRID, context_size=1, patch_size=1, in_channels=latent_ch, learn_sigma=True,
-                         **SIZES[size])
+    def __init__(self, latent_ch: int = 16, size: str = "S", n_tokens: int = GRID * GRID):
+        # v5 latents: 128 tokens = (16, 8) grid, the plug crop's 8 x 8 region tokens above the opening crop's; CDiT's
+        # patch embedding (patch size 1) and its learned position embedding (one per token) take that as they are
+        assert n_tokens % GRID == 0
+        self.n_tokens, self.grid_hw = n_tokens, (n_tokens // GRID, GRID)
+        super().__init__(input_size=GRID if n_tokens == GRID * GRID else self.grid_hw, context_size=1, patch_size=1,
+                         in_channels=latent_ch, learn_sigma=True, **SIZES[size])
         h = SIZES[size]["hidden_size"]
         self.hidden = h
         self.y_embedder = ConditionEmbedder(PATH_DIM, h)
@@ -60,7 +64,7 @@ class HistoryCDiT(CDiT):
         v = (v + self.pos_embed[0] + te).flatten(1, 2)                                   # (B, S*64, h)
         p = self.proprio_embedder(proprio) + te[:, :, 0] + self.proprio_type             # (B, S, h)
         keys = torch.cat([v, p], 1)
-        ignore = torch.cat([(~seen).repeat_interleave(GRID * GRID, 1), ~avail], 1)
+        ignore = torch.cat([(~seen).repeat_interleave(self.n_tokens, 1), ~avail], 1)
         return keys, ignore
 
     def forward(self, x, t, path, z_hist, seen, proprio, dt, avail, rel_t, ctx_noise=None):
@@ -74,6 +78,11 @@ class HistoryCDiT(CDiT):
             x = _block_forward(block, x, c, keys, ignore)
         x = self.final_layer(x, c)
         return self.unpatchify(x)
+
+    def unpatchify(self, x):
+        """(B, tokens, out_channels) -> (B, out_channels, H, W). CDiT's own assumes a square grid; with patch
+        size 1 this is the same operation for any (H, W)."""
+        return x.unflatten(1, self.grid_hw).permute(0, 3, 1, 2)
 
 
 def masked_cross_attention(mha: nn.MultiheadAttention, query, key, ignore):

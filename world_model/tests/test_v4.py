@@ -53,6 +53,23 @@ def test_autoencoder_shapes_and_pose():
     assert torch.isfinite(R).all()
 
 
+def test_grid_autoencoder_tokens_belong_to_regions():
+    """v5 read-out: 128 tokens; merge / split are inverse; token k of a crop covers the 2 x 2 crop tokens of
+    its own 16 x 16 px region."""
+    from wm.models.crop_encoder import G
+    torch.manual_seed(0)
+    m = CropAE(encoder={"dino": False, "d": 64, "heads": 4, "crop_layers": 1, "relation_layers": 1, "joint_layers": 1,
+                        "query_layers": 1, "readout": "grid"}, latent_ch=16, dec_d=64, dec_layers=1, patch_layers=1, heads=4)
+    out = m(_batch())
+    assert out["z"].shape == (2, 128, 16) and m.n_tokens == 128
+    assert torch.isfinite(out["R"]).all() and torch.isfinite(out["t"]).all()
+    assert not any(k.startswith("encoder.quer") for k in m.state_dict())
+    idx = torch.arange(G * G).float().view(1, G * G, 1)                    # crop token index, row-major
+    merged = m.encoder.merge_tokens(idx)                                   # (1, 64, 4)
+    assert merged[0, 0].tolist() == [0, 1, G, G + 1] and merged[0, 9].tolist() == [2 * G + 2, 2 * G + 3, 3 * G + 2, 3 * G + 3]
+    assert torch.equal(m.split_tokens(merged), idx)
+
+
 def test_crop_placer_uses_memory_when_opening_hidden():
     K = np.array([[337.0, 0, 160], [0, 337.0, 160], [0, 0, 1]])
     cam = np.eye(4)
@@ -84,11 +101,16 @@ def test_exploration_segments_do_not_use_the_scene():
     """Starts and maneuvers are drawn from a random generator only (no robot, no simulator state)."""
     import inspect
     from wm.collect import explore
-    for fn in (explore.sample_start, explore.sample_segments):
-        assert list(inspect.signature(fn).parameters) == ["rng"]
+    for fn, extra in ((explore.sample_start, ["near"]), (explore.sample_segments, ["p"]), (explore.sample_contact, [])):
+        assert list(inspect.signature(fn).parameters) == ["rng"] + extra
     a = explore.sample_segments(np.random.default_rng(3))
     b = explore.sample_segments(np.random.default_rng(3))
     assert a == b
+    plan = explore.sample_contact(np.random.default_rng(5))
+    assert plan == explore.sample_contact(np.random.default_rng(5))
+    assert 80 <= sum(p["chunks"] * p["chunk_steps"] for p in plan) <= 320 + 24 * 16
+    for p in plan:                                                          # no decision leads the hand by more than the limit
+        assert all(np.linalg.norm(v) <= explore.LEAD_MAX_M + 1e-12 for v in p.get("leads_m", []))
     src = inspect.getsource(explore.Explorer)
     for w in ("goal_pose", "charger", "eval_rel", "relative("):
         assert w not in src, w

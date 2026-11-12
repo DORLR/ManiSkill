@@ -54,6 +54,7 @@ PHASES = (
     "explore_maneuver",
     "explore_hold",
     "explore_push",
+    "explore_contact",   # the contact phase of the contact set (collect/explore.py)
 )
 _PHASE_ID = {p: i for i, p in enumerate(PHASES)}
 

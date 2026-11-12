@@ -1,10 +1,16 @@
-"""Latent autoencoder v4 over the two crops: frame -> latent (64 tokens x C) -> what it must keep.
+"""Latent autoencoder v4 / v5 over the two crops: frame -> latent (tokens x C) -> what it must keep.
 
 Encoder: CropEncoder (models/crop_encoder.py) -> LayerNorm -> linear to C channels per token.
 Deterministic (no KL), no joint token (the robot state goes to the world model separately).
+Latent: 64 tokens (v4, read-out "queries") or 128 tokens = 8 x 8 per crop, each one 16 x 16 px region
+(v5, read-out "grid"; why: crop_encoder.py).
 
-Decoder, from the latent only: one query per crop token (2 x 256) reads the latent and reconstructs
-that 8 x 8 pixel patch of its crop -- RGB, depth, depth validity, the frozen DINOv2 feature -- and,
+Decoder, from the latent only.
+    v4: one query per crop token (2 x 256) reads all latent tokens (cross-attention).
+    v5: every latent token is split back into the 2 x 2 crop tokens of its own region (one linear layer),
+        then self-attention over the 2 x 256 crop tokens (so a region is rebuilt from its own token, with
+        the others as context).
+Each crop token reconstructs its 8 x 8 pixel patch -- RGB, depth, depth validity, the frozen DINOv2 feature -- and,
 for the pose, a per-pixel motion "where this point is when the plug is inserted" (3-D, hand-centred
 port axes) and a weight. The remaining rigid motion (R, t) of the plug is solved from the crop pixels'
 3-D points p (depth + crop intrinsics + camera pose) and p + motion by the weighted rigid fit of v3g
@@ -21,7 +27,7 @@ import torch
 import torch.nn as nn
 
 from ..geometry import pixel_points, weighted_rigid_fit
-from .crop_encoder import CROP, G, N_CROP_TOK, N_TOKENS, TOK, CropEncoder, crop_K
+from .crop_encoder import CROP, G, N_CROP_TOK, TOK, CropEncoder, crop_K
 from .encoder import DEPTH_SCALE_M
 
 MOTION_SCALE_M = 0.01
@@ -44,12 +50,18 @@ class CropAE(nn.Module):
         self.latent_ch = latent_ch
         self.to_latent = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, latent_ch))
         self.from_latent = nn.Linear(latent_ch, dec_d)
-        self.pos = nn.Parameter(torch.randn(N_TOKENS, dec_d) * 0.02)
+        self.grid, self.n_tokens = self.encoder.readout == "grid", self.encoder.n_tokens
+        self.pos = nn.Parameter(torch.randn(self.n_tokens, dec_d) * 0.02)
         self.trunk = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(dec_d, heads, 2 * dec_d, batch_first=True, norm_first=True), dec_layers)
         self.patch_queries = nn.Parameter(torch.randn(2 * N_CROP_TOK, dec_d) * 0.02)
-        self.patch_dec = nn.TransformerDecoder(
-            nn.TransformerDecoderLayer(dec_d, heads, 2 * dec_d, batch_first=True, norm_first=True), patch_layers)
+        if self.grid:
+            self.split = nn.Linear(dec_d, self.encoder.merge ** 2 * dec_d)
+            self.patch_dec = nn.TransformerEncoder(
+                nn.TransformerEncoderLayer(dec_d, heads, 2 * dec_d, batch_first=True, norm_first=True), patch_layers)
+        else:
+            self.patch_dec = nn.TransformerDecoder(
+                nn.TransformerDecoderLayer(dec_d, heads, 2 * dec_d, batch_first=True, norm_first=True), patch_layers)
         px = TOK * TOK
         self.out_rgb = nn.Linear(dec_d, 3 * px)
         self.out_depth = nn.Linear(dec_d, px)
@@ -64,10 +76,22 @@ class CropAE(nn.Module):
                            batch["cam_T_world"], batch["hand"], batch["R_P"])
         return self.to_latent(aux.pop("tokens")), aux
 
+    def split_tokens(self, t: torch.Tensor) -> torch.Tensor:
+        """One crop's latent-token features (B, 8 * 8, merge^2 * c) -> its crop tokens (B, 16 * 16, c), row-major
+        (inverse of CropEncoder.merge_tokens)."""
+        B = t.shape[0]
+        m, g = self.encoder.merge, G // self.encoder.merge
+        return t.view(B, g, g, m, m, -1).permute(0, 1, 3, 2, 4, 5).reshape(B, N_CROP_TOK, -1)
+
     def decode(self, z: torch.Tensor) -> dict:
-        """z (B, 64, C) -> per crop ("plug", "hole") patch predictions (B, 256, ...)."""
+        """z (B, n_tokens, C) -> per crop ("plug", "hole") patch predictions (B, 256, ...)."""
         h = self.trunk(self.from_latent(z) + self.pos)
-        q = self.patch_dec(self.patch_queries[None].expand(z.shape[0], -1, -1), h)
+        if self.grid:
+            h = self.split(h)
+            n = self.n_tokens // 2
+            q = self.patch_dec(torch.cat([self.split_tokens(h[:, :n]), self.split_tokens(h[:, n:])], 1) + self.patch_queries)
+        else:
+            q = self.patch_dec(self.patch_queries[None].expand(z.shape[0], -1, -1), h)
         out = {}
         for k, sl in (("plug", slice(0, N_CROP_TOK)), ("hole", slice(N_CROP_TOK, 2 * N_CROP_TOK))):
             qq = q[:, sl]

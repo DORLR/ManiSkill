@@ -11,6 +11,21 @@ Loss, summed over the two crops:
 and for the pose solved from both crops: reference-grid error (mm) + angle error (deg).
 Validation on ood_val per data source; model selection / harm-only early stop on the pose score
 (grid + w_angle * angle) averaged over the sources.
+
+v5 (config keys `unet`, `key_weight`, loss weights `edge` / `lpips`, `selection`), why: measured on crop_ae_v4e,
+the reconstructions lose the pins' edges and the openings. The RGB term was a plain pixel mean (the openings are
+a few dozen of 16 384 pixels) and about 4 % of the total loss, whose gradient is clipped all the time.
+    key pixels  the frozen UNet's predicted pins and openings (dilated), the same real-robot quantity that places
+                the crops; their RGB error counts `1 + key_weight` times (rgb_w; rgb_l1 stays the plain mean)
+    edge_l1     L1 between the horizontal / vertical pixel differences of the reconstruction and of the image
+                (also across patch borders), with the same weights: edges must be where they are
+    lpips       perceptual distance (LPIPS) between reconstruction and crop. AlexNet features (`lpips_net`): measured
+                on the shared GPU, 64 crops forward + backward take 0.010 s, with VGG 0.19 s (more than the rest of
+                the training step)
+    selection   pose score + near_lateral * (error across the axis within 5 mm of inserted) + key_rgb * (RGB error
+                on the key pixels): the pose alone is one global quantity and says nothing about kept detail
+Logged at validation: latent_specific_share = the part of the latent's frame-to-frame variation that differs
+between the tokens of a frame (v4e: under 1 %: the tokens were copies).
 """
 
 from __future__ import annotations
@@ -26,15 +41,42 @@ from ..data import index as data_index
 from ..data.datasets import CropFrameDataset
 from ..geometry import apply_rigid, insertion_motion, plug_region_points, pose_loss_terms
 from ..models.crop_ae import MOTION_SCALE_M, CropAE, unpatch
-from ..models.crop_encoder import cut
+from ..models.crop_encoder import cut, patches
+from ..perception.labels import OPENING, PINS
 from ..models.encoder import DEPTH_SCALE_M
 from . import common
 
 PLUG_CLASS = 1
 
 
-def losses(model: CropAE, out: dict, batch: dict, w: dict, ref: torch.Tensor) -> dict:
-    l = {k: 0.0 for k in ("depth_mm", "valid_bce", "rgb_l1", "dino_cos", "motion_mm", "weight_bce")}
+class KeyPixels:
+    """Loss weights from the frozen UNet (pins / openings) and the perceptual distance; nothing of it is a model input."""
+
+    def __init__(self, cfg: dict, device):
+        self.unet, self.lpips = None, None
+        self.weight, self.dilate = float(cfg.get("key_weight", 0.0)), int(cfg.get("key_dilate", 5))
+        if cfg.get("unet"):
+            from ..perception.unet import load_unet
+            self.unet = load_unet(cfg["unet"], device).requires_grad_(False)
+        if cfg["loss_weights"].get("lpips"):
+            import lpips
+            self.lpips = lpips.LPIPS(net=cfg.get("lpips_net", "alex"), verbose=False).to(device).eval().requires_grad_(False)
+
+    @torch.no_grad()
+    def __call__(self, batch: dict) -> torch.Tensor | None:
+        """(B, 320, 320) weight of every image pixel: 1, and 1 + key_weight on the predicted pins and openings."""
+        if self.unet is None:
+            return None
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            cls = self.unet(batch["rgb"]).argmax(1)
+        m = ((cls == PINS) | (cls == OPENING)).float()[:, None]
+        return 1 + self.weight * F.max_pool2d(m, self.dilate, 1, self.dilate // 2)[:, 0]
+
+
+def losses(model: CropAE, out: dict, batch: dict, w: dict, ref: torch.Tensor, key: torch.Tensor | None = None,
+           perceptual=None) -> dict:
+    l = {k: 0.0 for k in ("depth_mm", "valid_bce", "rgb_l1", "rgb_w", "key_rgb_l1", "edge_l1", "lpips", "dino_cos",
+                          "motion_mm", "weight_bce")}
     with torch.autocast("cuda", enabled=False):
         R_star, t_star = insertion_motion(batch["hand"].float(), batch["h_star"].float(), batch["R_P"].float())
         geom = {k: batch[k] for k in ("K", "cam_T_world", "hand", "R_P", "plug_uv0", "hole_uv0")}
@@ -44,7 +86,24 @@ def losses(model: CropAE, out: dict, batch: dict, w: dict, ref: torch.Tensor) ->
             d_err = (pred["depth_patch"].float() - tgt["depth_patch"].float()).abs() * DEPTH_SCALE_M * 1000
             l["depth_mm"] = l["depth_mm"] + (d_err * valid).sum() / valid.sum().clamp(min=1)
             l["valid_bce"] = l["valid_bce"] + F.binary_cross_entropy_with_logits(pred["valid_logit"].float(), valid.float())
-            l["rgb_l1"] = l["rgb_l1"] + (pred["rgb_patch"].float() - tgt["rgb_patch"].float()).abs().mean()
+            rgb_err = (pred["rgb_patch"].float() - tgt["rgb_patch"].float()).abs()
+            l["rgb_l1"] = l["rgb_l1"] + rgb_err.mean()
+            if key is None:
+                l["rgb_w"] = l["rgb_w"] + rgb_err.mean()
+            else:
+                Wk = cut(key, batch[f"{k}_uv0"]).float()                          # (B, 128, 128)
+                wp = patches(Wk[:, None])                                         # (B, 256, 64), as the patches' pixels
+                e_pix = rgb_err.unflatten(-1, (3, -1)).mean(2)                    # per pixel, mean over the 3 colours
+                l["rgb_w"] = l["rgb_w"] + (e_pix * wp).sum() / wp.sum()
+                is_key = (wp > 1).float()
+                l["key_rgb_l1"] = l["key_rgb_l1"] + (e_pix * is_key).sum() / is_key.sum().clamp(min=1)
+                P, T = unpatch(pred["rgb_patch"].float(), 3), unpatch(tgt["rgb_patch"].float(), 3)
+                for ax in (-1, -2):
+                    d = (P.diff(dim=ax) - T.diff(dim=ax)).abs().mean(1)
+                    wd = torch.maximum(Wk.narrow(ax, 1, Wk.shape[ax] - 1), Wk.narrow(ax, 0, Wk.shape[ax] - 1))
+                    l["edge_l1"] = l["edge_l1"] + (d * wd).sum() / wd.sum()
+                if perceptual is not None:
+                    l["lpips"] = l["lpips"] + perceptual(P * 2 - 1, T * 2 - 1).mean()
             l["dino_cos"] = l["dino_cos"] + 1 - F.cosine_similarity(pred["dino"].float(), tgt["dino"].float(), dim=-1).mean()
             p = CropAE.crop_points(tgt["depth_patch"], geom, k)
             motion_star = apply_rigid(p, R_star, t_star) - p
@@ -68,14 +127,15 @@ def losses(model: CropAE, out: dict, batch: dict, w: dict, ref: torch.Tensor) ->
         l["lateral_err_mm"] = lat_err.mean()
     l["grid_mm"], l["angle_deg"] = grid.mean(), angle.mean()
     l["pose_score"] = l["grid_mm"] + w["angle"] * l["angle_deg"]
-    l["total"] = (w["depth"] * l["depth_mm"] + w["valid"] * l["valid_bce"] + w["rgb"] * l["rgb_l1"]
+    l["total"] = (w["depth"] * l["depth_mm"] + w["valid"] * l["valid_bce"] + w["rgb"] * l["rgb_w"]
+                  + w.get("edge", 0.0) * l["edge_l1"] + w.get("lpips", 0.0) * l["lpips"]
                   + w["dino"] * l["dino_cos"] + w["motion"] * l["motion_mm"] + w["weight"] * l["weight_bce"]
                   + w["grid"] * l["grid_mm"] + w["angle"] * l["angle_deg"])
     return l
 
 
 @torch.no_grad()
-def evaluate(model, loader, w, device, max_batches, ref) -> dict:
+def evaluate(model, loader, w, device, max_batches, ref, key=None) -> dict:
     model.eval()
     acc, n = {}, 0
     for i, batch in enumerate(loader):
@@ -83,7 +143,10 @@ def evaluate(model, loader, w, device, max_batches, ref) -> dict:
             break
         batch = common.to_device(batch, device)
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            l = losses(model, model(batch), batch, w, ref)
+            out = model(batch)
+            l = losses(model, out, batch, w, ref, key(batch) if key else None, key.lpips if key else None)
+        r = out["z"].float() - out["z"].float().mean(0, keepdim=True)         # frame-to-frame variation of every token
+        l["latent_specific_share"] = (r - r.mean(1, keepdim=True)).pow(2).sum() / r.pow(2).sum().clamp(min=1e-12)
         nf = float(l["near_frac"])
         for k, v in l.items():
             wk = nf if (k.startswith("near_") and k != "near_frac") else 1.0     # near-hole metrics: per near sample
@@ -111,6 +174,9 @@ def train(cfg: dict, run_dir: Path, max_steps: int | None = None, resume: str | 
     from .wm4 import mixed_batches
     batches = mixed_batches(train_loaders, weights, cfg["seed"] + 3)
     model = CropAE(**cfg["model"]).to(device)
+    key = KeyPixels(cfg, device)
+    sel = cfg.get("selection") or {}
+    score = lambda x: x["pose_score"] + sel.get("near_lateral", 0.0) * x["near_lateral_err_mm"] + sel.get("key_rgb", 0.0) * x["key_rgb_l1"]
     opt = torch.optim.AdamW(common.trainable(model), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
     warmup = cfg.get("warmup_steps", 0)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, (s + 1) / warmup) if warmup else 1.0)
@@ -131,7 +197,7 @@ def train(cfg: dict, run_dir: Path, max_steps: int | None = None, resume: str | 
     for step, batch in zip(range(start + 1, steps + 1), batches):
         batch = common.to_device(batch, device)
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            l = losses(model, model(batch), batch, w, ref)
+            l = losses(model, model(batch), batch, w, ref, key(batch), key.lpips)
         opt.zero_grad(set_to_none=True)
         l["total"].backward()
         gn = torch.nn.utils.clip_grad_norm_(common.trainable(model), cfg["grad_clip"])
@@ -147,8 +213,8 @@ def train(cfg: dict, run_dir: Path, max_steps: int | None = None, resume: str | 
         if step % cfg["log_every"] == 0 or step == steps:
             log(step=step, grad_norm=float(gn), **{f"train_{k}": float(v) for k, v in l.items()})
         if step % cfg["eval_every"] == 0 or step == steps:
-            per = {n: evaluate(model, l, w, device, cfg["eval_batches"], ref) for n, l in val_loaders.items()}
-            v = {"pose_score": sum(x["pose_score"] for x in per.values()) / len(per)}     # selection: mean over the sources
+            per = {n: evaluate(model, l, w, device, cfg["eval_batches"], ref, key) for n, l in val_loaders.items()}
+            v = {"pose_score": sum(score(x) for x in per.values()) / len(per)}            # selection: mean over the sources
             log(step=step, val_pose_score=v["pose_score"],
                 **{f"val_{n}/{k}": x for n, m in per.items() for k, x in m.items()})
             if not math.isfinite(v["pose_score"]):

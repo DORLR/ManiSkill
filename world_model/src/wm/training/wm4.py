@@ -163,7 +163,8 @@ def train_batches(cfg: dict, make_dataset):
 def build(cfg: dict, device):
     scale = latent_scale(cfg)
     ae = load_crop_ae(cfg["ae_checkpoint"], device).requires_grad_(False)
-    model = HistoryCDiT(latent_ch=ae.latent_ch, size=cfg["size"]).to(device)
+    cfg["n_tokens"] = ae.n_tokens                           # 64 (v4 latents) or 128 (v5); saved with the checkpoint
+    model = HistoryCDiT(latent_ch=ae.latent_ch, size=cfg["size"], n_tokens=ae.n_tokens).to(device)
     return scale, ae, model
 
 
@@ -284,7 +285,7 @@ def train(cfg: dict, run_dir: Path, batches, max_steps: int | None = None, resum
 
 def load_history_wm(path: str, device=None) -> HistoryCDiT:
     ck = torch.load(path, map_location="cpu", weights_only=False)
-    m = HistoryCDiT(latent_ch=ck["cfg"].get("latent_ch", 16), size=ck["cfg"]["size"])
+    m = HistoryCDiT(latent_ch=ck["cfg"].get("latent_ch", 16), size=ck["cfg"]["size"], n_tokens=ck["cfg"].get("n_tokens", 64))
     m.load_state_dict(ck["ema"])
     m.eval()
     return m.to(device) if device is not None else m

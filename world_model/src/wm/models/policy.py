@@ -32,11 +32,11 @@ def _time_embedding(t: torch.Tensor, dim: int = 128) -> torch.Tensor:
 
 class LatentFMPolicy(nn.Module):
     def __init__(self, latent_ch: int = 8, context: int = 4, d: int = 256, layers: int = 4,
-                 heads: int = 8, hidden: int = 512):
+                 heads: int = 8, hidden: int = 512, n_tokens: int = N_TOKENS):
         super().__init__()
         self.context = context
         self.inp = nn.Linear(latent_ch, d)
-        self.token_pos = nn.Parameter(torch.randn(N_TOKENS, d) * 0.02)
+        self.token_pos = nn.Parameter(torch.randn(n_tokens, d) * 0.02)
         self.frame_pos = nn.Parameter(torch.randn(context, d) * 0.02)
         self.cls = nn.Parameter(torch.randn(1, 1, d) * 0.02)
         self.joint_in = nn.Sequential(nn.Linear(ACTION_DIM, d), nn.SiLU(), nn.Linear(d, d))
