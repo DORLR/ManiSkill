@@ -13,8 +13,9 @@ commands after it. For each window, with hand positions from FK:
 Windows are split by the lag now (< 0.3 mm: nothing to see in the history yet; 0.3-1 mm; >= 1 mm) and by what
 really happened (advanced: fraction > 0.7; held: < 0.3). Reported per lag bin and adapter: how well the predicted
 fraction separates advanced from held (AUC; 0.5 = cannot tell), the mean predicted fraction in each group and the
-mean error of the fraction. The vision-conditioned adapter is run with the full history and with the last 2 s of
-vision masked. Also: the imagination step and the training samples must give the adapter the same inputs
+mean error of the fraction. The vision-conditioned adapter is run with the full history, with the last 2 s of
+vision masked, and with the images of another trajectory (the control: what it gains from the longer
+proprioception history and the path alone, without seeing this window's images). Also: the imagination step and the training samples must give the adapter the same inputs
 (checked on 20 windows before anything else).
 """
 import argparse
@@ -109,11 +110,15 @@ f_real = ((geo["real_end"] - geo["p_now"]) * u).sum(1) / np.maximum(cn, 1e-9)
 lag = ((geo["cmd_prev"] - geo["p_now"]) * u).sum(1) * 1000
 
 
-def predict(adapter, dataset) -> np.ndarray:
-    """Predicted joints after the 8th command, (N, 7), in the order of `items`."""
+def predict(adapter, dataset, other_images: bool = False) -> np.ndarray:
+    """Predicted joints after the 8th command, (N, 7), in the order of `items`. `other_images`: every window
+    gets the frame latents of a window 128 places further (another trajectory: one has about 20 windows) and
+    keeps its own proprioception, path and numbers -- what the adapter achieves without this window's images."""
     out = []
     for b in DataLoader(dataset, batch_size=256, shuffle=False, num_workers=6):
         b = common.to_device(b, dev)
+        if other_images:
+            b["z"], b["seen"] = b["z"].roll(128, 0), b["seen"].roll(128, 0)
         with torch.no_grad():
             dq = adapter(b["x"], *(b[k] for k in HISTORY_KEYS)) if getattr(adapter, "takes_history", False) else adapter(b["x"])
         out.append(dq.view(-1, 8, 7)[:, -1].double().cpu().numpy())
@@ -152,9 +157,9 @@ for a in args.adapters:
     adapter = load_adapter(a, dev).requires_grad_(False)
     modes = {"": ds}
     if getattr(adapter, "takes_history", False):
-        modes = {":full": ds, ":tail2s": TailMaskedAdapter(files, scale, items=items, tail=10)}
+        modes = {":full": ds, ":tail2s": TailMaskedAdapter(files, scale, items=items, tail=10), ":other_images": ds}
     for mode, dataset in modes.items():
-        q_end = predict(adapter, dataset)
+        q_end = predict(adapter, dataset, other_images=mode == ":other_images")
         p_end = fk(np.concatenate([q_end, geo["fingers"]], 1))[:, :3, 3]
         f_pred = ((p_end - geo["p_now"]) * u).sum(1) / np.maximum(cn, 1e-9)
         rep[Path(a).parent.name + mode] = table(f_pred)
