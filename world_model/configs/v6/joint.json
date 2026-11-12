@@ -1,0 +1,55 @@
+{
+  "data": [
+    "/mnt/storage2/qingxin/data/wm_v1",
+    "/mnt/storage2/qingxin/data/wm_v1x",
+    "/mnt/storage2/qingxin/data/wm_v1c"
+  ],
+  "source_weights": [
+    0.4,
+    0.25,
+    0.35
+  ],
+  "workers": [
+    7,
+    5,
+    6
+  ],
+  "seed": 0,
+  "encoder": {
+    "arch": "resnet34",
+    "stride": 16,
+    "ch": 16
+  },
+  "encoder_ema": 0.999,
+  "size": "S",
+  "patch": 2,
+  "mask": {
+    "p_tail": 0.5,
+    "p_mid": 0.2,
+    "p_drop": 0.15,
+    "p_alt": 0.15
+  },
+  "p_step": 0.5,
+  "max_frames": 10,
+  "loss_weights": {
+    "label": 0.2,
+    "aux_res": 1.0,
+    "aux_inserted": 0.2
+  },
+  "batch_size": 48,
+  "lr": 0.0001,
+  "grad_clip": 1.0,
+  "ema_decay": 0.9999,
+  "warmup_steps": 1000,
+  "steps": 60000,
+  "p_ctx_noise": 0.5,
+  "ctx_noise_max": 0.1,
+  "log_every": 100,
+  "save_every": 1000,
+  "eval_every": 2500,
+  "eval_batches": 6,
+  "eval_sampling_steps": 20,
+  "patience": 8,
+  "harm_margin": 0.05,
+  "max_skipped": 50
+}

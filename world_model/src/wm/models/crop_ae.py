@@ -3,7 +3,7 @@
 Encoder: CropEncoder (models/crop_encoder.py) -> LayerNorm -> linear to C channels per token.
 Deterministic (no KL), no joint token (the robot state goes to the world model separately).
 Latent: 64 tokens (v4, read-out "queries") or 128 tokens = 8 x 8 per crop, each one 16 x 16 px region
-(v5, read-out "grid"; why: crop_encoder.py).
+(v5, read-out "grid"), or those + 8 global tokens (v5c, "grid_global"); why: crop_encoder.py.
 
 Decoder, from the latent only.
     v4: one query per crop token (2 x 256) reads all latent tokens (cross-attention).
@@ -50,7 +50,8 @@ class CropAE(nn.Module):
         self.latent_ch = latent_ch
         self.to_latent = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, latent_ch))
         self.from_latent = nn.Linear(latent_ch, dec_d)
-        self.grid, self.n_tokens = self.encoder.readout == "grid", self.encoder.n_tokens
+        self.grid, self.n_tokens = self.encoder.readout != "queries", self.encoder.n_tokens
+        self.n_global = self.encoder.n_global
         self.pos = nn.Parameter(torch.randn(self.n_tokens, dec_d) * 0.02)
         self.trunk = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(dec_d, heads, 2 * dec_d, batch_first=True, norm_first=True), dec_layers)
@@ -93,9 +94,11 @@ class CropAE(nn.Module):
         """z (B, n_tokens, C) -> per crop ("plug", "hole") patch predictions (B, 256, ...)."""
         h = self.trunk(self.from_latent(z) + self.pos)
         if self.grid:
-            h = self.split(h)
-            n = self.n_tokens // 2
-            q = self.patch_dec(torch.cat([self.split_tokens(h[:, :n]), self.split_tokens(h[:, n:])], 1) + self.patch_queries)
+            n = (self.n_tokens - self.n_global) // 2
+            r = self.split(h[:, :2 * n])
+            q = torch.cat([self.split_tokens(r[:, :n]), self.split_tokens(r[:, n:])], 1) + self.patch_queries
+            # the global tokens (v5c) take part in the self-attention; only the crop tokens are decoded
+            q = self.patch_dec(torch.cat([q, h[:, 2 * n:]], 1))[:, :2 * N_CROP_TOK]
         else:
             q = self.patch_dec(self.patch_queries[None].expand(z.shape[0], -1, -1), h)
         out = {}

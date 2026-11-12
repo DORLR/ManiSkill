@@ -31,6 +31,12 @@ Attention:
             layer), so every latent token belongs to one 16 x 16 px region of one crop: 8 x 8 tokens for
             the plug crop, then 8 x 8 for the opening crop (row-major), 128 in all; 2 more self-attention
             layers over them.
+        "grid_global" (v5c): the region tokens of "grid" + `n_global` global tokens. Measured 2026-11-12 on
+            v5 / v5b: with region tokens only, the pose terms do not train and a reader finds the pin tip's
+            offset in the latent worse than in v4e's (0.77 against 0.47 mm): how far the plug is from the hole
+            belongs to no region, and nothing gave it a place. One learned query reads all tokens (as v4e's
+            queries did) and its output is laid out as n_global tokens (one vector cut in pieces, so the pieces
+            cannot be copies of each other). Order: plug regions, opening regions, global.
 """
 
 from __future__ import annotations
@@ -125,11 +131,12 @@ def _dec(d, heads, n):
 class CropEncoder(nn.Module):
     def __init__(self, d: int = 256, heads: int = 8, crop_layers: int = 2, relation_layers: int = 3,
                  joint_layers: int = 4, query_layers: int = 2, dino: bool = True, readout: str = "queries",
-                 merge: int = 2):
+                 merge: int = 2, n_global: int = 8):
         super().__init__()
-        assert readout in ("queries", "grid") and G % merge == 0
+        assert readout in ("queries", "grid", "grid_global") and G % merge == 0
         self.d, self.readout, self.merge = d, readout, merge
-        self.n_tokens = N_TOKENS if readout == "queries" else 2 * (G // merge) ** 2
+        self.n_global = n_global if readout == "grid_global" else 0
+        self.n_tokens = N_TOKENS if readout == "queries" else 2 * (G // merge) ** 2 + self.n_global
         self.backbone = CropBackbone()
         self.dino = Dinov2() if dino else None
         self.dino_dim = 384
@@ -152,8 +159,12 @@ class CropEncoder(nn.Module):
             self.query_layers = _dec(d, heads, query_layers)
         else:
             self.merge_proj = nn.Linear(merge * merge * d, d)
-            self.grid_pos = nn.Parameter(torch.randn(self.n_tokens, d) * 0.02)
+            self.grid_pos = nn.Parameter(torch.randn(self.n_tokens - self.n_global, d) * 0.02)
             self.grid_layers = _enc(d, heads, query_layers)
+            if self.n_global:
+                self.global_query = nn.Parameter(torch.randn(1, d) * 0.02)
+                self.global_layers = _dec(d, heads, query_layers)
+                self.global_proj = nn.Linear(d, self.n_global * d)
         self.norm = nn.LayerNorm(d)
 
     def merge_tokens(self, t: torch.Tensor) -> torch.Tensor:
@@ -203,4 +214,7 @@ class CropEncoder(nn.Module):
             tp, th = x[:, 3:3 + N_CROP_TOK], x[:, 3 + N_CROP_TOK:]
             q = self.merge_proj(torch.cat([self.merge_tokens(tp), self.merge_tokens(th)], 1))
             q = self.grid_layers(q + self.grid_pos)
+            if self.n_global:
+                g = self.global_layers(self.global_query[None].expand(rgb.shape[0], -1, -1), x)       # (B, 1, d)
+                q = torch.cat([q, self.global_proj(g[:, 0]).unflatten(1, (self.n_global, self.d))], 1)
         return {"tokens": self.norm(q), "plug": p, "hole": h}

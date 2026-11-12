@@ -39,14 +39,29 @@ class HistoryCDiT(CDiT):
     seen (B,HIST) bool slot has a latent, proprio (B,HIST,18), dt (B,HIST) seconds (<= 0),
     avail (B,HIST) bool slot exists (after the trajectory start), rel_t (B,) s, ctx_noise (B,)."""
 
-    def __init__(self, latent_ch: int = 16, size: str = "S", n_tokens: int = GRID * GRID):
+    def __init__(self, latent_ch: int = 16, size: str = "S", n_tokens: int = GRID * GRID, feature_map: int | None = None,
+                 patch: int = 2, aux_dim: int = 0):
         # v5 latents: 128 tokens = (16, 8) grid, the plug crop's 8 x 8 region tokens above the opening crop's; CDiT's
         # patch embedding (patch size 1) and its learned position embedding (one per token) take that as they are
-        assert n_tokens % GRID == 0
-        self.n_tokens, self.grid_hw = n_tokens, (n_tokens // GRID, GRID)
-        super().__init__(input_size=GRID if n_tokens == GRID * GRID else self.grid_hw, context_size=1, patch_size=1,
-                         in_channels=latent_ch, learn_sigma=True, **SIZES[size])
+        # v6 (`feature_map`): the frame encoder's feature map (latent_ch, feature_map, feature_map) is the image, cut
+        # into patch x patch patches by CDiT's own patch embedding, as NWM does with its image latents;
+        # the context is then given as maps (B, HIST, C, H, W). `aux_dim`: a small head on the mean of the final
+        # tokens (v6: where the hand really is after the commands, and "inserted" at the target time).
+        self.patch = patch if feature_map else 1
+        if feature_map:
+            assert feature_map % patch == 0
+            n_tokens = (feature_map // patch) ** 2
+            self.n_tokens, self.grid_hw = n_tokens, (feature_map // patch,) * 2
+            super().__init__(input_size=feature_map, context_size=1, patch_size=patch, in_channels=latent_ch,
+                             learn_sigma=True, **SIZES[size])
+        else:
+            assert n_tokens % GRID == 0
+            self.n_tokens, self.grid_hw = n_tokens, (n_tokens // GRID, GRID)
+            super().__init__(input_size=GRID if n_tokens == GRID * GRID else self.grid_hw, context_size=1, patch_size=1,
+                             in_channels=latent_ch, learn_sigma=True, **SIZES[size])
         h = SIZES[size]["hidden_size"]
+        self.aux_head = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, 256), nn.SiLU(), nn.Linear(256, aux_dim)) if aux_dim else None
+        self.aux = None
         self.hidden = h
         self.y_embedder = ConditionEmbedder(PATH_DIM, h)
         self.slot_time = TimestepEmbedder(h)
@@ -60,7 +75,8 @@ class HistoryCDiT(CDiT):
         """Keys / values for the cross-attention and their padding mask (True = ignore)."""
         B, S = seen.shape
         te = self.slot_time((-dt * DT_SCALE).reshape(-1, 1)).view(B, S, 1, -1)              # (B, S, 1, h)
-        v = self.x_embedder(tokens_to_grid(z_hist).flatten(0, 1)).unflatten(0, (B, S))  # (B, S, 64, h)
+        maps = z_hist if z_hist.dim() == 5 else tokens_to_grid(z_hist)                      # (B, S, C, H, W)
+        v = self.x_embedder(maps.flatten(0, 1)).unflatten(0, (B, S))                     # (B, S, tokens, h)
         v = (v + self.pos_embed[0] + te).flatten(1, 2)                                   # (B, S*64, h)
         p = self.proprio_embedder(proprio) + te[:, :, 0] + self.proprio_type             # (B, S, h)
         keys = torch.cat([v, p], 1)
@@ -76,12 +92,16 @@ class HistoryCDiT(CDiT):
         c = c + self.noise_embedder(ctx_noise[..., None] * 1000)
         for block in self.blocks:
             x = _block_forward(block, x, c, keys, ignore)
+        if self.aux_head is not None:
+            self.aux = self.aux_head(x.mean(1))               # read by the caller after forward (the last call when sampling)
         x = self.final_layer(x, c)
         return self.unpatchify(x)
 
     def unpatchify(self, x):
         """(B, tokens, out_channels) -> (B, out_channels, H, W). CDiT's own assumes a square grid; with patch
         size 1 this is the same operation for any (H, W)."""
+        if self.patch > 1:
+            return CDiT.unpatchify(self, x)
         return x.unflatten(1, self.grid_hw).permute(0, 3, 1, 2)
 
 

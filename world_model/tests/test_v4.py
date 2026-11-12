@@ -82,6 +82,29 @@ def test_autoencoder_without_rgb_target_gives_classes():
     assert not any("out_rgb" in k for k in m.state_dict())
 
 
+def test_region_and_global_tokens():
+    """v5c: 128 region tokens + 8 global tokens; the world model takes them as a (17, 8) grid."""
+    from wm.models.cdit import grid_to_tokens, tokens_to_grid
+    from wm.models.history_cdit import HistoryCDiT
+    torch.manual_seed(0)
+    m = CropAE(encoder={"dino": False, "d": 64, "heads": 4, "crop_layers": 1, "relation_layers": 1, "joint_layers": 1,
+                        "query_layers": 1, "readout": "grid_global", "n_global": 8}, latent_ch=16, dec_d=64, dec_layers=1,
+               patch_layers=1, heads=4, rgb=False, seg_classes=7)
+    out = m(_batch())
+    assert out["z"].shape == (2, 136, 16) and m.n_tokens == 136 and m.n_global == 8
+    assert out["pred"]["hole"]["seg_patch"].shape == (2, 256, 7 * 64) and torch.isfinite(out["t"]).all()
+    z2 = out["z"].clone()
+    z2[:, 128:] += 1.0                                                     # the decoder uses the global tokens
+    assert not torch.allclose(m.decode(z2)["plug"]["motion_patch"], out["pred"]["plug"]["motion_patch"])
+    g = tokens_to_grid(out["z"])
+    assert g.shape == (2, 16, 17, 8) and torch.equal(grid_to_tokens(g), out["z"])
+    wm = HistoryCDiT(latent_ch=16, size="S", n_tokens=136).eval()
+    B, S = 2, 32
+    y = wm(g, torch.randint(0, 1000, (B,)), torch.randn(B, 144), torch.randn(B, S, 136, 16), torch.rand(B, S) < 0.5,
+           torch.randn(B, S, 18), -torch.rand(B, S) * 6, torch.ones(B, S, dtype=torch.bool), torch.full((B,), 0.4))
+    assert y.shape == (B, 32, 17, 8)
+
+
 def test_crop_placer_uses_memory_when_opening_hidden():
     K = np.array([[337.0, 0, 160], [0, 337.0, 160], [0, 0, 1]])
     cam = np.eye(4)
