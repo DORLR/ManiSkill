@@ -177,4 +177,5 @@ def load_success(path: str, device=None) -> SuccessHead:
     m = SuccessHead(**ck["cfg"]["model"])
     m.load_state_dict(ck["ema"])
     m.eval()
+    m.pos_fraction = ck["cfg"].get("pos_fraction")       # share of positives it was trained with (for calibration)
     return m.to(device) if device is not None else m

@@ -145,3 +145,25 @@ def test_success_head_features_unchanged_by_refactor():
     seen = torch.ones(2, HIST, dtype=torch.bool)
     with torch.no_grad():
         assert torch.equal(m(z, seen, prop, dt, seen), m.out(m.features(z, seen, prop, dt, seen))[:, 0])
+
+
+def test_outcome_adapter_uses_the_outcome_and_decision_threshold_is_fixed():
+    """The outcome-conditioned adapter: the 0/1 outcome changes the prediction; the imagination's decision is the
+    (prior-shifted) classifier output against one threshold per episode."""
+    from types import SimpleNamespace
+    from wm.data.history import HIST, PATH_DIM, PROPRIO_DIM
+    from wm.imagination4 import HistoryImagination
+    from wm.models.adapter import IN_DIM, VisionJointAdapter
+    torch.manual_seed(0)
+    m = VisionJointAdapter(latent_ch=16, d=64, layers=2, heads=4, hidden=64, outcome=True).eval()
+    B = 2
+    a = (torch.randn(B, IN_DIM), torch.randn(B, HIST, 64, 16), torch.ones(B, HIST, dtype=torch.bool),
+         torch.randn(B, HIST, PROPRIO_DIM), -torch.rand(B, HIST), torch.ones(B, HIST, dtype=torch.bool), torch.randn(B, PATH_DIM))
+    with torch.no_grad():
+        assert not torch.allclose(m(*a, torch.zeros(B)), m(*a, torch.ones(B)), atol=1e-5)
+    im = HistoryImagination.__new__(HistoryImagination)
+    im.success, im.adapter = SimpleNamespace(pos_fraction=0.25), SimpleNamespace(outcome_prior=0.25)
+    im.u = np.array([0.3, 0.3, 0.9])
+    assert im.decide(np.array([0.2, 0.4, 0.8])).tolist() == [False, True, False]      # no shift: P against u
+    im.adapter = SimpleNamespace(outcome_prior=0.05)                                      # rarer in the adapter's data
+    assert im.decide(np.array([0.4, 0.4, 0.4])).tolist() == [False, False, False]         # 0.4 -> about 0.10 < 0.3

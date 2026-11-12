@@ -243,9 +243,16 @@ class AdapterHistoryDataset(torch.utils.data.Dataset):
 
     STEPS = 8          # one decision (imagination4.WM_STEP)
 
-    def __init__(self, files: LatentFiles, scale: float, mask: dict | None, items: list | None = None):
-        self.files, self.scale, self.mask = files, scale, mask
+    def __init__(self, files: LatentFiles, scale: float, mask: dict | None, items: list | None = None,
+                 horizon: int | None = None):
+        """`horizon` (images): also return `outcome`, the success classifier's label at image j (inserted at j or
+        within the next `horizon` images, SuccessDataset.labels) -- the adapter's outcome input."""
+        self.files, self.scale, self.mask, self.horizon = files, scale, mask, horizon
         self.items = items if items is not None else self.index(files)
+
+    def outcome(self, k: int) -> bool:
+        fi, j = self.items[k]
+        return bool(SuccessDataset.labels(self.files.load(fi)["inserted"], self.horizon)[j])
 
     @staticmethod
     def index(files: LatentFiles) -> list:
@@ -275,4 +282,6 @@ class AdapterHistoryDataset(torch.utils.data.Dataset):
         x, y = self.io(k)
         out.update(x=torch.from_numpy(x), y=torch.from_numpy(y),
                    path=torch.from_numpy(commanded_path(d, s, s + self.STEPS, R_P).astype(np.float32)))
+        if self.horizon is not None:
+            out["outcome"] = torch.tensor(float(self.outcome(k)))
         return out

@@ -59,6 +59,7 @@ print(len(stuck), "stuck continuations;", len(ins), "inserted for reference", fl
 
 T = ic.HORIZON
 imag_d, real_d, p_all = np.zeros((len(stuck), T, 3)), np.zeros((len(stuck), T, 3)), np.zeros((len(stuck), T))
+dec = np.full((len(stuck), T), np.nan)            # the outcome decision given to an outcome-conditioned adapter
 for s0 in range(0, len(stuck), 64):
     chunk = stuck[s0:s0 + 64]
     for ep in chunk:
@@ -72,6 +73,8 @@ for s0 in range(0, len(stuck), 64):
             j = min(int(ep["dec_img"][ep["k_branch"] + t]) + 2, len(ep["img_step"]) - 1)        # 0.4 s after decision t
             real_d[s0 + b, t] = port_disp(ep, ep["hand"][[int(ep["img_step"][j])]])[0]
             p_all[s0 + b, t] = info["p_success"][b]
+            if getattr(imag.adapter, "takes_outcome", False):
+                dec[s0 + b, t] = imag.decision[b]
 
 med = lambda x: [round(float(v), 2) for v in np.median(x, 0)]
 rep = {"adapter": a["adapter"], "stuck_continuations": len(stuck),
@@ -81,7 +84,8 @@ rep = {"adapter": a["adapter"], "stuck_continuations": len(stuck),
 for t in (0, 4, 9, 19, 29, 39):
     rep["by_decision"][f"+{(t + 1) * 0.4:g}s"] = {
         "imagined_displacement_mm_median": med(imag_d[:, t]), "real_displacement_mm_median": med(real_d[:, t]),
-        "imagined_called_inserted_so_far_pct": round(100 * float((p_all[:, :t + 1].max(1) > 0.5).mean()), 1)}
+        "imagined_called_inserted_so_far_pct": round(100 * float((p_all[:, :t + 1].max(1) > 0.5).mean()), 1),
+        "decided_goes_in_pct": None if np.isnan(dec[:, t]).all() else round(100 * float(dec[:, t].mean()), 1)}
 Path(args.out).write_text(json.dumps(rep, indent=1))
 print(json.dumps(rep, indent=1))
 robot.env.close()

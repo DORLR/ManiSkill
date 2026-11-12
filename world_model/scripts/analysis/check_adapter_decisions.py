@@ -31,7 +31,7 @@ from wm.data.kinematics import build_fk
 from wm.imagination4 import HistoryImagination, start_from_record
 from wm.training import common
 from wm.training.adapter import load_adapter
-from wm.training.adapter_vision import HISTORY_KEYS, TailMaskedAdapter
+from wm.training.adapter_vision import HISTORY_KEYS, TailMaskedAdapter, model_args
 from wm.training.wm4 import latent_scale, offline_files, sources
 
 ap = argparse.ArgumentParser()
@@ -51,7 +51,8 @@ items = []
 for fi in range(len(files)):
     d = files.load(fi)
     items += [(fi, j) for j, s in enumerate(d["img_step"].astype(int)) if 1 <= s and s + 8 <= len(d["action"])]
-ds = AdapterHistoryDataset(files, scale, None, items=items)
+H = int(round(cfg.get("label_horizon_s", 8.0) / 0.2))      # the adapters that take the outcome get the true label here
+ds = AdapterHistoryDataset(files, scale, None, items=items, horizon=H)
 print(len(files), "trajectories,", len(items), "windows", flush=True)
 
 
@@ -120,7 +121,9 @@ def predict(adapter, dataset, other_images: bool = False) -> np.ndarray:
         if other_images:
             b["z"], b["seen"] = b["z"].roll(128, 0), b["seen"].roll(128, 0)
         with torch.no_grad():
-            dq = adapter(b["x"], *(b[k] for k in HISTORY_KEYS)) if getattr(adapter, "takes_history", False) else adapter(b["x"])
+            if not getattr(adapter, "takes_outcome", False):
+                b.pop("outcome", None)
+            dq = adapter(b["x"], *model_args(b)) if getattr(adapter, "takes_history", False) else adapter(b["x"])
         out.append(dq.view(-1, 8, 7)[:, -1].double().cpu().numpy())
     return geo["q_now"] + np.concatenate(out)
 
@@ -157,7 +160,7 @@ for a in args.adapters:
     adapter = load_adapter(a, dev).requires_grad_(False)
     modes = {"": ds}
     if getattr(adapter, "takes_history", False):
-        modes = {":full": ds, ":tail2s": TailMaskedAdapter(files, scale, items=items, tail=10), ":other_images": ds}
+        modes = {":full": ds, ":tail2s": TailMaskedAdapter(files, scale, items=items, tail=10, horizon=H), ":other_images": ds}
     for mode, dataset in modes.items():
         q_end = predict(adapter, dataset, other_images=mode == ":other_images")
         p_end = fk(np.concatenate([q_end, geo["fingers"]], 1))[:, :3, 3]

@@ -27,6 +27,16 @@ from . import common
 from .wm4 import latent_scale, noisy_history, offline_files, sources, train_batches
 
 HISTORY_KEYS = ("z", "seen", "proprio", "dt", "avail", "path")
+
+
+def model_args(b: dict) -> list:
+    """The adapter's inputs after x: the history, the path and, if the batch has it, the outcome."""
+    return [b[k] for k in HISTORY_KEYS] + ([b["outcome"]] if "outcome" in b else [])
+
+
+def outcome_horizon(cfg: dict) -> int | None:
+    """Images of the classifier's label horizon if the adapter takes the outcome, else None."""
+    return int(round(cfg["label_horizon_s"] / 0.2)) if cfg["model"].get("outcome") else None
 HELD_MIN_RAD = 0.0005
 
 
@@ -81,7 +91,7 @@ def evaluate(model, loaders: dict, device, max_batches: int) -> dict:
             if i >= max_batches:
                 break
             b = common.to_device(b, device)
-            w = window_errors(model(b["x"], *(b[k] for k in HISTORY_KEYS)), b["x"], b["y"])
+            w = window_errors(model(b["x"], *model_args(b)), b["x"], b["y"])
             for k in acc:
                 acc[k].append(w[k].cpu())
         e, r, h = (torch.cat(acc[k]) for k in ("err", "rule", "held"))
@@ -101,12 +111,12 @@ def loader(ds, cfg: dict, workers: int | None = None) -> DataLoader:
 
 
 def val_loaders(cfg: dict, scale: float) -> dict:
-    out = {}
+    out, h = {}, outcome_horizon(cfg)
     for src, _, _ in sources(cfg):
         files = offline_files(cfg, "ood_val", src)
         items = AdapterHistoryDataset.index(files)
-        out[f"{src}:full"] = loader(AdapterHistoryDataset(files, scale, None, items=items), cfg, 2)
-        out[f"{src}:tail2s"] = loader(TailMaskedAdapter(files, scale, items=items, tail=10), cfg, 2)
+        out[f"{src}:full"] = loader(AdapterHistoryDataset(files, scale, None, items=items, horizon=h), cfg, 2)
+        out[f"{src}:tail2s"] = loader(TailMaskedAdapter(files, scale, items=items, tail=10, horizon=h), cfg, 2)
     return out
 
 
@@ -117,23 +127,29 @@ def train(cfg: dict, run_dir: Path, max_steps: int | None = None) -> Path:
     train_sets = []
 
     def make(files):
-        train_sets.append(AdapterHistoryDataset(files, scale, cfg["mask"]))
+        train_sets.append(AdapterHistoryDataset(files, scale, cfg["mask"], horizon=outcome_horizon(cfg)))
         return loader(train_sets[-1], cfg)
 
     batches = train_batches(cfg, make)
     model = VisionJointAdapter(**{k: v for k, v in cfg["model"].items() if k != "kind"}).to(device)
     model.set_stats(*io_stats(train_sets, seed=cfg["seed"]))
+    if model.takes_outcome:                  # share of positive samples as drawn in training (sources mixed by weight)
+        rng = np.random.default_rng(cfg["seed"])
+        w = np.asarray(cfg.get("source_weights") or [1.0] * len(train_sets), float)
+        pri = [np.mean([ds.outcome(int(k)) for k in rng.choice(len(ds), size=min(20000, len(ds)), replace=False)]) for ds in train_sets]
+        model.outcome_prior.fill_(float((w / w.sum() * np.asarray(pri)).sum()))
     ema = common.EMA(model, cfg["ema_decay"])
     opt = torch.optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
     vals = val_loaders(cfg, scale)
     log = common.Logger(run_dir)
-    log(event="start", train_windows=[len(d) for d in train_sets], params_m=sum(p.numel() for p in model.parameters()) / 1e6)
+    log(event="start", train_windows=[len(d) for d in train_sets], params_m=sum(p.numel() for p in model.parameters()) / 1e6,
+        outcome_prior=float(model.outcome_prior) if model.takes_outcome else None)
     best, bad = float("inf"), 0
     steps = max_steps or cfg["steps"]
     for step in range(1, steps + 1):
         b = common.to_device(next(batches), device)
         z, _ = noisy_history(b["z"], b["seen"], cfg["p_ctx_noise"], cfg["ctx_noise_max"])
-        pred = model.forward_normalised(b["x"], z, b["seen"], b["proprio"], b["dt"], b["avail"], b["path"])
+        pred = model.forward_normalised(b["x"], z, b["seen"], b["proprio"], b["dt"], b["avail"], b["path"], b.get("outcome"))
         loss = (pred - (b["y"] - model.y_mean) / model.y_std).abs().mean()
         opt.zero_grad(set_to_none=True)
         loss.backward()

@@ -41,6 +41,7 @@ class HistoryImagination:
         self.wm, self.adapter, self.fk, self.success = wm, adapter, fk, success
         self.scale, self.dev = scale, device
         self.sampler = create_diffusion(timestep_respacing=str(sampling_steps))
+        self.rng = np.random.default_rng(0)
 
     # ------------------------------------------------------------------ state
     def reset_from(self, starts: list[dict]):
@@ -50,8 +51,20 @@ class HistoryImagination:
         self.seen, self.avail = st["seen"].astype(bool), st["avail"].astype(bool)
         self.meas, self.cmd = st["meas"].astype(np.float64), st["cmd"].astype(np.float64)
         self.q, self.hist, self.R_P = st["q"].astype(np.float64), st["hist"].astype(np.float64), st["R_P"].astype(np.float64)
+        self.u = self.rng.random(self.B)          # one threshold per imagined episode for the outcome decision
         self.p_success = self.score()
         return self.obs()
+
+    def decide(self, p: np.ndarray) -> np.ndarray:
+        """The outcome decision given to an outcome-conditioned adapter: the classifier's P, corrected from the
+        share of positives it was trained with to the share the adapter was trained with (prior shift), against
+        this episode's threshold. The threshold is fixed, so the decision changes only when P crosses it."""
+        logit = lambda x: np.log(np.clip(x, 1e-6, 1 - 1e-6) / (1 - np.clip(x, 1e-6, 1 - 1e-6)))
+        shift = 0.0
+        pf, pr = getattr(self.success, "pos_fraction", None), float(getattr(self.adapter, "outcome_prior", float("nan")))
+        if pf and np.isfinite(pr):
+            shift = logit(pr) - logit(pf)
+        return logit(p) + shift > logit(self.u)
 
     def tensors(self) -> dict:
         """History relative to the current measured hand (the newest slot), as the models take it."""
@@ -103,7 +116,13 @@ class HistoryImagination:
             x = np.concatenate([self.q[:, :7], self.hist.reshape(B, -1), (targets[:, :WM_STEP] - self.q[:, None, :7]).reshape(B, -1)], 1)
             x = torch.tensor(x, dtype=torch.float32, device=self.dev)
             if getattr(self.adapter, "takes_history", False):       # vision-conditioned: the history and the commanded path too
-                dq = self.adapter(x, h["z_hist"], h["seen"], h["proprio"], h["dt"], h["avail"], path)
+                extra = []
+                if getattr(self.adapter, "takes_outcome", False):   # the classifier on the same history decides the outcome
+                    with torch.autocast("cuda", dtype=torch.bfloat16):
+                        p = torch.sigmoid(self.success(h["z_hist"], h["seen"], h["proprio"], h["dt"], h["avail"]).float()).cpu().numpy()
+                    self.decision = self.decide(p)
+                    extra = [torch.tensor(self.decision, dtype=torch.float32, device=self.dev)]
+                dq = self.adapter(x, h["z_hist"], h["seen"], h["proprio"], h["dt"], h["avail"], path, *extra)
             else:
                 dq = self.adapter(x)
             q_steps = self.q[:, None, :7] + dq.view(B, WM_STEP, 7).cpu().numpy().astype(np.float64)
