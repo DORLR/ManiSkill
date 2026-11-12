@@ -35,7 +35,7 @@ from torch.utils.data import DataLoader
 from ..data.frame_history import RES_SCALE, FrameHistoryDataset
 from ..data.history import HIST
 from ..models.encoder import geometry_features
-from ..models.frame_encoder import FrameEncoder, LabelHead, label_loss, label_targets
+from ..models.frame_encoder import FrameEncoder, LabelHead, centre_lateral_mm, label_loss, label_targets, symexp
 from ..models.history_cdit import HistoryCDiT, create_diffusion
 from . import common
 from .wm4 import mixed_batches
@@ -77,10 +77,6 @@ def aux_losses(aux: torch.Tensor, b: dict) -> dict:
     return {"aux_res": res, "aux_inserted_bce": ins}
 
 
-def lateral_mm(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    return (pred.float()[:, 1:3] - target[:, 1:3]).norm(dim=-1)
-
-
 @torch.no_grad()
 def evaluate(enc_t, head, wm, diffusion, sampler, loaders, device, max_batches) -> dict:
     out = {}
@@ -101,9 +97,10 @@ def evaluate(enc_t, head, wm, diffusion, sampler, loaders, device, max_batches) 
             aux = wm.aux.float()
             _, _, tgt = label_targets(b["t_hand"], b["h_star"], b["R_P"])
             geom_t = geometry_features(b["t_cam"].float(), b["t_hand"].float(), b["R_P"].float())
-            close = tgt[:, 1:3].norm(dim=-1) < 3.0
+            lat_t = symexp(tgt[:, 1:3])                                     # mm across the axis, reference centre
+            close = lat_t.norm(dim=-1) < 3.0
             with torch.autocast("cuda", dtype=torch.bfloat16):
-                e_real, e_pred, e_copy = (lateral_mm(head(v, geom_t), tgt) for v in (x, pred, f_new.float()))
+                e_real, e_pred, e_copy = (centre_lateral_mm(head(v, geom_t), tgt) for v in (x, pred, f_new.float()))
             ok = b["res_ok"]
             adv_true = b["res"][ok][:, 9] / RES_SCALE * 10                  # mm along the axis: hand at +0.4 s minus its command
             adv_pred = aux[ok][:, 9] / RES_SCALE * 10
@@ -112,7 +109,7 @@ def evaluate(enc_t, head, wm, diffusion, sampler, loaders, device, max_batches) 
                  "real_close_lateral_mm": float((e_real * close).sum() / close.sum().clamp(min=1)),
                  "pred_close_lateral_mm": float((e_pred * close).sum() / close.sum().clamp(min=1)),
                  "copy_close_lateral_mm": float((e_copy * close).sum() / close.sum().clamp(min=1)),
-                 "blind_close_lateral_mm": float(((tgt[:, 1:3] - tgt[close][:, 1:3].mean(0)).norm(dim=-1) * close).sum() / close.sum().clamp(min=1)),
+                 "blind_close_lateral_mm": float(((lat_t - lat_t[close].mean(0)).norm(dim=-1) * close).sum() / close.sum().clamp(min=1)),
                  "aux_lag_err_mm": float((adv_pred - adv_true).abs().mean()) if ok.any() else float("nan"),
                  "aux_lag_true_abs_mm": float(adv_true.abs().mean()) if ok.any() else float("nan"),
                  "aux_inserted_acc": float(((aux[:, 18] > 0) == ins).float().mean()), "inserted_frac": float(ins.float().mean()),
@@ -166,7 +163,7 @@ def train(cfg: dict, run_dir: Path, max_steps: int | None = None) -> Path:
             z, f_new, x = encode_history(enc, enc_t.model, b)
             pred = head(f_new, geometry_features(b["g_cam"].float(), b["g_hand"].float(), b["R_P"].float()))
         _, _, tgt = label_targets(b["g_hand"], b["h_star"], b["R_P"])
-        ll = label_loss(pred, tgt, b["g_inserted"])
+        ll = label_loss(pred, tgt, b["g_inserted"], close_weight=cfg.get("close_weight", 0.0))
         z, x = z.float(), x.float()
         B = x.shape[0]
         sigma = torch.rand(B, device=device) * cfg["ctx_noise_max"]

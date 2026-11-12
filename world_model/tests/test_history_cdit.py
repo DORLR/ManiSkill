@@ -54,7 +54,7 @@ def test_v6_encoder_and_world_model_shapes():
     f = enc(torch.randint(0, 255, (2, 320, 320, 3), dtype=torch.uint8), torch.randint(0, 3000, (2, 320, 320), dtype=torch.int32))
     assert f.shape == (2, 16, 20, 20)
     assert torch.allclose(f.mean(1), torch.zeros(2, 20, 20), atol=1e-4) and torch.allclose(f.var(1, unbiased=False), torch.ones(2, 20, 20), atol=1e-2)
-    assert LabelHead(16, 20)(f, torch.randn(2, 9)).shape == (2, 7)
+    assert LabelHead(16, 20)(f, torch.randn(2, 9)).shape == (2, 13)
     wm = HistoryCDiT(latent_ch=16, size="S", feature_map=20, patch=2, aux_dim=19).eval()
     B, S = 2, 32
     z = torch.zeros(B, S, 16, 20, 20)
@@ -64,3 +64,17 @@ def test_v6_encoder_and_world_model_shapes():
     out = wm(torch.randn(B, 16, 20, 20), torch.randint(0, 1000, (B,)), torch.randn(B, 144), z, seen, torch.randn(B, S, 18),
              -torch.rand(B, S) * 6, torch.ones(B, S, dtype=torch.bool), torch.full((B,), 0.4))
     assert out.shape == (B, 32, 20, 20) and wm.n_tokens == 100 and wm.aux.shape == (B, 19)
+
+
+def test_label_points_round_trip():
+    """The label as reference-point motions: compressing and solving back gives the rigid motion it came from."""
+    from wm.geometry import _exp_so3
+    from wm.models.frame_encoder import REF_POINTS, label_motion, symexp, symlog
+    torch.manual_seed(0)
+    R = _exp_so3(torch.randn(5, 3) * 0.05)
+    t = torch.randn(5, 3) * torch.tensor([0.03, 0.002, 0.002])
+    p = REF_POINTS[None].expand(5, -1, -1)
+    target = symlog((p @ R.transpose(1, 2) + t[:, None] - p).flatten(1) * 1000)
+    R2, t2 = label_motion(target)
+    assert torch.allclose(R, R2, atol=1e-4) and torch.allclose(t, t2, atol=1e-6)
+    assert torch.allclose(symexp(symlog(torch.tensor([-30.0, 0.1, 5.0]))), torch.tensor([-30.0, 0.1, 5.0]), atol=1e-5)

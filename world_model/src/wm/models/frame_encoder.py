@@ -12,8 +12,9 @@ structure. So: no UNet, no crops, no decoder, no reconstruction target.
                    (ch, 20, 20) or (ch, 10, 10) whose scale is fixed, which is what the world model predicts and
                    what every policy reads.
     LabelHead      training only: from the feature map (+ the camera geometry, to speak in port axes) the remaining
-                   rigid motion of the hand to its inserted pose (translation mm, rotation vector deg; label = FK of
-                   the grasp's one insertion, geometry.insertion_motion) and "inserted now" (the contact switch).
+                   rigid motion to the inserted pose (label = FK of the grasp's one insertion,
+                   geometry.insertion_motion; how it is written: label_targets below) and "inserted now" (the contact
+                   switch).
                    It keeps the encoder from collapsing when it is trained together with the world model and makes
                    it look at where the plug is relative to the hole. It is not used by anything afterwards.
 """
@@ -46,14 +47,14 @@ def matrix_from_rotvec(w: torch.Tensor) -> torch.Tensor:
 class FrameEncoder(nn.Module):
     def __init__(self, ch: int = 16, stride: int = 16, pretrained: bool = True, arch: str = "resnet34"):
         super().__init__()
-        assert stride in (16, 32) and arch in ("resnet18", "resnet34", "resnet50")
+        assert stride in (8, 16, 32) and arch in ("resnet18", "resnet34", "resnet50")
         r = getattr(torchvision.models, arch)(weights="IMAGENET1K_V1" if pretrained else None)
-        width = (2048 if stride == 32 else 1024) if arch == "resnet50" else (512 if stride == 32 else 256)
+        width = {8: 128, 16: 256, 32: 512}[stride] * (4 if arch == "resnet50" else 1)
         w = r.conv1.weight.data
         r.conv1 = nn.Conv2d(5, 64, 7, 2, 3, bias=False)
         nn.init.kaiming_normal_(r.conv1.weight)
         r.conv1.weight.data[:, :3] = w
-        layers = [r.conv1, r.bn1, r.relu, r.maxpool, r.layer1, r.layer2, r.layer3] + ([r.layer4] if stride == 32 else [])
+        layers = [r.conv1, r.bn1, r.relu, r.maxpool, r.layer1, r.layer2] + ([r.layer3] if stride >= 16 else []) + ([r.layer4] if stride == 32 else [])
         self.net = nn.Sequential(*layers)
         self.proj = nn.Conv2d(width, ch, 1)
         self.ch, self.stride, self.grid, self.arch = ch, stride, IMG // stride, arch
@@ -84,26 +85,65 @@ class LabelHead(nn.Module):
         self.pos = nn.Parameter(torch.randn(grid * grid, d) * 0.02)
         self.enc = nn.TransformerEncoder(nn.TransformerEncoderLayer(d, heads, 2 * d, batch_first=True, norm_first=True), layers)
         self.geom = nn.Sequential(nn.Linear(9, 64), nn.SiLU())
-        self.out = nn.Sequential(nn.LayerNorm(d + 64), nn.Linear(d + 64, 256), nn.SiLU(), nn.Linear(256, 7))
+        self.out = nn.Sequential(nn.LayerNorm(d + 64), nn.Linear(d + 64, 256), nn.SiLU(), nn.Linear(256, LABEL_DIM + 1))
 
     def forward(self, feat: torch.Tensor, geom: torch.Tensor) -> torch.Tensor:
-        """feat (B, ch, H, W), geom (B, 9) (encoder.geometry_features) -> (B, 7): translation mm (3), rotation vector
-        deg (3), "inserted now" logit."""
+        """feat (B, ch, H, W), geom (B, 9) (encoder.geometry_features) -> (B, LABEL_DIM + 1): the remaining motion of
+        the reference points (compressed, label_targets) and the "inserted now" logit."""
         x = self.enc(self.inp(feat.flatten(2).transpose(1, 2)) + self.pos).mean(1)
         return self.out(torch.cat([x, self.geom(geom)], -1))
 
 
+# The label, written so that fractions of a millimetre near the hole count (measured 2026-11-12: with translation in mm
+# and rotation in deg as two L1 targets over all frames, the far frames' large values ran the training and the tip
+# across the axis was read to 0.53-0.67 mm within 1 mm, worse than blind 0.45):
+#   reference points  the remaining rigid motion (R*, t*) is given as where 4 fixed points move: the centre of the
+#                     reference cube where the plug sits (geometry.plug_region_points) and that centre + 1 cm along each
+#                     port axis; the same for every shape and grasp -- a ruler, not a measured plug location. Translation
+#                     and rotation are then one quantity, in millimetres, at the place the image shows.
+#   compression       symlog with a 1 mm scale: sign(x) ln(1 + |x| / 1 mm). Near zero it is x itself (0.1 mm stays 0.1);
+#                     30 mm becomes 3.4.
+REF_POINTS = torch.tensor([[0.02, 0.0, 0.0], [0.03, 0.0, 0.0], [0.02, 0.01, 0.0], [0.02, 0.0, 0.01]])
+LABEL_DIM = 12
+
+
+def symlog(x: torch.Tensor) -> torch.Tensor:
+    return torch.sign(x) * torch.log1p(x.abs())
+
+
+def symexp(y: torch.Tensor) -> torch.Tensor:
+    return torch.sign(y) * torch.expm1(y.abs())
+
+
 def label_targets(hand: torch.Tensor, h_star: torch.Tensor, R_P: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """-> (R*, t* [m], target (B, 6) = t* in mm and the rotation vector of R* in deg)."""
-    from ..geometry import insertion_motion
+    """-> (R*, t* [m], target (B, 12) = symlog of the 4 reference points' remaining motion in mm)."""
+    from ..geometry import apply_rigid, insertion_motion
     R, t = insertion_motion(hand.float(), h_star.float(), R_P.float())
-    return R, t, torch.cat([t * 1000, torch.rad2deg(rotvec_from_matrix(R))], 1)
+    p = REF_POINTS.to(R.device)[None].expand(R.shape[0], -1, -1)
+    return R, t, symlog((apply_rigid(p, R, t) - p).flatten(1) * 1000)
 
 
-def label_loss(pred: torch.Tensor, target: torch.Tensor, inserted: torch.Tensor, w_rot: float = 0.5, w_ins: float = 1.0) -> dict:
-    """Smooth L1 on the translation (mm) and the rotation (deg), cross-entropy on "inserted now"."""
+def label_motion(pred: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """A label-head output (or a target) -> the rigid motion (R, t [m]) that moves the reference points as it says."""
+    from ..geometry import weighted_rigid_fit
+    p = REF_POINTS.to(pred.device)[None].expand(pred.shape[0], -1, -1)
+    q = p + symexp(pred.float()[:, :LABEL_DIM]).unflatten(1, (4, 3)) / 1000
+    return weighted_rigid_fit(p, q, torch.ones(pred.shape[0], 4, device=pred.device))
+
+
+def centre_lateral_mm(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Error (mm) across the insertion axis of the reference centre's remaining motion; target from label_targets."""
+    return (symexp(pred.float()[:, 1:3]) - symexp(target[:, 1:3])).norm(dim=-1)
+
+
+def label_loss(pred: torch.Tensor, target: torch.Tensor, inserted: torch.Tensor, w_ins: float = 1.0,
+               close_weight: float = 0.0) -> dict:
+    """Smooth L1 on the compressed point motions, cross-entropy on "inserted now". `close_weight`: frames whose reference
+    centre is within 3 mm of where it ends across the axis count 1 + close_weight times."""
     pred = pred.float()
-    lt = F.smooth_l1_loss(pred[:, :3], target[:, :3])
-    lr = F.smooth_l1_loss(pred[:, 3:6], target[:, 3:])
-    li = F.binary_cross_entropy_with_logits(pred[:, 6], inserted.float())
-    return {"label": lt + w_rot * lr + w_ins * li, "label_t_mm": lt, "label_rot_deg": lr, "label_inserted_bce": li}
+    per = F.smooth_l1_loss(pred[:, :LABEL_DIM], target, beta=0.05, reduction="none").mean(1)
+    w = 1 + close_weight * (symexp(target[:, 1:3]).norm(dim=-1) < 3.0).float()
+    lm = (per * w).sum() / w.sum()
+    li = F.binary_cross_entropy_with_logits(pred[:, LABEL_DIM], inserted.float())
+    return {"label": lm + w_ins * li, "label_motion": lm, "label_centre_lateral_mm": centre_lateral_mm(pred, target).mean().detach(),
+            "label_inserted_bce": li}

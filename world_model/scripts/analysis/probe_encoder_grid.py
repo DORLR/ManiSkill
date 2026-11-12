@@ -20,7 +20,7 @@ from wm.data.datasets import FrameDataset
 from wm.data.outcome import inserted
 from wm.geometry import apply_rigid
 from wm.models.encoder import geometry_features
-from wm.models.frame_encoder import FrameEncoder, LabelHead, label_loss, label_targets, matrix_from_rotvec
+from wm.models.frame_encoder import LABEL_DIM, FrameEncoder, LabelHead, label_loss, label_motion, label_targets
 from wm.perception.labels import load_geometry, pose7_to_T
 from wm.training.common import limit_gpu_memory, to_device
 from wm.training.wm4 import mixed_batches
@@ -29,6 +29,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--stride", type=int, default=16)
 ap.add_argument("--ch", type=int, default=16)
 ap.add_argument("--arch", default="resnet34")
+ap.add_argument("--close-weight", type=float, default=0.0)
 ap.add_argument("--steps", type=int, default=6000)
 ap.add_argument("--batch", type=int, default=64)
 ap.add_argument("--out", required=True)
@@ -82,7 +83,7 @@ for step in range(1, args.steps + 1):
     _, _, target = label_targets(b["hand"], b["h_star"], b["R_P"])
     with torch.autocast("cuda", dtype=torch.bfloat16):
         pred = head(enc(b["rgb"], b["depth"]), geometry_features(b["cam_T_world"].float(), b["hand"].float(), b["R_P"].float()))
-    l = label_loss(pred, target, b["inserted"])
+    l = label_loss(pred, target, b["inserted"], close_weight=args.close_weight)
     opt.zero_grad(set_to_none=True)
     l["label"].backward()
     torch.nn.utils.clip_grad_norm_(list(enc.parameters()) + list(head.parameters()), 5.0)
@@ -106,8 +107,8 @@ with torch.no_grad():
             pred = head(f, geometry_features(b["cam_T_world"].float(), b["hand"].float(), b["R_P"].float())).float()
         p = b["tip"][:, None]
         true = (apply_rigid(p, R_s, t_s) - p)[:, 0] * 1000
-        got = (apply_rigid(p, matrix_from_rotvec(torch.deg2rad(pred[:, 3:6])), pred[:, :3] / 1000) - p)[:, 0] * 1000
-        rows.append(torch.cat([t_s.norm(dim=-1, keepdim=True) * 1000, true, got, pred[:, 6:7], b["inserted"].float()[:, None]], 1).cpu().numpy())
+        got = (apply_rigid(p, *label_motion(pred)) - p)[:, 0] * 1000
+        rows.append(torch.cat([t_s.norm(dim=-1, keepdim=True) * 1000, true, got, pred[:, LABEL_DIM:LABEL_DIM + 1], b["inserted"].float()[:, None]], 1).cpu().numpy())
         if i < 20:
             feats.append(f.float().flatten(2).transpose(1, 2).cpu())
 X = np.concatenate(rows)
@@ -116,7 +117,7 @@ lat = np.linalg.norm(mt[:, 1:], axis=1)
 z = torch.cat(feats).double()                                              # (N, tokens, C)
 r = z - z.mean(0)
 pos_, neg_ = logit[ins], logit[~ins]
-rep = {"arch": args.arch, "stride": args.stride, "ch": args.ch, "grid": enc.grid, "values_per_frame": enc.grid ** 2 * args.ch, "steps": args.steps,
+rep = {"arch": args.arch, "stride": args.stride, "ch": args.ch, "close_weight": args.close_weight, "grid": enc.grid, "values_per_frame": enc.grid ** 2 * args.ch, "steps": args.steps,
        "frames": int(len(X)),
        "inserted_auc": round(float((pos_[:, None] > neg_[None]).mean()), 4) if len(pos_) and len(neg_) else None,
        "feature_variation_specific_to_a_position_pct": round(float(100 * (r - r.mean(1, keepdim=True)).pow(2).sum() / r.pow(2).sum()), 1)}
