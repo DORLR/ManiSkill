@@ -26,7 +26,7 @@ case (free-space motion; its authors exclude contact-rich tasks). So the adapter
 With `outcome` (2026-11-11 evening, decided with the user) it also gets the success classifier's decision
 "inserted within its horizon" as a 0/1 input: the true label when training, the classifier's (calibrated) output
 against one random threshold per imagined episode in imagination (imagination4.py). Without it a stuck plug is
-not an equilibrium in imagination: the regression lets the hand cover about 30 % of every commanded advance, the
+not an equilibrium in imagination: the regression lets the hand advance about 60 % of every commanded lead (0.37 of 0.58 mm per 0.4 s), the
 policy re-bases its targets on the new joints, and the hand creeps 16 mm in 16 s where the real one moves 0.05 mm.
 
 It is called at image steps only (one decision = 0.4 s = 8 commands starts at an image). The history encoder is
