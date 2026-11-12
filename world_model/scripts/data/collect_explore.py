@@ -44,11 +44,13 @@ def main():
     ap.add_argument("--max-grasps", type=int)
     ap.add_argument("--seed", type=int, default=6_000_000)
     ap.add_argument("--contact", action="store_true")
+    ap.add_argument("--every", type=int, default=1, help="diagnostics: every n-th grasp only")
     args = ap.parse_args()
     out = Path(args.out)
     gs = [json.loads(Path(f).read_text()) for f in sorted(glob.glob(f"{args.grasps}/*/*/grasp.json"))]
     gs = [g for g in gs if g.get("reference_ok") and split_of(g["port"], g["condition"]) == args.split
           and (not args.only or g["port"] in args.only) and not (out / g["port"] / g["grasp"] / "grasp.json").exists()]
+    gs = gs[::args.every]
     if args.max_grasps:
         gs = gs[:args.max_grasps]
     gs.sort(key=lambda g: g["port"])

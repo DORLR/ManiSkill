@@ -13,8 +13,9 @@ Validation on ood_val per data source; model selection / harm-only early stop on
 (grid + w_angle * angle) averaged over the sources.
 
 v5 (config keys `unet`, `key_weight`, loss weights `edge` / `lpips`, `selection`), why: measured on crop_ae_v4e,
-the reconstructions lose the pins' edges and the openings. The RGB term was a plain pixel mean (the openings are
-a few dozen of 16 384 pixels) and about 4 % of the total loss, whose gradient is clipped all the time.
+the reconstructions lose the pins' edges and the openings. The RGB term was a plain pixel mean (the visible openings
+are 120-190 of the crop's 16 384 pixels at the median, about 1 %; UNet masks on held-out frames) and about 4 % of the
+total loss, whose gradient is clipped all the time.
     key pixels  the frozen UNet's predicted pins and openings (dilated), the same real-robot quantity that places
                 the crops; their RGB error counts `1 + key_weight` times (rgb_w; rgb_l1 stays the plain mean)
     edge_l1     L1 between the horizontal / vertical pixel differences of the reconstruction and of the image

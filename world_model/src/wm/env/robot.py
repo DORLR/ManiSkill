@@ -34,7 +34,11 @@ from paf import env_adapter as _ea  # noqa: E402
 
 MAX_EPISODE_STEPS = 1_000_000
 DEPTH_UNIT_M = 1e-4               # stored depth unit: 0.1 mm (D405 default)
-CROP = _C.REL_CROP                # rows r0:r1, cols c0:c1 -> 320 x 320 around pins and holes
+# WM_CAM_SCALE=2 (diagnostics only, scripts/analysis/probe_resolution.py): the same camera and field of view rendered
+# at 1280 x 960 instead of 640 x 480, and the same region cut as 640 x 640. The real D405 has a 1280 x 720 stream with
+# this horizontal field of view; its rows end 60 (low-resolution) rows above the bottom of the 320 crop.
+CAM_SCALE = int(os.environ.get("WM_CAM_SCALE", "1"))
+CROP = tuple(CAM_SCALE * v for v in _C.REL_CROP)   # rows r0:r1, cols c0:c1 -> 320 x 320 around pins and holes
 DEPTH_MIN_M = _C.DEPTH_MIN_MM / 1000.0
 _FLOAT_SHADER = os.path.join(os.path.dirname(sapien.__file__), "vulkan_shader", "default")
 
@@ -63,6 +67,9 @@ class Robot(_ea.Robot):
 
     def __init__(self, port_type: str, seed: int = 10043):  # parent init not called on purpose
         self.port_type = port_type
+        if CAM_SCALE != 1:                               # runtime override of the stream, as paf.env_adapter does
+            _ea._envmod._native_rgb256_config = lambda cfg: {"hand_camera": dict(
+                width=_C.CAM_W * CAM_SCALE, height=_C.CAM_H * CAM_SCALE, fov=_ea._FOVY)}
         self.env = gym.make(_ea.ENV_ID, port_type=port_type, obs_mode="state", seed=seed,
                             max_episode_steps=MAX_EPISODE_STEPS)
         self.base = self.env.unwrapped
