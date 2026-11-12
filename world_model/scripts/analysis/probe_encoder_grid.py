@@ -7,6 +7,14 @@ exploration frames exactly as the autoencoders were (check_ae_tips.py): the pin 
 axis, by distance left and offset. References measured 2026-11-12, pins at the board face, tip within 1 mm / 3 mm:
 blind 0.41-0.45 / 1.16-1.18, crop_ae_v4e decoder 0.39 / 0.53, a ResNet-18 of its own on the two crops 0.22 / 0.27.
 A measurement to choose the feature-map size; the trained weights are not kept for anything.
+
+Second use (2026-11-12, after the label head read the tip to 0.34-0.40 / 0.65-0.70 mm against 0.22 / 0.27 of the dedicated
+reader): which difference from that reader costs the precision? One step at a time, from what works to the encoder as used:
+    --sources explore|all     the data it is trained on
+    --target tip|label        tip: the true tip's motion across the axis (2 numbers, frames within 6 mm; simulator truth, a
+                              diagnosis); label: the FK label as reference-point motions (what the encoder may be given)
+    --reader pooled|map       pooled: the ResNet's own features averaged over the image (no feature map in between);
+                              map: the label head on the (ch, grid, grid) feature map, as in training
 """
 import argparse
 import json
@@ -30,6 +38,9 @@ ap.add_argument("--stride", type=int, default=16)
 ap.add_argument("--ch", type=int, default=16)
 ap.add_argument("--arch", default="resnet34")
 ap.add_argument("--close-weight", type=float, default=0.0)
+ap.add_argument("--sources", default="all", choices=["all", "explore"])
+ap.add_argument("--target", default="label", choices=["label", "tip"])
+ap.add_argument("--reader", default="map", choices=["map", "pooled"])
 ap.add_argument("--steps", type=int, default=6000)
 ap.add_argument("--batch", type=int, default=64)
 ap.add_argument("--out", required=True)
@@ -70,20 +81,45 @@ class LabelFrames(FrameDataset):
         return out
 
 
+if args.sources == "explore":
+    args.data, args.weights = [args.eval_data], [1.0]
 enc = FrameEncoder(ch=args.ch, stride=args.stride, arch=args.arch).to(dev)
 head = LabelHead(args.ch, enc.grid).to(dev)
+if args.reader == "pooled":                       # the ResNet's features before the 1 x 1 projection, averaged
+    import torch.nn as nn
+    width = enc.proj.in_channels
+    pooled = nn.Sequential(nn.Linear(width + 9, 256), nn.SiLU(), nn.Linear(256, 13)).to(dev)
+
+    class _Pooled(nn.Module):
+        def forward(self, feat, geom):
+            return pooled(torch.cat([feat, geom], -1))
+    head = _Pooled().to(dev)
+    head.add_module("mlp", pooled)
+    enc_map = enc.forward
+    enc.forward = lambda rgb, depth: enc.net(torch.cat([(rgb.permute(0, 3, 1, 2).float() / 255.0 - enc.mean) / enc.std,
+                                                        depth.float()[:, None] * 5e-4, (depth > 0).float()[:, None]], 1)).mean((2, 3))
+
+
+def tip_motion(b, R_s, t_s):
+    p = b["tip"][:, None]
+    return (apply_rigid(p, R_s, t_s) - p)[:, 0] * 1000            # mm, (along, y, z)
 opt = torch.optim.AdamW(list(enc.parameters()) + list(head.parameters()), lr=3e-4, weight_decay=0.01)
 sched = torch.optim.lr_scheduler.OneCycleLR(opt, 3e-4, total_steps=args.steps, pct_start=0.1)
-loaders = [DataLoader(LabelFrames(d, "train"), batch_size=args.batch, shuffle=True, drop_last=True, num_workers=4, persistent_workers=True)
+loaders = [DataLoader(LabelFrames(d, "train", tip=args.target == "tip"), batch_size=args.batch, shuffle=True, drop_last=True, num_workers=4, persistent_workers=True)
            for d in args.data]
 batches = mixed_batches(loaders, args.weights, 0)
 enc.train(), head.train()
 for step in range(1, args.steps + 1):
     b = to_device(next(batches), dev)
-    _, _, target = label_targets(b["hand"], b["h_star"], b["R_P"])
+    R_s, t_s, target = label_targets(b["hand"], b["h_star"], b["R_P"])
     with torch.autocast("cuda", dtype=torch.bfloat16):
         pred = head(enc(b["rgb"], b["depth"]), geometry_features(b["cam_T_world"].float(), b["hand"].float(), b["R_P"].float()))
-    l = label_loss(pred, target, b["inserted"], close_weight=args.close_weight)
+    if args.target == "tip":
+        true = tip_motion(b, R_s, t_s)[:, 1:]
+        keep = true.norm(dim=-1) <= 6.0
+        l = {"label": torch.nn.functional.smooth_l1_loss(pred.float()[keep, :2], true[keep])}
+    else:
+        l = label_loss(pred, target, b["inserted"], close_weight=args.close_weight)
     opt.zero_grad(set_to_none=True)
     l["label"].backward()
     torch.nn.utils.clip_grad_norm_(list(enc.parameters()) + list(head.parameters()), 5.0)
@@ -107,20 +143,21 @@ with torch.no_grad():
             pred = head(f, geometry_features(b["cam_T_world"].float(), b["hand"].float(), b["R_P"].float())).float()
         p = b["tip"][:, None]
         true = (apply_rigid(p, R_s, t_s) - p)[:, 0] * 1000
-        got = (apply_rigid(p, *label_motion(pred)) - p)[:, 0] * 1000
+        got = (apply_rigid(p, *label_motion(pred)) - p)[:, 0] * 1000 if args.target == "label" else torch.cat([true[:, :1], pred[:, :2]], 1)
         rows.append(torch.cat([t_s.norm(dim=-1, keepdim=True) * 1000, true, got, pred[:, LABEL_DIM:LABEL_DIM + 1], b["inserted"].float()[:, None]], 1).cpu().numpy())
-        if i < 20:
+        if i < 20 and f.dim() == 4:
             feats.append(f.float().flatten(2).transpose(1, 2).cpu())
 X = np.concatenate(rows)
 dist, mt, mp, logit, ins = X[:, 0], X[:, 1:4], X[:, 4:7], X[:, 7], X[:, 8] > 0.5
 lat = np.linalg.norm(mt[:, 1:], axis=1)
-z = torch.cat(feats).double()                                              # (N, tokens, C)
+z = torch.cat(feats).double() if feats else torch.zeros(2, 2, 1, dtype=torch.double)   # (N, tokens, C)
 r = z - z.mean(0)
 pos_, neg_ = logit[ins], logit[~ins]
-rep = {"arch": args.arch, "stride": args.stride, "ch": args.ch, "close_weight": args.close_weight, "grid": enc.grid, "values_per_frame": enc.grid ** 2 * args.ch, "steps": args.steps,
+rep = {"arch": args.arch, "stride": args.stride, "ch": args.ch, "close_weight": args.close_weight, "sources": args.sources,
+       "target": args.target, "reader": args.reader, "grid": enc.grid, "values_per_frame": enc.grid ** 2 * args.ch, "steps": args.steps,
        "frames": int(len(X)),
        "inserted_auc": round(float((pos_[:, None] > neg_[None]).mean()), 4) if len(pos_) and len(neg_) else None,
-       "feature_variation_specific_to_a_position_pct": round(float(100 * (r - r.mean(1, keepdim=True)).pow(2).sum() / r.pow(2).sum()), 1)}
+       "feature_variation_specific_to_a_position_pct": round(float(100 * (r - r.mean(1, keepdim=True)).pow(2).sum() / r.pow(2).sum().clamp(min=1e-9)), 1)}
 for lo, hi, lab in ((0, 5, "<5 mm left"), (5, 13, "5-13 mm"), (13, 17, "pins at the face"), (17, 1e9, ">17 mm")):
     for sub, sel in (("tip within 0.5 mm", lat <= 0.5), ("tip within 1 mm", lat <= 1.0), ("tip within 3 mm", lat <= 3.0)):
         m = (dist >= lo) & (dist < hi) & sel
