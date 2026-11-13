@@ -48,6 +48,16 @@ ap.add_argument("--hold", type=float, default=6.0)
 ap.add_argument("--max-traj", type=int, default=128)
 ap.add_argument("--batch", type=int, default=32)
 ap.add_argument("--sampling-steps", type=int, default=20)
+ap.add_argument("--force-pressed", type=int, default=None, choices=[0, 1],
+                help="control arm (2026-11-13): the pressed bit given to the model is set to this value at every step instead of "
+                     "carrying the model's own output -- does the bit alone decide whether the hand holds?")
+ap.add_argument("--freeze-command", action="store_true",
+                help="control arm: the command stays at the START position + lead instead of following the imagined hand -- "
+                     "separates the feedback of a command that follows the imagined hand from what the model does under a "
+                     "constant lead")
+ap.add_argument("--real-features", action="store_true",
+                help="control arm: after every step the newest image slot gets the real start frame's features again (the real "
+                     "hand does not move in these states, so that is what the camera would show); the hand stays imagined")
 args = ap.parse_args()
 limit_gpu_memory()
 torch.manual_seed(0)
@@ -109,6 +119,7 @@ for a0 in range(0, len(starts), args.batch):
     axis = np.stack([s["R_P"][:, 0] for s in S])
     start = im.meas[:, -1].copy()
     R_cmd = im.cmd[:, -1, :3, :3].copy()
+    z_real = im.z[:, -1].clone()
     along = lambda P: np.einsum("bi,bi->b", P[:, :3, 3] - start[:, :3, 3], axis) * 1000
     prev = np.zeros(B)
     for k in range(1, args.steps + 1):
@@ -120,7 +131,13 @@ for a0 in range(0, len(starts), args.batch):
         if args.next_first == "from_hand":
             ramp[8] = 1 / 8.0
         cmd9[:, :, :3, 3] += ramp[None, :, None] * (args.lead_mm / 1000) * axis[:, None, :]
+        if args.freeze_command:
+            cmd9[:, :, :3, 3] = start[:, None, :3, 3] + (args.lead_mm / 1000) * axis[:, None, :]
+        if args.force_pressed is not None:
+            im.state[:, 0] = args.force_pressed
         out = im.step(cmd9)
+        if args.real_features:
+            im.z[:, -1] = z_real
         now = along(out["hand"])
         per_dec.append(now - prev)
         prev = now
@@ -134,6 +151,7 @@ PR = np.concatenate([np.stack(prs_steps[i * args.steps:(i + 1) * args.steps], 1)
 rep = {"checkpoint": args.ckpt, "checkpoint_step": int(ck["step"]), "start_states": len(starts), "lead_mm": args.lead_mm,
        "start_states_pressed_by_the_rule_pct": round(100 * float(np.mean([s["state"][0] for s in starts])), 1),
        "orientation": args.orientation, "next_first": args.next_first,
+       "force_pressed": args.force_pressed, "freeze_command": args.freeze_command, "real_features": args.real_features,
        "real_hand_in_these_states": "moved under 0.3 mm in the next %.0f s (selection)" % args.hold,
        "advance_per_decision_mm": {"mean": round(float(D.mean()), 4), "median": round(float(np.median(D)), 4), "p90_abs": round(float(np.percentile(np.abs(D), 90)), 4)}}
 for sec in (2, 4, 8, 16):
@@ -145,4 +163,16 @@ for sec in (2, 4, 8, 16):
                            "says_pressed_pct": round(100 * float((PR[:, k] > 0.5).mean()), 1)}
         print(f"+{sec}s", rep[f"+{sec}s"], flush=True)
 print("per decision", rep["advance_per_decision_mm"], flush=True)
+bit = np.array([bool(s["state"][0]) for s in starts])
+q = lambda v: {"n": int(len(v)), "median": round(float(np.median(v)), 3), "p10": round(float(np.percentile(v, 10)), 3),
+               "p90": round(float(np.percentile(v, 90)), 3)} if len(v) else {"n": 0}
+flip = np.where((PR < 0.5).any(1), (PR < 0.5).argmax(1), args.steps)          # first decision at which the model says "not pressed"
+before = np.array([M[i, flip[i] - 1] if flip[i] > 0 else 0.0 for i in range(len(M))])
+rep["by_start_bit"] = {"pressed_by_the_rule": {"travel_end_mm": q(M[bit, -1]), "says_pressed_end_pct": round(100 * float((PR[bit, -1] > 0.5).mean()), 1) if bit.any() else None,
+                                               "first_not_pressed_decision": q(flip[bit]), "travel_before_first_not_pressed_mm": q(before[bit]),
+                                               "advance_per_decision_while_says_pressed_mm": round(float(D[bit][np.concatenate([np.ones((bit.sum(), 1), bool), PR[bit, :-1] > 0.5], 1)].mean()), 4) if bit.any() else None},
+                       "not_pressed_by_the_rule": {"travel_end_mm": q(M[~bit, -1]), "says_pressed_end_pct": round(100 * float((PR[~bit, -1] > 0.5).mean()), 1) if (~bit).any() else None,
+                                                   "says_pressed_ever_pct": round(100 * float((PR[~bit] > 0.5).any(1).mean()), 1) if (~bit).any() else None}}
+print("by start bit", rep["by_start_bit"], flush=True)
+np.savez_compressed(args.out.replace(".json", "_cases.npz"), moved_mm=M, per_decision_mm=D, p_pressed=PR, p_inserted=P, start_pressed=bit)
 json.dump(rep, open(args.out, "w"), indent=1)
