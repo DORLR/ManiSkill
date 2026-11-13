@@ -40,7 +40,7 @@ class HistoryCDiT(CDiT):
     avail (B,HIST) bool slot exists (after the trajectory start), rel_t (B,) s, ctx_noise (B,)."""
 
     def __init__(self, latent_ch: int = 16, size: str = "S", n_tokens: int = GRID * GRID, feature_map: int | None = None,
-                 patch: int = 2, aux_dim: int = 0):
+                 patch: int = 2, aux_dim: int = 0, state_dim: int = 0):
         # v5 latents: 128 tokens = (16, 8) grid, the plug crop's 8 x 8 region tokens above the opening crop's; CDiT's
         # patch embedding (patch size 1) and its learned position embedding (one per token) take that as they are
         # v6 (`feature_map`): the frame encoder's feature map (latent_ch, feature_map, feature_map) is the image, cut
@@ -62,6 +62,8 @@ class HistoryCDiT(CDiT):
         h = SIZES[size]["hidden_size"]
         self.aux_head = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, 256), nn.SiLU(), nn.Linear(256, aux_dim)) if aux_dim else None
         self.aux = None
+        # v6c: the contact state now (pressed, inserted; data/frame_history.py) joins the conditioning vector
+        self.state_embedder = nn.Sequential(nn.Linear(state_dim, h), nn.SiLU(), nn.Linear(h, h)) if state_dim else None
         self.hidden = h
         self.y_embedder = ConditionEmbedder(PATH_DIM, h)
         self.slot_time = TimestepEmbedder(h)
@@ -83,10 +85,12 @@ class HistoryCDiT(CDiT):
         ignore = torch.cat([(~seen).repeat_interleave(self.n_tokens, 1), ~avail], 1)
         return keys, ignore
 
-    def forward(self, x, t, path, z_hist, seen, proprio, dt, avail, rel_t, ctx_noise=None):
+    def forward(self, x, t, path, z_hist, seen, proprio, dt, avail, rel_t, ctx_noise=None, state=None):
         x = self.x_embedder(x) + self.pos_embed[self.context_size:]
         keys, ignore = self.context(z_hist, seen, proprio, dt, avail)
         c = self.t_embedder(t[..., None]) + self.time_embedder(rel_t[..., None]) + self.y_embedder(path)
+        if self.state_embedder is not None:
+            c = c + self.state_embedder(state.to(c.dtype))
         if ctx_noise is None:
             ctx_noise = torch.zeros_like(rel_t)
         c = c + self.noise_embedder(ctx_noise[..., None] * 1000)

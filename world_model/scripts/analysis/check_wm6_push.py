@@ -24,7 +24,9 @@ from PIL import Image
 
 from wm.data import index, schema
 from wm.data.datasets import port_axes_ok
+from wm.data.frame_history import pressed_at
 from wm.data.history import HIST
+from wm.data.outcome import inserted as inserted_now
 from wm.imagination6 import FeatureImagination
 from wm.training.common import limit_gpu_memory
 from wm.training.joint import load_joint
@@ -75,7 +77,8 @@ for e in [e for e in index.load(args.data) if e["split"] == "ood_val" and port_a
         d = {k: f[k] for k in ("depth", "rgb_jpeg", "rgb_offsets")}
     with np.load(str(e["path"]).replace(args.data, args.data + "_ee")) as g:
         cmd = g["hand_cmd"].astype(np.float64)
-    starts.append({"d": d, "steps": steps, "hand": hand, "cmd": cmd, "j0": j0, "R_P": np.asarray(e["R_P"], np.float64)})
+    starts.append({"d": d, "steps": steps, "hand": hand, "cmd": cmd, "j0": j0, "R_P": np.asarray(e["R_P"], np.float64),
+                   "state": [pressed_at(hand, cmd, int(steps[j0]), a), False]})
     if len(starts) >= args.max_traj:
         break
 print("pressed start states:", len(starts), "| checkpoint step", ck["step"], flush=True)
@@ -88,7 +91,7 @@ def frames(s, idx):
         return enc(T(rgb, torch.uint8), T(d["depth"][idx].astype(np.int32), torch.int32)).float()
 
 
-moved, per_dec, p_ins = [], [], []
+moved, per_dec, p_ins, prs_steps = [], [], [], []
 for a0 in range(0, len(starts), args.batch):
     S = starts[a0:a0 + args.batch]
     B = len(S)
@@ -101,7 +104,8 @@ for a0 in range(0, len(starts), args.batch):
         z[torch.from_numpy(~avail)] = 0
         st = s["steps"][sl]
         zs.append(z), seens.append(avail), meas.append(s["hand"][st]), cmds.append(s["cmd"][np.clip(st, 0, len(s["cmd"]) - 1)])
-    im.reset(torch.stack(zs), np.stack(seens), np.stack(seens), np.stack(meas), np.stack(cmds), np.stack([s["R_P"] for s in S]))
+    im.reset(torch.stack(zs), np.stack(seens), np.stack(seens), np.stack(meas), np.stack(cmds), np.stack([s["R_P"] for s in S]),
+             np.array([s["state"] for s in S], np.float32))
     axis = np.stack([s["R_P"][:, 0] for s in S])
     start = im.meas[:, -1].copy()
     R_cmd = im.cmd[:, -1, :3, :3].copy()
@@ -120,13 +124,15 @@ for a0 in range(0, len(starts), args.batch):
         now = along(out["hand"])
         per_dec.append(now - prev)
         prev = now
-        moved.append(now.copy()), p_ins.append(out["p_inserted"].copy())
+        moved.append(now.copy()), p_ins.append(out["p_inserted"].copy()), prs_steps.append(out["p_pressed"].copy())
     print(f"pushed {a0 + B}/{len(starts)}", flush=True)
 n_b = int(np.ceil(len(starts) / args.batch))
 M = np.concatenate([np.stack(moved[i * args.steps:(i + 1) * args.steps], 1) for i in range(n_b)])       # (N, steps)
 P = np.concatenate([np.stack(p_ins[i * args.steps:(i + 1) * args.steps], 1) for i in range(n_b)])
 D = np.concatenate([np.stack(per_dec[i * args.steps:(i + 1) * args.steps], 1) for i in range(n_b)])
+PR = np.concatenate([np.stack(prs_steps[i * args.steps:(i + 1) * args.steps], 1) for i in range(n_b)])
 rep = {"checkpoint": args.ckpt, "checkpoint_step": int(ck["step"]), "start_states": len(starts), "lead_mm": args.lead_mm,
+       "start_states_pressed_by_the_rule_pct": round(100 * float(np.mean([s["state"][0] for s in starts])), 1),
        "orientation": args.orientation, "next_first": args.next_first,
        "real_hand_in_these_states": "moved under 0.3 mm in the next %.0f s (selection)" % args.hold,
        "advance_per_decision_mm": {"mean": round(float(D.mean()), 4), "median": round(float(np.median(D)), 4), "p90_abs": round(float(np.percentile(np.abs(D), 90)), 4)}}
@@ -135,7 +141,8 @@ for sec in (2, 4, 8, 16):
     if k < args.steps:
         rep[f"+{sec}s"] = {"imagined_hand_moved_mm": {"mean": round(float(M[:, k].mean()), 3), "median": round(float(np.median(M[:, k])), 3),
                                                       "p90": round(float(np.percentile(M[:, k], 90)), 3), "max": round(float(M[:, k].max()), 3)},
-                           "says_inserted_pct": round(100 * float((P[:, k] > 0.5).mean()), 1), "mean_p_inserted": round(float(P[:, k].mean()), 3)}
+                           "says_inserted_pct": round(100 * float((P[:, k] > 0.5).mean()), 1), "mean_p_inserted": round(float(P[:, k].mean()), 3),
+                           "says_pressed_pct": round(100 * float((PR[:, k] > 0.5).mean()), 1)}
         print(f"+{sec}s", rep[f"+{sec}s"], flush=True)
 print("per decision", rep["advance_per_decision_mm"], flush=True)
 json.dump(rep, open(args.out, "w"), indent=1)

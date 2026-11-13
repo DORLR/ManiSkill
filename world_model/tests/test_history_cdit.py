@@ -55,15 +55,31 @@ def test_v6_encoder_and_world_model_shapes():
     assert f.shape == (2, 16, 20, 20)
     assert torch.allclose(f.mean(1), torch.zeros(2, 20, 20), atol=1e-4) and torch.allclose(f.var(1, unbiased=False), torch.ones(2, 20, 20), atol=1e-2)
     assert LabelHead(16, 20)(f, torch.randn(2, 9)).shape == (2, 13)
-    wm = HistoryCDiT(latent_ch=16, size="S", feature_map=20, patch=2, aux_dim=19).eval()
+    wm = HistoryCDiT(latent_ch=16, size="S", feature_map=20, patch=2, aux_dim=20, state_dim=2).eval()
     B, S = 2, 32
     z = torch.zeros(B, S, 16, 20, 20)
     z[:, -1] = f.detach()
     seen = torch.zeros(B, S, dtype=torch.bool)
     seen[:, -1] = True
     out = wm(torch.randn(B, 16, 20, 20), torch.randint(0, 1000, (B,)), torch.randn(B, 144), z, seen, torch.randn(B, S, 18),
-             -torch.rand(B, S) * 6, torch.ones(B, S, dtype=torch.bool), torch.full((B,), 0.4))
-    assert out.shape == (B, 32, 20, 20) and wm.n_tokens == 100 and wm.aux.shape == (B, 19)
+             -torch.rand(B, S) * 6, torch.ones(B, S, dtype=torch.bool), torch.full((B,), 0.4), state=torch.tensor([[1.0, 0.0], [0.0, 0.0]]))
+    assert out.shape == (B, 32, 20, 20) and wm.n_tokens == 100 and wm.aux.shape == (B, 20)
+
+
+def test_pressed_state_rule():
+    """Pressed = the hand did not move along the axis for 0.4 s although the last command was ahead of it."""
+    import numpy as np
+    from wm.data.frame_history import pressed_at
+    T = np.tile(np.eye(4), (20, 1, 1))
+    cmd = np.tile(np.eye(4), (19, 1, 1))
+    axis = np.array([1.0, 0.0, 0.0])
+    assert not pressed_at(T, cmd, 10, axis)                    # the command is where the hand is: just standing still
+    cmd[:, 0, 3] = 0.0006
+    assert pressed_at(T, cmd, 10, axis)                        # the command leads by 0.6 mm, the hand stays
+    assert not pressed_at(T, cmd, 4, axis)                     # too early to tell
+    T2 = T.copy()
+    T2[:, 0, 3] = np.arange(20) * 0.0001
+    assert not pressed_at(T2, cmd + 0, 10, axis)               # the hand is moving
 
 
 def test_label_points_round_trip():

@@ -5,7 +5,7 @@ Cartesian commands), and the model itself says how the hand really moves (its ex
 now to +0.2 s and +0.4 s, data/frame_history.motion_feature), so there is no joint adapter and no joint angle in the loop.
 
 State per episode: z (HIST, C, H, W) feature maps (torch), seen / avail (HIST,), meas / cmd (HIST, 4, 4) measured and
-commanded hand pose of every slot, R_P (3, 3).
+commanded hand pose of every slot, R_P (3, 3), state (2,) the contact state (pressed, inserted).
     step(cmd9)   cmd9 (B, 9, 4, 4): the commanded hand poses at control steps s .. s+8 (index k = the command executed at
                  step s+k; the newest slot's command becomes cmd9[:, 0]). The model samples the features 0.4 s ahead and
                  gives the hand's motion to +0.2 s / +0.4 s, and "inserted" at +0.4 s. Two slots are appended: +0.2 s (proprioception only), +0.4 s (features too).
@@ -42,8 +42,11 @@ class FeatureImagination:
         self.wm, self.dev = wm, device
         self.sampler = create_diffusion(timestep_respacing=str(sampling_steps))
 
-    def reset(self, z: torch.Tensor, seen, avail, meas, cmd, R_P):
+    def reset(self, z: torch.Tensor, seen, avail, meas, cmd, R_P, state=None):
+        """`state` (B, 2): the contact state now (pressed, inserted) from the real history (frame_history.pressed_at, the
+        contact switch); afterwards the model's own outputs are carried on."""
         self.z = z.to(self.dev).float()
+        self.state = np.zeros((len(seen), 2), np.float32) if state is None else np.asarray(state, np.float32).copy()
         self.seen, self.avail = np.asarray(seen, bool).copy(), np.asarray(avail, bool).copy()
         self.meas, self.cmd, self.R_P = np.asarray(meas, np.float64).copy(), np.asarray(cmd, np.float64).copy(), np.asarray(R_P, np.float64)
         self.B = len(self.seen)
@@ -72,6 +75,8 @@ class FeatureImagination:
         path = torch.tensor(np.stack([pose_feature(cmd9[b, off], ref[b], self.R_P[b]).reshape(-1) for b in range(B)]),
                             dtype=torch.float32, device=self.dev)
         kw = dict(path=path, rel_t=torch.full((B,), WM_STEP / 20.0, device=self.dev), **h)
+        if self.wm.state_embedder is not None:
+            kw["state"] = torch.as_tensor(self.state, dtype=torch.float32, device=self.dev)
         shape = self.z.shape[0:1] + self.z.shape[2:]
         with torch.autocast("cuda", dtype=torch.bfloat16):
             x = self.sampler.p_sample_loop(self.wm.forward, shape, torch.randn(shape, device=self.dev), clip_denoised=False,
@@ -86,4 +91,7 @@ class FeatureImagination:
         self.avail = np.concatenate([self.avail[:, 2:], np.ones((B, 2), bool)], 1)
         self.meas = np.concatenate([self.meas[:, 2:], meas], 1)
         self.cmd = np.concatenate([self.cmd[:, 2:], cmd9[:, [SLOT_STEPS, WM_STEP]]], 1)
-        return {"features": x, "hand": meas[:, -1], "hand_own": own[:, -1], "p_inserted": 1 / (1 + np.exp(-aux[:, 18]))}
+        p_ins = 1 / (1 + np.exp(-aux[:, 18]))
+        p_prs = 1 / (1 + np.exp(-aux[:, 19])) if aux.shape[1] > 19 else np.zeros(B)
+        self.state = np.stack([p_prs > 0.5, p_ins > 0.5], 1).astype(np.float32)       # carried to the next step
+        return {"features": x, "hand": meas[:, -1], "hand_own": own[:, -1], "p_inserted": p_ins, "p_pressed": p_prs}

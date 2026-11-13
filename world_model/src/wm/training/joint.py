@@ -10,8 +10,10 @@
     world model (models/history_cdit.py, NWM's CDiT unchanged, feature map cut in 2 x 2 patches)
         diffusion    NWM's loss on the target frame's feature map, given the history (features of the seen slots,
                      proprioception of every slot), the commanded hand path and the time shift
+        state        the contact state now, (pressed, inserted), as a condition (data/frame_history.py: why)
         aux          from its final tokens: how the hand really moves from now to +0.2 s / +0.4 s (pose features;
-                     replaces the joint adapter) and "inserted" at the target time (the judge of imagined
+                     replaces the joint adapter), and "inserted" and "pressed" at the target time; in imagination the two
+                     become the next step's state (the judge of imagined
                      outcomes; an output, not a condition, so that imagined actions can change it)
     Vision masking, random time shifts, context noise: as wm4.py. Every kept frame is encoded at every step, so at most
     `max_frames` seen frames per sample (data/frame_history.py).
@@ -40,14 +42,16 @@ from ..models.history_cdit import HistoryCDiT, create_diffusion
 from . import common
 from .wm4 import mixed_batches
 
-AUX_DIM = 19          # 2 x 9 pose features of the hand's motion (to +0.2 s, +0.4 s) and the "inserted at the target time" logit
+AUX_DIM = 20          # 2 x 9 pose features of the hand's motion (to +0.2 s, +0.4 s); logits "inserted" and "pressed" at the target time
+STATE_DIM = 2         # the contact state now given as a condition: (pressed, inserted)
 
 
 def build(cfg: dict, device):
     m = cfg["encoder"]
     enc = FrameEncoder(ch=m["ch"], stride=m["stride"], arch=m["arch"]).to(device)
     head = LabelHead(m["ch"], enc.grid).to(device)
-    wm = HistoryCDiT(latent_ch=m["ch"], size=cfg["size"], feature_map=enc.grid, patch=cfg["patch"], aux_dim=AUX_DIM).to(device)
+    wm = HistoryCDiT(latent_ch=m["ch"], size=cfg["size"], feature_map=enc.grid, patch=cfg["patch"], aux_dim=AUX_DIM,
+                     state_dim=STATE_DIM).to(device)
     return enc, head, wm
 
 
@@ -74,7 +78,8 @@ def aux_losses(aux: torch.Tensor, b: dict) -> dict:
     ok = b["res_ok"]
     res = F.smooth_l1_loss(aux[ok, :18], b["res"][ok], beta=0.05) if ok.any() else aux.sum() * 0
     ins = F.binary_cross_entropy_with_logits(aux[:, 18], b["t_inserted"].float())
-    return {"aux_res": res, "aux_inserted_bce": ins}
+    prs = F.binary_cross_entropy_with_logits(aux[:, 19], b["t_pressed"].float())
+    return {"aux_res": res, "aux_inserted_bce": ins, "aux_pressed_bce": prs}
 
 
 @torch.no_grad()
@@ -88,7 +93,8 @@ def evaluate(enc_t, head, wm, diffusion, sampler, loaders, device, max_batches) 
             b = common.to_device(b, device)
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 z, f_new, x = encode_history(enc_t, enc_t, b, grad=False)
-            kw = dict(path=b["path"], rel_t=b["rel_t"], z_hist=z.float(), seen=b["seen"], proprio=b["proprio"], dt=b["dt"], avail=b["avail"])
+            kw = dict(path=b["path"], rel_t=b["rel_t"], z_hist=z.float(), seen=b["seen"], proprio=b["proprio"], dt=b["dt"], avail=b["avail"],
+                      state=b["state"])
             x = x.float()
             t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
             vl = diffusion.training_losses(wm, x, t, kw)["loss"].mean()
@@ -118,6 +124,8 @@ def evaluate(enc_t, head, wm, diffusion, sampler, loaders, device, max_batches) 
                  "aux_held_pred_advance_mm": float(adv_pred[held].mean()) if held.any() else float("nan"),
                  "aux_held_pred_abs_mm": float(adv_pred[held].abs().mean()) if held.any() else float("nan"),
                  "aux_inserted_acc": float(((aux[:, 18] > 0) == ins).float().mean()), "inserted_frac": float(ins.float().mean()),
+                 "aux_pressed_acc": float(((aux[:, 19] > 0) == b["t_pressed"]).float().mean()), "pressed_frac": float(b["t_pressed"].float().mean()),
+                 "state_pressed_frac": float(b["state"][:, 0].mean()),
                  "feature_std_over_samples": float(x.std(0).mean())}
             for k, v in m.items():
                 if math.isfinite(v):
@@ -175,10 +183,12 @@ def train(cfg: dict, run_dir: Path, max_steps: int | None = None) -> Path:
         sigma = torch.where(torch.rand(B, device=device) < cfg["p_ctx_noise"], sigma, torch.zeros_like(sigma))
         z = z + sigma.view(B, 1, 1, 1, 1) * torch.randn_like(z) * b["seen"][..., None, None, None]
         t = torch.randint(0, diffusion.num_timesteps, (B,), device=device)
-        kw = dict(path=b["path"], rel_t=b["rel_t"], z_hist=z, seen=b["seen"], proprio=b["proprio"], dt=b["dt"], avail=b["avail"], ctx_noise=sigma)
+        kw = dict(path=b["path"], rel_t=b["rel_t"], z_hist=z, seen=b["seen"], proprio=b["proprio"], dt=b["dt"], avail=b["avail"], ctx_noise=sigma,
+                  state=b["state"])
         diff = diffusion.training_losses(wm, x, t, kw)["loss"].mean()
         al = aux_losses(wm.aux, b)
-        loss = diff + w["label"] * ll["label"] + w["aux_res"] * al["aux_res"] + w["aux_inserted"] * al["aux_inserted_bce"]
+        loss = (diff + w["label"] * ll["label"] + w["aux_res"] * al["aux_res"] + w["aux_inserted"] * al["aux_inserted_bce"]
+                + w.get("aux_pressed", w["aux_inserted"]) * al["aux_pressed_bce"])
         opt.zero_grad(set_to_none=True)
         loss.backward()
         gn = torch.nn.utils.clip_grad_norm_(params, cfg["grad_clip"])

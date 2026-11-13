@@ -34,7 +34,8 @@
   "loss_weights": {
     "label": 0.2,
     "aux_res": 1.0,
-    "aux_inserted": 0.2
+    "aux_inserted": 0.2,
+    "aux_pressed": 0.2
   },
   "batch_size": 48,
   "lr": 0.0001,

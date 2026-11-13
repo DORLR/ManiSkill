@@ -24,7 +24,9 @@ from PIL import Image
 
 from wm.data import index
 from wm.data.datasets import port_axes_ok
+from wm.data.frame_history import pressed_at
 from wm.data.history import HIST
+from wm.data.outcome import inserted as inserted_now
 from wm.data.outcome import inserted
 from wm.imagination6 import FeatureImagination
 from wm.models.encoder import geometry_features
@@ -82,7 +84,9 @@ for a in range(0, len(es), args.batch):
     st = [d["img_step"].astype(int) for d in D]
     cmd_at = lambda d, s: d["hand_cmd"][np.clip(s, 0, len(d["hand_cmd"]) - 1)]
     im.reset(z, np.tile(avail, (B, 1)), np.tile(avail, (B, 1)), np.stack([d["hand"][s[sl]].astype(np.float64) for d, s in zip(D, st)]),
-             np.stack([cmd_at(d, s[sl]) for d, s in zip(D, st)]), np.stack([d["R_P"] for d in D]))
+             np.stack([cmd_at(d, s[sl]) for d, s in zip(D, st)]), np.stack([d["R_P"] for d in D]),
+             np.array([[pressed_at(d["hand"].astype(np.float64), d["hand_cmd"], int(s[j0]), d["R_P"][:, 0]), bool(inserted_now(d["eval_rel"][s[j0]]))]
+                       for d, s in zip(D, st)], np.float32))
     axis = np.stack([d["R_P"][:, 0] for d in D])                                   # the insertion axis, world
     along = lambda P: np.einsum("bi,bi->b", P[:, :3, 3], axis) * 1000              # mm
     start_real = np.stack([d["hand"][s[j0]].astype(np.float64) for d, s in zip(D, st)])

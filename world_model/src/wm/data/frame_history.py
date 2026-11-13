@@ -18,6 +18,15 @@ Per sample
                   gave 0.01 mm per held decision, but a script pushing from the imagined hand with another lead than the
                   state had seen moved it 0.37 mm per decision, 14.5 mm in 16 s (check_wm6_push.py, 10 000 steps).
                   Written as the hand's own motion, "the hand stays" is zero whatever the command.
+    state / t_pressed   (decided with the user 2026-11-12) the contact state now, (pressed, inserted), given to the world
+                  model as a condition, and "pressed" at the target time, its third extra output (next to "inserted").
+                  Why: with the motion output alone (run joint_v6b, 5000 steps) the pushing script still moved the imagined
+                  hand 11 mm in 16 s. The model has no state "I am pressed against something"; it guesses it anew at
+                  every step from what commands and history look like, and once it has guessed "free" the history says
+                  so too. Given as a condition and carried from each step's output to the next step's input, pressed is a
+                  state that persists until something ends it. It is the present state, not the outcome ("inserted
+                  within 8 s" as a condition would fix the answer whatever the actions). pressed: pressed_at above;
+                  inserted: the contact switch (simulator truth in training).
 """
 
 from __future__ import annotations
@@ -40,6 +49,18 @@ RES_SCALE = 10.0            # pose features are in cm / unit vectors: x 10 -> mm
 
 
 STILL = np.array([0, 0, 0, 1, 0, 0, 0, 1, 0], np.float32)       # the pose feature of a hand that has not moved
+PRESS_STEPS, PRESS_STILL_MM, PRESS_LEAD_MM = 8, 0.05, 0.1
+
+
+def pressed_at(hand: np.ndarray, hand_cmd: np.ndarray, s: int, axis: np.ndarray) -> bool:
+    """The contact state "pressed" at control step s, from proprioception only (also on a real robot): over the last
+    0.4 s the hand did not move along the insertion axis (< 0.05 mm) although the last command was ahead of it
+    (> 0.1 mm). Free motion, a command that just holds the hand where it is, and backing off are not pressed."""
+    if s < PRESS_STEPS or s - 1 >= len(hand_cmd):
+        return False
+    moved = abs(float((hand[s, :3, 3] - hand[s - PRESS_STEPS, :3, 3]) @ axis)) * 1000
+    lead = float((hand_cmd[s - 1, :3, 3] - hand[s, :3, 3]) @ axis) * 1000
+    return moved < PRESS_STILL_MM and lead > PRESS_LEAD_MM
 
 
 def motion_feature(hand: np.ndarray, steps, ref: np.ndarray, R_P: np.ndarray) -> np.ndarray:
@@ -112,6 +133,8 @@ class FrameHistoryDataset(torch.utils.data.Dataset):
         s_now, s_tgt, s_g = int(steps[j]), int(steps[t]), int(steps[jg])
         res_ok = (m == WM_STRIDE_IMAGES) and (s_tgt - s_now == 8) and len(hand_cmd) >= s_tgt
         res = motion_feature(hand, [s_now + 4, s_tgt], hand[s_now].astype(np.float64), R_P) if res_ok else np.zeros(18, np.float32)
+        hand64, axis = hand.astype(np.float64), R_P[:, 0]
+        state = np.array([pressed_at(hand64, hand_cmd, s_now, axis), bool(inserted(rel[s_now]))], np.float32)
         T = torch.from_numpy
         return {"frames_rgb": T(rgb), "frames_depth": T(dep), "frame_slot": T(slot), "frame_ok": T(ok),
                 "seen": T(h["seen"]), "avail": T(h["avail"]), "proprio": T(h["proprio"]), "dt": T(h["dt"]),
@@ -120,4 +143,5 @@ class FrameHistoryDataset(torch.utils.data.Dataset):
                 "h_star": torch.tensor(meta["H_star"], dtype=torch.float32), "R_P": T(R_P.astype(np.float32)),
                 "g_hand": T(hand[s_g].astype(np.float32)), "g_cam": T(cam[jg].astype(np.float32)), "g_inserted": torch.tensor(bool(inserted(rel[s_g]))),
                 "t_hand": T(hand[s_tgt].astype(np.float32)), "t_cam": T(cam[t].astype(np.float32)), "t_inserted": torch.tensor(bool(inserted(rel[s_tgt]))),
-                "res": T(res), "res_ok": torch.tensor(bool(res_ok))}
+                "res": T(res), "res_ok": torch.tensor(bool(res_ok)), "state": T(state),
+                "t_pressed": torch.tensor(bool(pressed_at(hand64, hand_cmd, s_tgt, axis)))}
