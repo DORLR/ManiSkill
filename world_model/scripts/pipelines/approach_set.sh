@@ -43,4 +43,5 @@ PY
 tmux new-session -d -s qingxin-v6d-joint "source $Q/env.sh; cd $Q/code/ManiSkill; CUDA_VISIBLE_DEVICES=1 WM_GPU_MEM_FRACTION=0.25 nice -n 10 python $S/train/train_joint.py --config world_model/configs/v6/joint_d.json --run $Q/runs/joint_v6d > $Q/logs/v6d_joint.log 2>&1"
 tmux new-session -d -s qingxin-v6d-checks "GPU=0 bash $Q/code/ManiSkill/world_model/scripts/pipelines/v6_checks2.sh joint_v6d qingxin-v6d-joint 5000 10000 20000 > $Q/logs/v6d_checks.log 2>&1"
 tmux new-session -d -s qingxin-v6d-approach-at "GPU=0 bash $Q/code/ManiSkill/world_model/scripts/pipelines/v6_approach_at.sh joint_v6d qingxin-v6d-checks 5000 10000 20000 > $Q/logs/v6d_approach_at.log 2>&1"
+tmux new-session -d -s qingxin-v6d-horizons "GPU=0 bash $Q/code/ManiSkill/world_model/scripts/pipelines/v6_horizons_at.sh joint_v6d qingxin-v6d-joint 5000 10000 20000 > $Q/logs/v6d_horizons_at.log 2>&1"
 stamp "joint_v6d started from scratch (GPU 1, next to joint_v6c): v6c + the approach set as a fourth source (weights 0.3 / 0.2 / 0.25 / 0.25); checks at 5000 / 10000 / 20000: push, replay, approach"
