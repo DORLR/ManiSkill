@@ -42,6 +42,9 @@ ap.add_argument("--steps", type=int, default=30, help="imagined steps of 0.4 s")
 ap.add_argument("--max-traj", type=int, default=192)
 ap.add_argument("--batch", type=int, default=32)
 ap.add_argument("--sampling-steps", type=int, default=20)
+ap.add_argument("--real-features", action="store_true",
+                help="diagnosis: after every step the imagined features are replaced by the real frame's (the hand stays the model's own): "
+                     "what the hand and the judgement would be if the features were predicted perfectly")
 args = ap.parse_args()
 limit_gpu_memory()
 torch.manual_seed(0)
@@ -102,6 +105,8 @@ for a in range(0, len(es), args.batch):
         held = (np.abs(d_real) < 0.05) & (lead > 0.1)
         held_dec += list(zip(d_im[held], lead[held]))
         x_real = torch.cat([frames(d, [j]) for d in D])
+        if args.real_features:
+            im.z[:, -1] = x_real
         hand_t, cam_t = T(real), T(np.stack([d["cam_T_world"][j] for d in D]))
         _, _, tgt = label_targets(hand_t, T(np.stack([d["H_star"] for d in D])), T(np.stack([d["R_P"] for d in D])))
         geom = geometry_features(cam_t, hand_t, T(np.stack([d["R_P"] for d in D])))
@@ -116,7 +121,8 @@ for a in range(0, len(es), args.batch):
 R = np.concatenate(rows)
 k, dh, e_im, e_re, lat, p, ins, mv_real, mv_im = R[:, 0], R[:, 1], R[:, 2], R[:, 3], R[:, 4:6], R[:, 6], R[:, 7] > 0.5, R[:, 8], R[:, 9]
 close = np.linalg.norm(lat, axis=1) < 3.0
-rep = {"checkpoint": args.ckpt, "checkpoint_step": int(ck["step"]), "data": args.data, "trajectories": len(es), "start_s": args.start * 0.2}
+rep = {"checkpoint": args.ckpt, "checkpoint_step": int(ck["step"]), "data": args.data, "trajectories": len(es), "start_s": args.start * 0.2,
+       "sampling_steps": args.sampling_steps, "real_features_fed_back": args.real_features}
 for sec in (2, 4, 8, 12, 16):
     m = k == round(sec / 0.4)
     if not m.any():

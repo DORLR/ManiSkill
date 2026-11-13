@@ -19,7 +19,7 @@ _STATE = {"port": None, "robot": None}
 
 
 def work(args):
-    g, out, n, seed, contact = args
+    g, out, n, seed, contact, approach = args
     from wm.collect.explore import collect_grasp
     from wm.env.robot import Robot
     try:
@@ -30,7 +30,7 @@ def work(args):
             _STATE["robot"], _STATE["port"] = Robot(g["port"]), g["port"]
     except Exception as exc:
         return {"grasp": g["grasp"], "trajectories": [], "error": f"environment: {type(exc).__name__}: {exc}", "seconds": 0}
-    return collect_grasp(_STATE["robot"], g, Path(out), n, seed, contact=contact)
+    return collect_grasp(_STATE["robot"], g, Path(out), n, seed, contact=contact, approach=approach)
 
 
 def main():
@@ -44,6 +44,7 @@ def main():
     ap.add_argument("--max-grasps", type=int)
     ap.add_argument("--seed", type=int, default=6_000_000)
     ap.add_argument("--contact", action="store_true")
+    ap.add_argument("--approach", action="store_true", help="the approach set: re-planned decisions from free space on (collect/explore.py)")
     ap.add_argument("--every", type=int, default=1, help="diagnostics: every n-th grasp only")
     args = ap.parse_args()
     out = Path(args.out)
@@ -54,7 +55,7 @@ def main():
     if args.max_grasps:
         gs = gs[:args.max_grasps]
     gs.sort(key=lambda g: g["port"])
-    jobs = [(g, str(out), args.per_grasp, args.seed + 7919 * k, args.contact) for k, g in enumerate(gs)]
+    jobs = [(g, str(out), args.per_grasp, args.seed + 7919 * k, args.contact, args.approach) for k, g in enumerate(gs)]
     print(f"{len(jobs)} grasps x {args.per_grasp} trajectories, {args.workers} workers", flush=True)
     t0 = time.time()
     with mp.get_context("spawn").Pool(args.workers, maxtasksperchild=40) as pool:

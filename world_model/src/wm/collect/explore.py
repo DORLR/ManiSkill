@@ -186,6 +186,23 @@ def sample_contact(rng: np.random.Generator) -> list[dict]:
     return prims
 
 
+def sample_approach(rng: np.random.Generator) -> list[dict]:
+    """The approach set (2026-11-12): the whole trajectory is re-planned decisions, from free space on. First 8-20
+    decisions that lead the measured hand by 0.6-1.5 mm along a (as a policy approaching the hole does, re-planning
+    from where the hand is), which take the plug the 2-6 mm to the board and go on leading when it is stopped there;
+    then the contact primitives of sample_contact. Why: in every other set the hand comes to the board under an
+    absolute push whose commands stop within 0.5 s of the block, so "the commands keep advancing" always went with
+    "the hand keeps advancing", and the world model (v6c, 10 000 steps) let a script that keeps leading the imagined
+    hand walk through the board in 140 of 140 held-out blocked cases (check_wm6_approach.py)."""
+    n = int(rng.integers(8, 21))
+    lat = _unit(rng, 2) * rng.uniform(0, 0.0003) if rng.random() < 0.3 else np.zeros(2)
+    leads = np.tile(np.r_[rng.uniform(0.0006, LEAD_MAX_M), lat], (n, 1))
+    leads *= np.minimum(1.0, LEAD_MAX_M / np.linalg.norm(leads, axis=1, keepdims=True))
+    first = {"kind": "lead", "chunk_steps": int(rng.choice([4, 8, 16], p=[0.15, 0.7, 0.15])), "chunks": n,
+             "shape": "ramp" if rng.random() < 0.6 else "step", "anchored": bool(rng.random() < 0.7), "leads_m": leads.tolist()}
+    return [first] + sample_contact(rng)
+
+
 class Explorer:
     def __init__(self, robot: Robot, H_star: np.ndarray, axis: np.ndarray):
         self.robot, self.H_star, self.F = robot, np.asarray(H_star, np.float64), frame(np.asarray(axis, np.float64))
@@ -339,12 +356,18 @@ class Explorer:
             log[-1]["ik_missed_steps"] = missed
         return used - start, q_seed, log, why
 
-    def run(self, rec: Recorder, segments: list[dict], rng: np.random.Generator, contact: list[dict] | None = None) -> dict:
+    def run(self, rec: Recorder, segments: list[dict], rng: np.random.Generator, contact: list[dict] | None = None,
+            approach: bool = False) -> dict:
         """The recorded part: maneuver segments, the straight push, then (`contact`) the contact phase.
+        `approach`: no maneuver and no straight push; `contact` (sample_approach) runs from the free start.
         Returns the segment log."""
         r = self.robot
         cmd, q_seed, used, log = self.cmd0.copy(), self.q0.copy(), 0, []
         rec.begin()
+        if approach:
+            n, q_seed, clog, cwhy = self._contact(rec, cmd, q_seed, contact, 0)
+            self._hold(rec, q_seed, 4, "explore_contact")
+            return {"segments": [], "stopped": "approach", "contact": clog, "contact_steps": n, "contact_stopped": cwhy}
         for seg in segments:
             target = cmd.copy()
             target[:3, 3] = cmd[:3, 3] + self.F @ np.asarray(seg["move_m"])
@@ -382,7 +405,7 @@ def truth_outcome(rel7: np.ndarray) -> dict:
     return {"outcome": o, "depth_left_mm": depth, "lateral_mm": lat, "angle_deg": ang}
 
 
-def collect_grasp(robot: Robot, g: dict, out: Path, n_traj: int, seed: int, contact: bool = False) -> dict:
+def collect_grasp(robot: Robot, g: dict, out: Path, n_traj: int, seed: int, contact: bool = False, approach: bool = False) -> dict:
     """g: a wm_v1 grasp.json (port, grasp, condition, pitch_deg, grasp_pos_m, episode_seed, H_star, axis).
     `contact`: the contact set -- starts nearer the hole, fewer maneuvers, and the contact phase after the push."""
     t0 = time.time()
@@ -408,7 +431,8 @@ def collect_grasp(robot: Robot, g: dict, out: Path, n_traj: int, seed: int, cont
         label = {"H_star": H_star.tolist(), "axis": list(g["axis"])}
         for i in range(n_traj):
             segs, fails = (sample_segments(rng, (0.5, 0.3, 0.15, 0.05)) if contact else sample_segments(rng)), []
-            plan = sample_contact(rng) if contact else None
+            plan = sample_approach(rng) if approach else sample_contact(rng) if contact else None
+            contact = contact or approach
             for _ in range(PLACEMENT_ATTEMPTS):                     # a start the arm cannot reach is redrawn
                 start = sample_start(rng, near=contact)
                 stage = ex.place(start)
@@ -422,7 +446,7 @@ def collect_grasp(robot: Robot, g: dict, out: Path, n_traj: int, seed: int, cont
                 continue
             entry["start_error_mm"] = ex.start_error_mm
             rec = Recorder(robot)
-            res = ex.run(rec, segs, rng, plan)
+            res = ex.run(rec, segs, rng, plan, approach=approach)
             arrays = rec.end()
             entry.update(res, planned=segs, planned_contact=plan, steps=int(len(arrays["action"])), **truth_outcome(arrays["eval_rel"][-1]))
             if len(arrays["action"]) < 4:                           # nothing happened (IK failed at once)
