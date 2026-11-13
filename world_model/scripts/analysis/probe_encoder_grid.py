@@ -11,8 +11,9 @@ A measurement to choose the feature-map size; the trained weights are not kept f
 Second use (2026-11-12, after the label head read the tip to 0.34-0.40 / 0.65-0.70 mm against 0.22 / 0.27 of the dedicated
 reader): which difference from that reader costs the precision? One step at a time, from what works to the encoder as used:
     --sources explore|all     the data it is trained on
-    --target tip|label        tip: the true tip's motion across the axis (2 numbers, frames within 6 mm; simulator truth, a
-                              diagnosis); label: the FK label as reference-point motions (what the encoder may be given)
+    --target tip|label|dense  tip: the true tip's motion across the axis (2 numbers, frames within 6 mm; simulator truth, a
+                              diagnosis); label: the FK label as reference-point motions (what the encoder may be given);
+                              dense: label + the same FK label per cell of the map that shows the plug (frame_encoder.py)
     --reader pooled|map       pooled: the ResNet's own features averaged over the image (no feature map in between);
                               map: the label head on the (ch, grid, grid) feature map, as in training
 """
@@ -28,7 +29,8 @@ from wm.data.datasets import FrameDataset
 from wm.data.outcome import inserted
 from wm.geometry import apply_rigid
 from wm.models.encoder import geometry_features
-from wm.models.frame_encoder import LABEL_DIM, FrameEncoder, LabelHead, label_loss, label_motion, label_targets
+from wm.models.frame_encoder import (LABEL_DIM, DenseLabelHead, FrameEncoder, LabelHead, dense_loss, dense_motion, dense_targets,
+                                     label_loss, label_motion, label_targets)
 from wm.perception.labels import load_geometry, pose7_to_T
 from wm.training.common import limit_gpu_memory, to_device
 from wm.training.wm4 import mixed_batches
@@ -38,8 +40,10 @@ ap.add_argument("--stride", type=int, default=16)
 ap.add_argument("--ch", type=int, default=16)
 ap.add_argument("--arch", default="resnet34")
 ap.add_argument("--close-weight", type=float, default=0.0)
+ap.add_argument("--no-pool", action="store_true", help="leave out the stem's max-pooling (twice the working resolution)")
+ap.add_argument("--train-bn", action="store_true", help="batch-norm statistics follow the data (default: frozen)")
 ap.add_argument("--sources", default="all", choices=["all", "explore"])
-ap.add_argument("--target", default="label", choices=["label", "tip"])
+ap.add_argument("--target", default="label", choices=["label", "tip", "dense"])
 ap.add_argument("--reader", default="map", choices=["map", "pooled"])
 ap.add_argument("--steps", type=int, default=6000)
 ap.add_argument("--batch", type=int, default=64)
@@ -64,7 +68,6 @@ class LabelFrames(FrameDataset):
 
     def __getitem__(self, k):
         out = super().__getitem__(k)
-        out.pop("seg")
         i, j = self.items[k]
         e = self.entries[i]
         with np.load(e["path"]) as f:
@@ -83,7 +86,7 @@ class LabelFrames(FrameDataset):
 
 if args.sources == "explore":
     args.data, args.weights = [args.eval_data], [1.0]
-enc = FrameEncoder(ch=args.ch, stride=args.stride, arch=args.arch).to(dev)
+enc = FrameEncoder(ch=args.ch, stride=args.stride, arch=args.arch, pool=not args.no_pool, freeze_bn=not args.train_bn).to(dev)
 head = LabelHead(args.ch, enc.grid).to(dev)
 if args.reader == "pooled":                       # the ResNet's features before the 1 x 1 projection, averaged
     import torch.nn as nn
@@ -100,10 +103,16 @@ if args.reader == "pooled":                       # the ResNet's features before
                                                         depth.float()[:, None] * 5e-4, (depth > 0).float()[:, None]], 1)).mean((2, 3))
 
 
+dense = DenseLabelHead(args.ch).to(dev) if args.target == "dense" else None
+geo = lambda b: geometry_features(b["cam_T_world"].float(), b["hand"].float(), b["R_P"].float())
+dtargets = lambda b: dense_targets(b["depth"], b["seg"], b["K"], b["cam_T_world"], b["hand"], b["h_star"], b["R_P"], enc.grid)
+
+
 def tip_motion(b, R_s, t_s):
     p = b["tip"][:, None]
     return (apply_rigid(p, R_s, t_s) - p)[:, 0] * 1000            # mm, (along, y, z)
-opt = torch.optim.AdamW(list(enc.parameters()) + list(head.parameters()), lr=3e-4, weight_decay=0.01)
+params = list(enc.parameters()) + list(head.parameters()) + (list(dense.parameters()) if dense is not None else [])
+opt = torch.optim.AdamW(params, lr=3e-4, weight_decay=0.01)
 sched = torch.optim.lr_scheduler.OneCycleLR(opt, 3e-4, total_steps=args.steps, pct_start=0.1)
 loaders = [DataLoader(LabelFrames(d, "train", tip=args.target == "tip"), batch_size=args.batch, shuffle=True, drop_last=True, num_workers=4, persistent_workers=True)
            for d in args.data]
@@ -113,16 +122,23 @@ for step in range(1, args.steps + 1):
     b = to_device(next(batches), dev)
     R_s, t_s, target = label_targets(b["hand"], b["h_star"], b["R_P"])
     with torch.autocast("cuda", dtype=torch.bfloat16):
-        pred = head(enc(b["rgb"], b["depth"]), geometry_features(b["cam_T_world"].float(), b["hand"].float(), b["R_P"].float()))
+        f = enc(b["rgb"], b["depth"])
+        pred = head(f, geo(b))
+        dpred = dense(f, geo(b)) if dense is not None else None
     if args.target == "tip":
         true = tip_motion(b, R_s, t_s)[:, 1:]
         keep = true.norm(dim=-1) <= 6.0
         l = {"label": torch.nn.functional.smooth_l1_loss(pred.float()[keep, :2], true[keep])}
     else:
         l = label_loss(pred, target, b["inserted"], close_weight=args.close_weight)
+        if dense is not None:
+            dt, dw, _ = dtargets(b)
+            l["dense"] = dense_loss(dpred, dt, dw)
+            l["dense_cells"] = dw.sum(dim=(1, 2)).mean()
+            l["label"] = l["label"] + l["dense"]
     opt.zero_grad(set_to_none=True)
     l["label"].backward()
-    torch.nn.utils.clip_grad_norm_(list(enc.parameters()) + list(head.parameters()), 5.0)
+    torch.nn.utils.clip_grad_norm_(params, 5.0)
     opt.step()
     sched.step()
     if step % 200 == 0:
@@ -143,7 +159,18 @@ with torch.no_grad():
             pred = head(f, geometry_features(b["cam_T_world"].float(), b["hand"].float(), b["R_P"].float())).float()
         p = b["tip"][:, None]
         true = (apply_rigid(p, R_s, t_s) - p)[:, 0] * 1000
-        got = (apply_rigid(p, *label_motion(pred)) - p)[:, 0] * 1000 if args.target == "label" else torch.cat([true[:, :1], pred[:, :2]], 1)
+        if args.target == "tip":
+            got = torch.cat([true[:, :1], pred[:, :2]], 1)
+        elif args.target == "dense":                            # the plug cells' motions -> rigid motion -> at the tip
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                dpred = dense(f, geo(b))
+            _, dw, dp = dtargets(b)
+            got = (apply_rigid(p, *dense_motion(dpred, dw, dp)) - p)[:, 0] * 1000
+            few = dw.sum(dim=(1, 2)) < 3                            # hardly any plug cell with depth: the global label
+            if few.any():
+                got[few] = ((apply_rigid(p, *label_motion(pred)) - p)[:, 0] * 1000)[few]
+        else:
+            got = (apply_rigid(p, *label_motion(pred)) - p)[:, 0] * 1000
         rows.append(torch.cat([t_s.norm(dim=-1, keepdim=True) * 1000, true, got, pred[:, LABEL_DIM:LABEL_DIM + 1], b["inserted"].float()[:, None]], 1).cpu().numpy())
         if i < 20 and f.dim() == 4:
             feats.append(f.float().flatten(2).transpose(1, 2).cpu())
@@ -154,6 +181,7 @@ z = torch.cat(feats).double() if feats else torch.zeros(2, 2, 1, dtype=torch.dou
 r = z - z.mean(0)
 pos_, neg_ = logit[ins], logit[~ins]
 rep = {"arch": args.arch, "stride": args.stride, "ch": args.ch, "close_weight": args.close_weight, "sources": args.sources,
+       "pool": not args.no_pool, "train_bn": args.train_bn,
        "target": args.target, "reader": args.reader, "grid": enc.grid, "values_per_frame": enc.grid ** 2 * args.ch, "steps": args.steps,
        "frames": int(len(X)),
        "inserted_auc": round(float((pos_[:, None] > neg_[None]).mean()), 4) if len(pos_) and len(neg_) else None,

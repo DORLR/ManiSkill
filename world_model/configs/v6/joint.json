@@ -16,7 +16,7 @@
   ],
   "seed": 0,
   "encoder": {
-    "arch": "resnet34",
+    "arch": "resnet18",
     "stride": 16,
     "ch": 16
   },
@@ -51,5 +51,6 @@
   "eval_sampling_steps": 20,
   "patience": 8,
   "harm_margin": 0.05,
-  "max_skipped": 50
+  "max_skipped": 50,
+  "close_weight": 2.0
 }

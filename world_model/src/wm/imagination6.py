@@ -1,15 +1,14 @@
 """Imagination v6: the world model alone advances the scene, 0.4 s per step (8 commands, two history slots).
 
 Everything is in hand poses, as the model's inputs are: the commands are hand poses (FK of joint targets, or a script's
-Cartesian commands), and the model itself says where the hand really ends up (its extra output: measured minus commanded
-pose features at +0.2 s and +0.4 s), so there is no joint adapter and no joint angle in the loop.
+Cartesian commands), and the model itself says how the hand really moves (its extra output: the measured hand's motion from
+now to +0.2 s and +0.4 s, data/frame_history.motion_feature), so there is no joint adapter and no joint angle in the loop.
 
 State per episode: z (HIST, C, H, W) feature maps (torch), seen / avail (HIST,), meas / cmd (HIST, 4, 4) measured and
 commanded hand pose of every slot, R_P (3, 3).
     step(cmd9)   cmd9 (B, 9, 4, 4): the commanded hand poses at control steps s .. s+8 (index k = the command executed at
                  step s+k; the newest slot's command becomes cmd9[:, 0]). The model samples the features 0.4 s ahead and
-                 gives the hand at +0.2 s / +0.4 s relative to the commands cmd9[:, 3] / cmd9[:, 7] that led there, and
-                 "inserted" at +0.4 s. Two slots are appended: +0.2 s (proprioception only), +0.4 s (features too).
+                 gives the hand's motion to +0.2 s / +0.4 s, and "inserted" at +0.4 s. Two slots are appended: +0.2 s (proprioception only), +0.4 s (features too).
 """
 
 from __future__ import annotations
@@ -18,7 +17,7 @@ import numpy as np
 import torch
 
 from .data.conditions import N_WAYPOINTS, pose_feature
-from .data.frame_history import RES_SCALE
+from .data.frame_history import RES_SCALE, STILL
 from .data.history import HIST
 from .models.history_cdit import create_diffusion
 
@@ -79,8 +78,7 @@ class FeatureImagination:
                                            model_kwargs=kw, progress=False, device=self.dev)
         aux = self.wm.aux.float().cpu().numpy()
         res = aux[:, :18].reshape(B, 2, 9) / RES_SCALE
-        own = np.stack([np.stack([pose_from_feature(pose_feature(cmd9[b, k], ref[b], self.R_P[b]) + res[b, i], ref[b], self.R_P[b])
-                                  for i, k in enumerate((SLOT_STEPS - 1, WM_STEP - 1))]) for b in range(B)])
+        own = np.stack([np.stack([pose_from_feature(STILL + res[b, i], ref[b], self.R_P[b]) for i in range(2)]) for b in range(B)])
         meas = own if meas2 is None else np.asarray(meas2, np.float64)
         x = x.float()
         self.z = torch.cat([self.z[:, 2:], torch.zeros_like(x)[:, None], x[:, None]], 1)

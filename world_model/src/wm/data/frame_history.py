@@ -10,9 +10,14 @@ Per sample
     tgt_rgb / tgt_depth                              the target image
     label_*  (prefixes g = the newest seen frame, t = the target frame)   hand, cam_T_world, inserted: for the label
                   head (remaining motion to inserted by FK; "inserted now")
-    res / res_ok  for a +0.4 s target: where the hand really is at +0.2 s and +0.4 s relative to the command that led
-                  there (pose features, position in mm x 1, rotation 6D x 10) -- the world model's second output,
-                  replacing the joint adapter (decided with the user 2026-11-12)
+    res / res_ok  for a +0.4 s target: how the hand really moves from now to +0.2 s and to +0.4 s (pose features relative
+                  to the hand now, minus the feature of "did not move"; position in mm, rotation 6D x 10) -- the world
+                  model's second output, replacing the joint adapter (decided with the user 2026-11-12).
+                  First written as "measured minus the command that led there" (runs joint_v6): then "the hand stays" is
+                  the answer -lead, and the model learned "the lag stays as it was" instead -- recorded commands replayed
+                  gave 0.01 mm per held decision, but a script pushing from the imagined hand with another lead than the
+                  state had seen moved it 0.37 mm per decision, 14.5 mm in 16 s (check_wm6_push.py, 10 000 steps).
+                  Written as the hand's own motion, "the hand stays" is zero whatever the command.
 """
 
 from __future__ import annotations
@@ -34,13 +39,13 @@ from .outcome import inserted
 RES_SCALE = 10.0            # pose features are in cm / unit vectors: x 10 -> mm, and rotations on a similar scale
 
 
-def residual_feature(hand: np.ndarray, hand_cmd: np.ndarray, steps, ref: np.ndarray, R_P: np.ndarray) -> np.ndarray:
-    """Measured hand pose at each control step of `steps` minus the commanded pose that led there (command
-    index step - 1), as pose features relative to `ref` in port axes, x RES_SCALE -> (len(steps) * 9,)."""
-    s = np.asarray(steps)
-    c = np.clip(s - 1, 0, len(hand_cmd) - 1)
-    return ((pose_feature(hand[s].astype(np.float64), ref, R_P) - pose_feature(hand_cmd[c].astype(np.float64), ref, R_P))
-            * RES_SCALE).reshape(-1).astype(np.float32)
+STILL = np.array([0, 0, 0, 1, 0, 0, 0, 1, 0], np.float32)       # the pose feature of a hand that has not moved
+
+
+def motion_feature(hand: np.ndarray, steps, ref: np.ndarray, R_P: np.ndarray) -> np.ndarray:
+    """The measured hand's motion from `ref` (the hand now) to each control step of `steps`: pose features relative
+    to `ref` in port axes minus STILL, x RES_SCALE -> (len(steps) * 9,). All zeros = the hand did not move."""
+    return ((pose_feature(hand[np.asarray(steps)].astype(np.float64), ref, R_P) - STILL) * RES_SCALE).reshape(-1).astype(np.float32)
 
 
 class FrameHistoryDataset(torch.utils.data.Dataset):
@@ -106,7 +111,7 @@ class FrameHistoryDataset(torch.utils.data.Dataset):
         t, jg = j + m, int(imgs[0])
         s_now, s_tgt, s_g = int(steps[j]), int(steps[t]), int(steps[jg])
         res_ok = (m == WM_STRIDE_IMAGES) and (s_tgt - s_now == 8) and len(hand_cmd) >= s_tgt
-        res = residual_feature(hand, hand_cmd, [s_now + 4, s_tgt], hand[s_now].astype(np.float64), R_P) if res_ok else np.zeros(18, np.float32)
+        res = motion_feature(hand, [s_now + 4, s_tgt], hand[s_now].astype(np.float64), R_P) if res_ok else np.zeros(18, np.float32)
         T = torch.from_numpy
         return {"frames_rgb": T(rgb), "frames_depth": T(dep), "frame_slot": T(slot), "frame_ok": T(ok),
                 "seen": T(h["seen"]), "avail": T(h["avail"]), "proprio": T(h["proprio"]), "dt": T(h["dt"]),

@@ -10,8 +10,8 @@
     world model (models/history_cdit.py, NWM's CDiT unchanged, feature map cut in 2 x 2 patches)
         diffusion    NWM's loss on the target frame's feature map, given the history (features of the seen slots,
                      proprioception of every slot), the commanded hand path and the time shift
-        aux          from its final tokens: where the hand really is at +0.2 s / +0.4 s relative to the commands (pose
-                     features; replaces the joint adapter) and "inserted" at the target time (the judge of imagined
+        aux          from its final tokens: how the hand really moves from now to +0.2 s / +0.4 s (pose features;
+                     replaces the joint adapter) and "inserted" at the target time (the judge of imagined
                      outcomes; an output, not a condition, so that imagined actions can change it)
     Vision masking, random time shifts, context noise: as wm4.py. Every kept frame is encoded at every step, so at most
     `max_frames` seen frames per sample (data/frame_history.py).
@@ -40,7 +40,7 @@ from ..models.history_cdit import HistoryCDiT, create_diffusion
 from . import common
 from .wm4 import mixed_batches
 
-AUX_DIM = 19          # 2 x 9 pose-feature residuals (+0.2 s, +0.4 s) and the "inserted at the target time" logit
+AUX_DIM = 19          # 2 x 9 pose features of the hand's motion (to +0.2 s, +0.4 s) and the "inserted at the target time" logit
 
 
 def build(cfg: dict, device):
@@ -102,8 +102,10 @@ def evaluate(enc_t, head, wm, diffusion, sampler, loaders, device, max_batches) 
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 e_real, e_pred, e_copy = (centre_lateral_mm(head(v, geom_t), tgt) for v in (x, pred, f_new.float()))
             ok = b["res_ok"]
-            adv_true = b["res"][ok][:, 9] / RES_SCALE * 10                  # mm along the axis: hand at +0.4 s minus its command
+            adv_true = b["res"][ok][:, 9] / RES_SCALE * 10                  # mm along the axis: the hand's motion in 0.4 s
             adv_pred = aux[ok][:, 9] / RES_SCALE * 10
+            lead = b["path"][ok][:, 13 * 9] * 10                            # mm: the decision's last command ahead of the hand now
+            held = (adv_true.abs() < 0.05) & (lead > 0.1)                   # pressed: the command leads, the hand stays
             ins = b["t_inserted"]
             m = {"diffusion_loss": float(vl), "close_frac": float(close.float().mean()),
                  "real_close_lateral_mm": float((e_real * close).sum() / close.sum().clamp(min=1)),
@@ -112,6 +114,9 @@ def evaluate(enc_t, head, wm, diffusion, sampler, loaders, device, max_batches) 
                  "blind_close_lateral_mm": float(((lat_t - lat_t[close].mean(0)).norm(dim=-1) * close).sum() / close.sum().clamp(min=1)),
                  "aux_lag_err_mm": float((adv_pred - adv_true).abs().mean()) if ok.any() else float("nan"),
                  "aux_lag_true_abs_mm": float(adv_true.abs().mean()) if ok.any() else float("nan"),
+                 "aux_held_frac": float(held.float().mean()) if ok.any() else float("nan"),
+                 "aux_held_pred_advance_mm": float(adv_pred[held].mean()) if held.any() else float("nan"),
+                 "aux_held_pred_abs_mm": float(adv_pred[held].abs().mean()) if held.any() else float("nan"),
                  "aux_inserted_acc": float(((aux[:, 18] > 0) == ins).float().mean()), "inserted_frac": float(ins.float().mean()),
                  "feature_std_over_samples": float(x.std(0).mean())}
             for k, v in m.items():
