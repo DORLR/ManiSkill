@@ -42,6 +42,10 @@ ap.add_argument("--n", type=int, default=6, help="cases per data set and section
 ap.add_argument("--sampling", default="250")
 ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--random-init", action="store_true", help="only to test this script")
+ap.add_argument("--weights", default="ema", choices=["ema", "model"],
+                help="ema: the averaged weights NWM's inference loads (decay 0.9999: after N steps a share 0.9999^N of them is still the "
+                     "random start -- 61 % at 5000 steps, 14 % at 20 000, 2 % at 40 000); model: the trained weights themselves, for "
+                     "looking at early checkpoints")
 args = ap.parse_args()
 frac = os.environ.get("WM_GPU_MEM_FRACTION")
 if frac:
@@ -55,7 +59,7 @@ model = CDiT_models[args.model](context_size=CTX, input_size=LAT, in_channels=4)
 step = -1
 if not args.random_init:
     ck = torch.load(args.ckpt, map_location="cpu", weights_only=False)
-    print(model.load_state_dict({k.replace("_orig_mod.", ""): v for k, v in ck["ema"].items()}, strict=True))
+    print(model.load_state_dict({k.replace("_orig_mod.", ""): v for k, v in ck[args.weights].items()}, strict=True))
     step = int(ck.get("train_steps", -1))
     del ck
 model.eval().to(dev)
@@ -88,7 +92,7 @@ def sheet(path, rows, labels, title):
     im.save(path)
 
 
-rep = {"checkpoint": args.ckpt, "train_steps": step, "sampling_steps": args.sampling}
+rep = {"checkpoint": args.ckpt, "train_steps": step, "sampling_steps": args.sampling, "weights": args.weights}
 # ------------------------------------------------------------------ time: one prediction to +0.4 / +2 / +4 s
 HOR = (2, 10, 20)
 rows, acc = [], {}
