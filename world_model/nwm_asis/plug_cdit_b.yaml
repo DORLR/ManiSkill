@@ -1,0 +1,51 @@
+# NWM's config/nwm_cdit_xl.yaml with our data; see README.md for the two differences (model size, data).
+run_name: plug_cdit_b
+
+# training setup
+results_dir: /mnt/storage2/qingxin/runs/nwm_asis
+train: True
+batch_size: 16
+num_workers: 12
+model: CDiT-B/2
+lr: 8e-5
+
+# normalization for the action space
+normalize: True
+grad_clip_val: 10.0
+context_size: 4
+
+# distance bounds for distance and action and distance predictions
+distance:
+  min_dist_cat: -64
+  max_dist_cat: 64
+
+# action output params
+len_traj_pred: 64
+
+# dataset specific parameters
+image_size: 224
+datasets:
+  wm_v1:
+    data_folder: /mnt/storage2/qingxin/data/wm_v1
+    train: train
+    test: ood_val
+    goals_per_obs: 4
+    len_traj_pred: 1     # our trajectories are 12-20 s (60-100 images): every frame may be the current one
+  wm_v1x:
+    data_folder: /mnt/storage2/qingxin/data/wm_v1x
+    train: train
+    test: ood_val
+    goals_per_obs: 4
+    len_traj_pred: 1
+  wm_v1c:
+    data_folder: /mnt/storage2/qingxin/data/wm_v1c
+    train: train
+    test: ood_val
+    goals_per_obs: 4
+    len_traj_pred: 1
+  wm_v1a:
+    data_folder: /mnt/storage2/qingxin/data/wm_v1a
+    train: train
+    test: ood_val
+    goals_per_obs: 4
+    len_traj_pred: 1
