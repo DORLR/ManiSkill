@@ -17,7 +17,7 @@ import math
 import torch
 import torch.nn as nn
 
-from .encoder import N_TOKENS
+N_TOKENS = 64            # default tokens per picture (callers pass their own: wm/tdmpc/policy_resnet.py uses the ResNet map)
 
 CHUNK = 16
 ACTION_DIM = 7
@@ -51,7 +51,9 @@ class LatentFMPolicy(nn.Module):
         """z (B, context, 64, D_in) context tokens, q (B, 7) measured joints -> (B, d)."""
         B = z.shape[0]
         h = self.inp(z) + self.token_pos[None, None] + self.frame_pos[None, :, None]
-        h = torch.cat([self.cls.expand(B, -1, -1), self.joint_in(q.float())[:, None], h.flatten(1, 2)], 1)
+        with torch.autocast(q.device.type, enabled=False):          # float32: bfloat16 rounds joints of 2-3 rad by up to 8 mrad
+            j = self.joint_in(q.float())
+        h = torch.cat([self.cls.expand(B, -1, -1), j[:, None], h.flatten(1, 2)], 1)
         return self.norm(self.encoder(h)[:, 0])
 
     def forward(self, a_t: torch.Tensor, t: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
