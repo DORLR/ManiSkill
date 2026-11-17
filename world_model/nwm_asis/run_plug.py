@@ -19,6 +19,20 @@ frac = os.environ.get("WM_GPU_MEM_FRACTION")    # shared GPU: fail on our side i
 if frac:
     torch.cuda.set_per_process_memory_fraction(float(frac))
 
+# NWM's train.py resumes with torch.load(path, map_location=<int rank>); this torch version accepts only a str / device / dict /
+# callable there ("'int' object is not callable", found 2026-11-14 at the first resume). Turned into "cuda:<rank>" here, so
+# train.py itself stays unchanged.
+_torch_load = torch.load
+
+
+def _load_int_location(*args, **kwargs):
+    if isinstance(kwargs.get("map_location"), int):
+        kwargs["map_location"] = f"cuda:{kwargs['map_location']}"
+    return _torch_load(*args, **kwargs)
+
+
+torch.load = _load_int_location
+
 import datasets  # noqa: E402  (NWM's datasets.py)
 from plug_dataset import PlugTrainingDataset  # noqa: E402
 
