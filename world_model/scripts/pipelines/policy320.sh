@@ -56,7 +56,7 @@ else
   elif [ -e "$O/log.jsonl" ]; then q320_log "$name: $O exists; pass 'resume' to continue it"; exit 1; fi
   mkdir -p "$O"; rm -f -- "${O:?}/TRAIN_EXIT"
   tfrac=$(q320_fraction $(( tmib - 600 )) "$gpu") || exit 1
-  ( q320_run "qx320-train-$name" "$tram" "$gpu" "$tmib" train "$tfrac" "$TLOG" python world_model/scripts/train/train_policy320.py \
+  ( q320_run_when_fits "qx320-train-$name" "$tram" "$gpu" "$tmib" train "$tfrac" "$TLOG" python world_model/scripts/train/train_policy320.py \
       --data "$DATA" --out "$O" --stem "$stem" --shift-px "$shift_px" --batch "$batch" --accum "$accum" --workers "$wk" --seed "$seed" "${extra[@]}"
     echo $? > "$O/TRAIN_EXIT" ) &
   tp=$!

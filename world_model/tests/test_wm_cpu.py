@@ -25,6 +25,12 @@ _split = D.split320
 D.split320 = lambda port, pitch, pos, grasp: "select" if grasp == "G00_g02" else _split(port, pitch, pos, grasp)
 
 
+def _phi(e, k):
+    with np.load(FAST / e["path"]) as z:
+        meta = json.loads(str(z["meta"]))
+        return float(WD.decision_labels(meta, z["hand"], np.array([WD.EXECUTE * k]))["phi"][0])
+
+
 def test_labels_and_windows():
     n_ok, kinds = 0, set()
     for e in D.load_entries(FAST):
@@ -38,7 +44,11 @@ def test_labels_and_windows():
         gain = (tr0["depth"][-1] - tr0["depth"][0]) * 1000
         assert abs(tr0["reward"].sum() - gain - (10 if tr0["end_seated"] else 0)) < 1e-3, "reward = depth gained (+10)"
         assert np.isfinite(tr1["reward"]).all() and tr1["reward"].shape == (n,)
-        assert tr0["term"][-1] == float(e["kind"] != "random" and e["outcome"] in ("inserted", "jammed")) and not tr0["term"][:-1].any()
+        L_mm = 1000 * e["pin_length_m"]
+        want = float(tr0["probe"][n, 0] >= -L_mm - 1.0) if e["kind"] == "contact" else 0.0 if e["kind"] == "random" else float(tr0["end_seated"])
+        assert tr0["term"][-1] == want and not tr0["term"][:-1].any(), "term from FK only"
+        if tr1["term"][-1]:                                  # potential 0 at a terminal state
+            assert abs(tr1["reward"][-1] - (tr0["reward"][-1] + 0.3 * (0.967 * 0 - _phi(e, n - 1)))) < 1e-3
         if e["outcome"] == "inserted" and e["kind"] != "contact":
             assert tr0["end_seated"], "a successful expert trajectory ends seated by the FK rule"
         s0, top = WD.action_scale([tr0])
@@ -58,7 +68,7 @@ def test_labels_and_windows():
 def run(out, *extra):
     argv = ["train_wm320.py", "--data", str(FAST), "--out", str(out), "--stem", "standard", "--shift-px", "4", "--shaping", "0.3",
             "--wm-batch", "2", "--bc-batch", "2", "--accum", "1", "--workers-wm", "0", "--workers-bc", "0", "--eval-every", "2",
-            "--eval-windows", "8", "--keep-every", "2", "--td-warmup", "2", "--device", "cpu", *extra]
+            "--eval-windows", "8", "--keep-every", "2", "--save-every", "1", "--td-warmup", "2", "--device", "cpu", *extra]
     old, sys.argv = sys.argv, argv
     try:
         T.main()

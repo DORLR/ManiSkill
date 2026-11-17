@@ -14,8 +14,10 @@ length only; never from the simulator's truth (the fast copy does not even conta
            relative to the insertion axis
   reward   1000 * depth gain + shaping * (gamma * phi(next) - phi) + 10 at the last decision if seated there
            (potential-based shaping: the best behaviour is unchanged; its weight is a required training argument)
-  term     the last decision of a trajectory that ended for good: inserted, or a contact push that jammed; not for
-           random motion or an expert that stopped early (those recordings are cut, not ended)
+  term     the last decision of a trajectory that ended for good, decided from FK only: an expert trajectory that
+           ends seated; a contact push whose hand reached the board face (pins at or past it: inserted or jammed);
+           never random motion, nor an expert or a push that was cut before (those recordings are cut, not ended).
+           At a terminal state the shaping potential counts as 0, so the shaping leaves the best behaviour unchanged
   probe    (along, lateral x, lateral y, rotation) relative to H*, for diagnostics only (a probe on the latent)
 The bonus, the last reward and the seated label of the last observation all refer to the same instant (step 8n).
 """
@@ -28,7 +30,6 @@ from . import demo320 as D
 
 EXECUTE, H = 8, 4                      # control steps per decision; decisions per training window
 SEATED_M, SEATED_DEG, BONUS = 1.5e-3, 4.0, 10.0
-TERMINAL_OUTCOMES = ("inserted", "jammed")
 ACTION_DIM = EXECUTE * D.JOINTS
 
 
@@ -66,7 +67,13 @@ def trajectory(z, meta: dict, shaping: float, gamma: float) -> dict | None:
     if lab["seated"][n]:
         reward[-1] += BONUS
     term = np.zeros(n, np.float32)
-    term[-1] = float(meta["kind"] != "random" and meta.get("outcome") in TERMINAL_OUTCOMES)
+    L_mm = 1000.0 * float(meta["pin_length_m"])
+    if meta["kind"] == "contact":
+        term[-1] = float(lab["probe"][n, 0] >= -L_mm - 1.0)          # the push reached the board face
+    elif meta["kind"] != "random":
+        term[-1] = float(lab["seated"][n])
+    if term[-1]:
+        reward[-1] -= shaping * gamma * lab["phi"][n]                 # potential 0 at a terminal state
     delta = (act[:EXECUTE * n].reshape(n, EXECUTE, D.JOINTS) - qpos[steps[:-1], :D.JOINTS][:, None]).reshape(n, ACTION_DIM)
     return {"n": n, "delta": delta.astype(np.float32), "reward": reward.astype(np.float32), "term": term,
             "q": qpos[steps, :D.JOINTS].astype(np.float32), "done": lab["seated"].astype(np.float32),

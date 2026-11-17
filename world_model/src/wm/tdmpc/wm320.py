@@ -37,7 +37,7 @@ from .model import make_cfg
 from .policy320 import TOKEN_DIM, TOKENS, PictureTokens, _amp
 
 CHUNK = D.CHUNK
-RET_MIN, RET_MAX = -60.0, 60.0         # returns of an attempt: depth <= 20 mm, bonus 10, shaping potential differences
+PHI_MAX = 150.0                        # largest |shaping potential| [mm + deg] of a start (gap <= 18 + pin 20 + lateral 14 + 6 deg x)
 
 
 class Encoder(nn.Module):
@@ -71,8 +71,10 @@ class Encoder(nn.Module):
 
 
 class WM320(nn.Module):
-    def __init__(self, stem: str, stats: dict, **cfg_over):
+    def __init__(self, stem: str, stats: dict, shaping: float = 0.0, **cfg_over):
         super().__init__()
+        self.ret_max = 20.0 + 10.0 + shaping * PHI_MAX                    # value targets lie within +-ret_max
+        self.shaping = shaping
         use_tdmpc2()
         from common import init, layers as L, math as M
         cfg = make_cfg(**cfg_over)
@@ -91,6 +93,7 @@ class WM320(nn.Module):
         init.zero_([self._reward[-1].weight, self._Qs.params["2", "weight"], self._Vs.params["2", "weight"]])
         from copy import deepcopy
         self._Qt = deepcopy(self._Qs).requires_grad_(False)
+        self._Qt.train(False)
         for k, v in stats.items():
             self.register_buffer(k, torch.tensor(np.asarray(v), dtype=torch.float32))
 
@@ -167,8 +170,8 @@ class WM320(nn.Module):
                 a_nx, a_ok = W["a_next"].transpose(0, 1), W["a_next_valid"].T
             else:
                 a_nx, a_ok = self.policy_action(zd), torch.ones_like(ov)
-            tv = self.target_value(zd, a_nx).clamp(RET_MIN, RET_MAX)            # (H+1, B)
-            y = (rew + cfg.gamma * (1 - term) * tv[1:]).clamp(RET_MIN, RET_MAX)
+            tv = self.target_value(zd, a_nx).clamp(-self.ret_max, self.ret_max)    # (H+1, B)
+            y = (rew + cfg.gamma * (1 - term) * tv[1:]).clamp(-self.ret_max, self.ret_max)
             q_ok = valid * (term + (1 - term) * a_ok[1:])
             v_ok = vv * a_ok
         rp, qs, vs = self.reward(zs[:-1], act), self.Q(zs[:-1], act), self.V(zs)
@@ -183,7 +186,9 @@ class WM320(nn.Module):
                 vl = vl + (M.soft_ce(vs[h, t], tv[t, :, None], cfg)[:, 0] * v_ok[t]).sum() / B * w
         cons, rl, ql, vl = cons / WD.H, rl / WD.H, ql / (WD.H * cfg.num_q), vl / ((WD.H + 1) * cfg.num_q)
         dlog = self._done(z)[..., 0]
-        dl = (F.binary_cross_entropy_with_logits(dlog, W["done"], reduction="none") * W["obs_valid"]).sum() / (B * (WD.H + 1))
+        dimg = self._done(zs[1:])[..., 0].T                                  # the imagined latents too (as TD-MPC2's termination)
+        dl = ((F.binary_cross_entropy_with_logits(dlog, W["done"], reduction="none") * W["obs_valid"]).sum()
+              + (F.binary_cross_entropy_with_logits(dimg, W["done"][:, 1:], reduction="none") * W["obs_valid"][:, 1:]).sum()) / (B * (2 * WD.H + 1))
         pl = (((self._probe(z.detach()) - W["probe"] / 10.0) ** 2).mean(-1) * W["obs_valid"]).sum() / (B * (WD.H + 1))
         bc = zs.sum() * 0
         if Bc is not None:
@@ -198,13 +203,14 @@ class WM320(nn.Module):
             with torch.no_grad():
                 info["_v0"] = self.scalar(self.V(z[:, 0]))[..., 0].mean(0).cpu().numpy()
                 info["_done"] = torch.sigmoid(dlog).cpu().numpy()
+                info["_done_imag"] = torch.sigmoid(dimg).cpu().numpy()
                 info["_imagined_probe"] = (self._probe(zs[-1]) * 10.0).cpu().numpy()
         return total, info
 
 
 def load(ckpt: str, device="cuda") -> "WM320":
     ck = torch.load(ckpt, map_location="cpu", weights_only=False)
-    m = WM320(ck["stem"], ck["stats"], **ck["cfg"])
+    m = WM320(ck["stem"], ck["stats"], ck.get("shaping", 0.0), **ck["cfg"])
     m.load_state_dict(ck["state"])
     return m.to(device).eval()
 
@@ -261,15 +267,17 @@ def stats_for(root, entries: list[dict], n_traj: int = 600, seed: int = 0) -> di
 
 
 def auc(score, label) -> float | None:
+    """Area under the ROC curve (scikit-learn); None when one class is missing or there are fewer than 10 points."""
+    from sklearn.metrics import roc_auc_score
     s, y = np.asarray(score, np.float64), np.asarray(label) > 0.5
     if y.all() or not y.any() or len(y) < 10:
         return None
-    r = np.argsort(np.argsort(s)) + 1.0
-    return float((r[y].sum() - y.sum() * (y.sum() + 1) / 2) / (y.sum() * (~y).sum()))
+    return float(roc_auc_score(y, s))
 
 
 def face_items(entries: list[dict], root, shaping: float, gamma: float, kinds=("contact",)) -> np.ndarray:
-    """(entry, k) of the decision just before the pins reach the board face (FK depth still 0, next one > 0)."""
+    """(entry, k) of the decision just before the pin tips reach the board face: the first k whose next observation
+    has the hand within half a millimetre of the face along the insertion axis (FK; also with a sideways offset)."""
     out = []
     for i, e in enumerate(entries):
         if e["kind"] not in kinds:
@@ -278,10 +286,17 @@ def face_items(entries: list[dict], root, shaping: float, gamma: float, kinds=("
             tr = WD.trajectory(z, json.loads(str(z["meta"])), shaping, gamma)
         if tr is None:
             continue
-        hit = np.nonzero(tr["depth"][1:] > 0)[0]
+        L_mm = 1000.0 * float(e["pin_length_m"])
+        hit = np.nonzero(tr["probe"][1:, 0] >= -L_mm - 0.5)[0]
         if len(hit):
             out.append((i, int(hit[0])))
     return np.array(out, np.int64).reshape(-1, 2)
 
 
-__all__ = ["WM320", "Encoder", "WindowData", "window_items", "stats_for", "face_items", "auc", "load"]
+def end_items(entries: list[dict], kinds=("contact",)) -> np.ndarray:
+    """(entry, max(0, n - H)) of every trajectory of the given kinds: its last window, which ends at its last state."""
+    return np.array([(i, max(0, e["steps"] // WD.EXECUTE - WD.H)) for i, e in enumerate(entries)
+                     if e["kind"] in kinds and e["steps"] >= WD.EXECUTE], np.int64).reshape(-1, 2)
+
+
+__all__ = ["WM320", "Encoder", "WindowData", "window_items", "stats_for", "face_items", "end_items", "auc", "load"]

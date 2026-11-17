@@ -2,12 +2,17 @@
 of every kind and outcome (expert demonstrations, offset pushes that jam or insert, random motion), plus the
 imitation stream of the built-in ACT head (the successful expert trajectories, every picture, independent samples).
 
-One optimiser step = --accum micro-batches of --wm-batch windows (4 decisions each) and --bc-batch imitation samples.
+One optimiser step = --accum micro-batches of --wm-batch windows (4 decisions each) and --bc-batch imitation samples
+(all three required: on one 24 GB A5000 the standard stem fits 16 / 32 / 8, the stem without max-pool 4 / 8 / 32;
+group norm, so accumulating gives the same gradient, except that the 2 of 5 target heads are drawn per micro-batch).
+The pictures' depth enters the stem in float32, but cuDNN's default TF32 rounds it to ~0.1 mm below 0.2 m and
+~0.2 mm beyond (as in the stand-alone policy). last.pt is written every --save-every steps; the random generators
+are saved with it.
 Adam, lr 3e-4 with the encoder at --enc-lr-scale (TD-MPC2's 0.3), gradient clip 20, target Q rate 0.01, one target
 update per step; random shift --shift-px per window / sample (required: stated, not a silent default).
 Validation (select split decides nothing yet; held-out logged): losses on fixed windows; the done head's AUC on
 observations with the pins in the hole or at the face (FK depth > 0); V just before the pins reach the face of a
-contact push against how it ended; the hand's offset read by the probe from the imagined latent after 4 decisions
+contact push against how it ended; the hand's offset read by the probe from the imagined latent at the last state of a contact push (its last window)
 against the real one, separately for pushes that jammed and that went in (does the model let a jammed hand walk on?);
 the built-in head's action error on held imitation samples. Fixed random numbers, restored afterwards.
 Resume and DONE.json as train_policy320.py.
@@ -28,8 +33,8 @@ import torch
 
 from wm.tdmpc import demo320 as D
 from wm.tdmpc import wmdata320 as WD
-from wm.tdmpc.policy320 import collate_cat, policy_loader, shift
-from wm.tdmpc.wm320 import WM320, WindowData, auc, face_items, stats_for, window_items
+from wm.tdmpc.policy320 import PolicyData, collate_cat, policy_loader, shift
+from wm.tdmpc.wm320 import WM320, WindowData, auc, end_items, face_items, stats_for, window_items
 from wm.training.common import Logger, cycle, seed_all
 
 
@@ -42,7 +47,8 @@ def loader(ds, batch, workers, seed, shuffle=True):
     g = torch.Generator()
     g.manual_seed(seed)
     return torch.utils.data.DataLoader(ds, batch_size=batch, shuffle=shuffle, generator=g if shuffle else None, drop_last=shuffle,
-                                       num_workers=workers, persistent_workers=shuffle and workers > 0, prefetch_factor=2 if workers else None)
+                                       num_workers=workers, persistent_workers=shuffle and workers > 0, prefetch_factor=2 if workers else None,
+                                       pin_memory=torch.cuda.is_available())
 
 
 def to(b, dev):
@@ -55,21 +61,25 @@ def validate(model, sets, args, dev):
     cpu, gpu = torch.random.get_rng_state(), (torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None)
     torch.manual_seed(1234)
     out = {}
-    for name, (wl, fl, bl) in sets.items():
-        num, done_s, done_y, v0, end, imag, real, outc = defaultdict(list), [], [], [], [], [], [], []
+    for name, (wl, fl, el, bl) in sets.items():
+        num, done_s, done_y, di_s, di_y, v0, end, imag, real, outc = defaultdict(list), [], [], [], [], [], [], [], [], []
         for W in wl:
             W = to(W, dev)
             _, info = model.loss(W, None, args.td_warmup, args.td_warmup, 0.0, detail=True)
             for k, v in info.items():
                 if not k.startswith("_"):
                     num[k].append(v)
-            m = (W["obs_valid"] > 0) & (W["fk_depth"] > 0)
-            done_s.append(info["_done"][m.cpu().numpy()]); done_y.append(W["done"][m].cpu().numpy())
+            m = ((W["obs_valid"] > 0) & (W["fk_depth"] > 0)).cpu().numpy()
+            done_s.append(info["_done"][m]); done_y.append(W["done"].cpu().numpy()[m])
+            di_s.append(info["_done_imag"][m[:, 1:]]); di_y.append(W["done"][:, 1:].cpu().numpy()[m[:, 1:]])
         for W in fl:
             W = to(W, dev)
             _, info = model.loss(W, None, args.td_warmup, args.td_warmup, 0.0, detail=True)
-            ok = W["obs_valid"][:, -1].cpu().numpy() > 0
             v0.append(info["_v0"]); end.append(W["end_seated"].cpu().numpy())
+        for W in el:
+            W = to(W, dev)
+            _, info = model.loss(W, None, args.td_warmup, args.td_warmup, 0.0, detail=True)
+            ok = W["obs_valid"][:, -1].cpu().numpy() > 0
             imag.append(info["_imagined_probe"][ok, 0]); real.append(W["probe"][:, -1, 0].cpu().numpy()[ok])
             outc.append(W["end_seated"].cpu().numpy()[ok])
         err = []
@@ -81,8 +91,10 @@ def validate(model, sets, args, dev):
         rec = {k: float(np.mean(v)) for k, v in num.items()}
         if done_y:
             rec["auc_done_depth_pos"] = auc(np.concatenate(done_s), np.concatenate(done_y))
+            rec["auc_done_imagined_depth_pos"] = auc(np.concatenate(di_s), np.concatenate(di_y))
         if v0:
             rec["auc_V_before_face_contact"] = auc(np.concatenate(v0), np.concatenate(end))
+        if imag:
             im, re, oc = np.concatenate(imag), np.concatenate(real), np.concatenate(outc) > 0.5
             for tag, sel in (("jammed", ~oc), ("inserted", oc)):
                 if sel.any():
@@ -107,9 +119,10 @@ def main():
     ap.add_argument("--shift-px", type=int, required=True)
     ap.add_argument("--shaping", type=float, required=True)
     ap.add_argument("--steps", type=int, default=100000)
-    ap.add_argument("--wm-batch", type=int, default=16)
-    ap.add_argument("--bc-batch", type=int, default=32)
-    ap.add_argument("--accum", type=int, default=8)
+    ap.add_argument("--wm-batch", type=int, required=True)
+    ap.add_argument("--bc-batch", type=int, required=True)
+    ap.add_argument("--accum", type=int, required=True)
+    ap.add_argument("--save-every", type=int, default=500)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--enc-lr-scale", type=float, default=0.3)
     ap.add_argument("--td-warmup", type=int, default=5000)
@@ -144,13 +157,14 @@ def main():
         wi = window_items(by[name])
         wi = wi[np.sort(rng.choice(len(wi), min(args.eval_windows, len(wi)), replace=False))]
         fi = face_items(by[name], args.data, args.shaping, args.gamma)
+        ei = end_items(by[name])
         bce = [e for e in by[name] if e["bc"]]
         bi = D.policy_items(bce)
         bi = bi[np.sort(rng.choice(len(bi), min(1024, len(bi)), replace=False))]
         mk = lambda items: [{k: v.clone() for k, v in b.items()} for b in loader(WindowData(args.data, by[name], items, stats, args.shaping, args.gamma), 16, 4, 0, False)]  # noqa: E731
-        sets[name] = (mk(wi), mk(fi) if len(fi) else [], [{k: v.clone() for k, v in b.items()} for b in policy_loader(args.data, bce, 32, 4, shuffle=False, items=bi)])
+        sets[name] = (mk(wi), mk(fi) if len(fi) else [], mk(ei) if len(ei) else [], [{k: v.clone() for k, v in b.items()} for b in policy_loader(args.data, bce, 32, 4, shuffle=False, items=bi)])
     torch.manual_seed(args.seed)
-    model = WM320(args.stem, stats, gamma=args.gamma).to(dev)
+    model = WM320(args.stem, stats, args.shaping, gamma=args.gamma).to(dev)
     enc = list(model.enc.parameters())
     ids = {id(p) for p in enc}
     rest = [p for p in model.parameters() if p.requires_grad and id(p) not in ids]
@@ -158,22 +172,26 @@ def main():
     step, skipped = 0, 0
     if ck:
         model.load_state_dict(ck["state"]); opt.load_state_dict(ck["opt"]); step, skipped = ck["step"], ck["skipped"]
-    info0 = {"format": "wm320-1", "stem": args.stem, "cfg": {"gamma": args.gamma}, "stats": stats}
+        torch.random.set_rng_state(ck["rng_cpu"])
+        if torch.cuda.is_available() and ck.get("rng_cuda") is not None:
+            torch.cuda.set_rng_state_all(ck["rng_cuda"])
+    info0 = {"format": "wm320-1", "stem": args.stem, "shaping": args.shaping, "cfg": {"gamma": args.gamma}, "stats": stats}
 
     def checkpoint(full: bool):
         c = {**info0, "state": model.state_dict(), "step": step, "skipped": skipped, "args": vars(args)}
         if full:
-            c["opt"] = opt.state_dict()
+            c.update(opt=opt.state_dict(), rng_cpu=torch.random.get_rng_state(),
+                     rng_cuda=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None)
         return c
 
     log = Logger(run)
     log(event="resume" if ck else "start", step=step, trajectories={k: len(v) for k, v in by.items()},
         windows=int(len(window_items(by["train"]))), imitation_samples=int(sum(e["n_images"] for e in by["train"] if e["bc"])),
-        validation={k: [len(v[0]) * 16, len(v[1]) * 16, len(v[2]) * 32] for k, v in sets.items()},
+        validation={k: [len(v[0]) * 16, len(v[1]) * 16, len(v[2]) * 16, len(v[3]) * 32] for k, v in sets.items()},
         params_m=sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6, args=vars(args))
     wtrain = cycle(loader(WindowData(args.data, by["train"], window_items(by["train"]), stats, args.shaping, args.gamma), args.wm_batch,
                           args.workers_wm, args.seed + step))
-    btrain = cycle(policy_loader(args.data, [e for e in by["train"] if e["bc"]], args.bc_batch, args.workers_bc, seed=args.seed + 1 + step))
+    btrain = cycle(loader(PolicyData(args.data, [e for e in by["train"] if e["bc"]]), args.bc_batch, args.workers_bc, args.seed + 1 + step))
     params = [p for p in model.parameters() if p.requires_grad]
     acc, t0, event = defaultdict(list), time.time(), "done"
     early = {500, 1000, 2500}
@@ -205,11 +223,12 @@ def main():
             log(step=step, it_per_s=250 / (time.time() - t0), gpu_GB=torch.cuda.max_memory_allocated() / 1e9 if dev.type == "cuda" else 0.0,
                 **{k: float(np.mean(v)) for k, v in acc.items()})
             acc, t0 = defaultdict(list), time.time()
+        if step % args.keep_every == 0:
+            save(checkpoint(False), run / f"step{step}.pt")
+        if step % args.save_every == 0:
+            save(checkpoint(True), run / "last.pt")
         if step in early or step % args.eval_every == 0 or step == args.steps:
             rec = validate(model, sets, args, dev)
-            save(checkpoint(True), run / "last.pt")
-            if step % args.keep_every == 0:
-                save(checkpoint(False), run / f"step{step}.pt")
             log(event="val", step=step, **rec)
             t0 = time.time()
     log(event=event, step=step)
