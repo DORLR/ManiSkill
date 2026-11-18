@@ -24,8 +24,9 @@ loader has --workers-wm // 2 extra workers per process), and the online attempts
 try (after the last back-off) whose next 16 targets lie in decisions where the proposal or the model's correction was
 executed (no exploration shift or random candidate; the final hold counts as part of the last decision) -- the world
 model's corrections are distilled into the head. Online trajectories are training grasps only (checked).
-Validation also logs, before the board face of pushes that jammed and of pushes that went in, the AUC and the medians
-of the value without the shaping term (WM320.unshaped_value: what the online agent's back-off compares; its threshold
+Validation also logs the unshaped value at the last pressing state of pushes that ended at a jam (their continuation
+is the boot target; ~0 once learned), and, before the board face of pushes that jammed and of pushes that went in,
+the AUC and the medians of the value without the shaping term (WM320.unshaped_value: what the online agent's back-off compares; its threshold
 is computed per round on the round's checkpoint by calibrate_vlow320.py) and the probe's error on the potential.
 Several GPUs: start with torchrun (PyTorch's DistributedDataParallel, NCCL): every process draws its own windows and
 samples, gradients are averaged over the processes; --accum is per process, so one optimiser step holds
@@ -136,7 +137,7 @@ def validate(model, sets, args, dev):
     out = {}
     for name, (wl, fl, el, bl) in sets.items():
         num, done_s, done_y, di_s, di_y, v0, end, imag, real, outc = defaultdict(list), [], [], [], [], [], [], [], [], []
-        v0u, phi_err, vpress = [], [], []
+        v0u, phi_err, vpress, jam = [], [], [], []
         for W in wl:
             W = to(W, dev)
             _, info = model.loss(W, None, args.td_warmup, args.td_warmup, 0.0, detail=True)
@@ -157,7 +158,7 @@ def validate(model, sets, args, dev):
             _, info = model.loss(W, None, args.td_warmup, args.td_warmup, 0.0, detail=True)
             ok = W["obs_valid"][:, -1].cpu().numpy() > 0
             imag.append(info["_imagined_probe"][ok, 0]); real.append(W["probe"][:, -1, 0].cpu().numpy()[ok])
-            vpress.append(info["_vpress_u"][ok])
+            vpress.append(info["_vpress_u"][ok]); jam.append(W["boot_ok"][:, -1].cpu().numpy()[ok] > 0)
             outc.append(W["end_seated"].cpu().numpy()[ok])
         err = []
         for b in bl:
@@ -181,9 +182,10 @@ def validate(model, sets, args, dev):
                     rec[f"Vunshaped_before_face_{tag}_median"] = float(np.median(vu[sel]))
         if imag:
             im, re, oc = np.concatenate(imag), np.concatenate(real), np.concatenate(outc) > 0.5
-            vp = np.concatenate(vpress)
-            if (~oc).any():                                            # ~0 when the jam's value is learned (unshaped)
-                rec["Vunshaped_last_pressing_state_jammed_median"] = float(np.median(vp[~oc]))
+            vp, jm = np.concatenate(vpress), np.concatenate(jam)
+            if jm.any():                                               # pushes ending at a jam (boot_ok): ~0 when learned (unshaped)
+                rec["Vunshaped_last_pressing_state_jammed_median"] = float(np.median(vp[jm]))
+                rec["windows_jam_boot"] = int(jm.sum())
             for tag, sel in (("jammed", ~oc), ("inserted", oc)):
                 if sel.any():
                     rec[f"imagined_minus_real_along_mm_{tag}"] = float(np.mean(im[sel] - re[sel]))

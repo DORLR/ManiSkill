@@ -12,7 +12,8 @@ Built-in ACT head: trained by imitation of the successful expert demonstrations 
 picture, independently drawn); its loss also trains the encoder (the expert's aligning motion needs the direction of
 the misalignment); it gives the next action of the value targets; one forward pass per action, so imagination is
 cheap. Values are bootstrapped as in TD-MPC2 (r + gamma * min of two target heads at the next latent and the
-built-in head's next action), except during a warm-up where the data's own next action is used.
+built-in head's next action), except during a warm-up where the data's own next action is used; the last decision
+of a scripted push that ended at a jam takes the jam's absorbing value as its continuation (wmdata320 'boot').
 Differences from TD-MPC2, all on purpose: picture encoder (ResNet + transformer over 4 pictures); a state value V
 next to Q; a done head; the next action of the targets comes from an imitation head instead of a Q-maximising prior
 (the value then means "continue as the expert would", no optimism of a maximising prior); value targets clamped to the
@@ -231,6 +232,8 @@ class WM320(nn.Module):
 
 def load(ckpt: str, device="cuda") -> "WM320":
     ck = torch.load(ckpt, map_location="cpu", weights_only=False)
+    if ck.get("labels") != WD.LABELS:
+        raise ValueError(f"{ckpt} was trained with labels {ck.get('labels')}, this code has {WD.LABELS}")
     m = WM320(ck["stem"], ck["stats"], ck.get("shaping", 0.0), **ck["cfg"])
     m.load_state_dict(ck["state"])
     return m.to(device).eval()
