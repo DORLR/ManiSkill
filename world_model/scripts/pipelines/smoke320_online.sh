@@ -19,11 +19,11 @@ frac=$(q320_fraction 18800 "$lg") || exit 1
 
 # 1. collector: 3 training grasps x 2 starts, 3 workers on one GPU (v_low: any number for a smoke; the rounds compute it per checkpoint)
 step collect 40 "$cg" 9000 test 1 "$S/collect.log" python $ATT --grasps "$Q/data/wm_v1" --ckpt "$S/model.pt" --mode collect --split train \
-  --pool "$S/pool" --round 1 --grasps-n 3 --starts 2 --workers 3 --gpus "$cg" --torch-mib 1500 --v-low 12
+  --pool "$S/pool" --round 1 --grasps-n 3 --starts 2 --workers 3 --gpus "$cg" --torch-mib 1500
 # 2. tests of the agent on 2 selection grasps x 1 start
 for m in act wm; do
   step "test-$m" 40 "$cg" 9000 test 1 "$S/test_$m.log" python $ATT --grasps "$Q/data/wm_v1" --ckpt "$S/model.pt" --mode $m --split select \
-    --out "$S/select_$m" --grasps-n 2 --starts 1 --workers 2 --gpus "$cg" --torch-mib 1500 --v-low 12
+    --out "$S/select_$m" --grasps-n 2 --starts 1 --workers 2 --gpus "$cg" --torch-mib 1500
 done
 # 3. learner on two GPUs: 260 steps (one 250-step log line with the all-reduced losses, a validation at 260), then 20 more
 #    steps resumed with the pool of step 1 (a 'data' record with the online windows)

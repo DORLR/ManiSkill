@@ -15,17 +15,13 @@ length only; never from the simulator's truth (the fast copy does not even conta
   reward   1000 * depth gain + shaping * (gamma * phi(next) - phi) + 10 at the last decision if seated there
            (potential-based shaping: the best behaviour is unchanged; its weight is a required training argument)
   term     the last decision of a trajectory that ended for good, decided from FK only: one that ends SEATED (any
-           kind but random motion); everything else is cut, not ended, a jammed push too (2026-11-17: marking a
-           jam terminal put shaping * gamma * |phi| ~ +6 into the REWARD of its last pressing decision, against ~ +1
-           for the same state in an expert pass, so the reward head paid for pressing misaligned at the face and the
-           agent's imagination, which goes on after it, counted it twice). At a terminal state the shaping potential
-           counts as 0, so the shaping leaves the best behaviour unchanged.
-  boot     the value of what follows a jam, for the last decision of a contact push that reached the board face
-           (pins at or past it) and did not end seated: the hand would stay there, so the continuation is worth the
-           absorbing value -shaping * phi(n) (shaped; 0 unshaped); the Q target of that decision is
-           r + gamma * boot instead of the model's own value (the scripted pushes record only ~2 decisions at the
-           jam, too few to bootstrap to it). boot_ok marks it. Labels version LABELS.
-  probe    (along, lateral x, lateral y, rotation) relative to H*, for diagnostics only (a probe on the latent)
+           kind but random motion). Everything else is cut, not ended -- a jammed push too (decided with the
+           researcher 2026-11-17: after a jam the robot backs off and tries again, so a jam is not an end; what
+           follows it is the model's own value, learned from the online rounds' back-off retries). At a terminal
+           state the shaping potential counts as 0, so the shaping leaves the best behaviour unchanged.
+           Labels version LABELS.
+  probe    (along, lateral x, lateral y, rotation) relative to H* [mm, deg]: FK labels used to find the decision
+           before the face (face_items); no model head reads or predicts them
 The bonus, the last reward and the seated label of the last observation all refer to the same instant (step 8n).
 """
 
@@ -37,7 +33,7 @@ from . import demo320 as D
 
 EXECUTE, H = 8, 4                      # control steps per decision; decisions per training window
 SEATED_M, SEATED_DEG, BONUS = 1.5e-3, 4.0, 10.0
-LABELS = "wm320-labels-2"              # 2: only a seated end is terminal; a jammed push's continuation is 'boot'
+LABELS = "wm320-labels-3"              # 3: only a seated end is terminal; a jam is cut (no fixed continuation)
 
 ACTION_DIM = EXECUTE * D.JOINTS
 
@@ -75,15 +71,13 @@ def trajectory(z, meta: dict, shaping: float, gamma: float) -> dict | None:
     reward = np.diff(lab["depth"]) * 1000.0 + shaping * (gamma * lab["phi"][1:] - lab["phi"][:-1])
     if lab["seated"][n]:
         reward[-1] += BONUS
-    term, boot, boot_ok = np.zeros(n, np.float32), np.zeros(n, np.float32), np.zeros(n, np.float32)
+    term = np.zeros(n, np.float32)
     if meta["kind"] != "random":
         term[-1] = float(lab["seated"][n])
-    if meta["kind"] == "contact" and not lab["seated"][n] and lab["probe"][n, 0] >= -1000.0 * float(meta["pin_length_m"]) - 1.0:
-        boot[-1], boot_ok[-1] = -shaping * lab["phi"][n], 1.0          # stays at the jam: the absorbing (shaped) value
     if term[-1]:
         reward[-1] -= shaping * gamma * lab["phi"][n]                 # potential 0 at a terminal state
     delta = (act[:EXECUTE * n].reshape(n, EXECUTE, D.JOINTS) - qpos[steps[:-1], :D.JOINTS][:, None]).reshape(n, ACTION_DIM)
-    return {"n": n, "delta": delta.astype(np.float32), "reward": reward.astype(np.float32), "term": term, "boot": boot, "boot_ok": boot_ok,
+    return {"n": n, "delta": delta.astype(np.float32), "reward": reward.astype(np.float32), "term": term,
             "q": qpos[steps, :D.JOINTS].astype(np.float32), "done": lab["seated"].astype(np.float32),
             "depth": lab["depth"].astype(np.float32), "probe": lab["probe"], "end_seated": bool(lab["seated"][n]),
             "kind": meta["kind"], "outcome": meta.get("outcome")}
@@ -105,11 +99,9 @@ def window(tr: dict, k: int, s0, top, warm_next: bool = True) -> dict:
            "obs_valid": (k + np.arange(H + 1) <= n).astype(np.float32),
            "v_valid": (k + np.arange(H + 1) < n).astype(np.float32),
            "action": np.zeros((H, ACTION_DIM), np.float32), "reward": np.zeros(H, np.float32), "term": np.zeros(H, np.float32),
-           "boot": np.zeros(H, np.float32), "boot_ok": np.zeros(H, np.float32),
            "valid": np.zeros(H, np.float32), "a_next": np.zeros((H + 1, ACTION_DIM), np.float32), "a_next_valid": np.zeros(H + 1, np.float32)}
     m = min(H, n - k)
     out["action"][:m], out["reward"][:m], out["term"][:m], out["valid"][:m] = act[k:k + m], tr["reward"][k:k + m], tr["term"][k:k + m], 1.0
-    out["boot"][:m], out["boot_ok"][:m] = tr["boot"][k:k + m], tr["boot_ok"][k:k + m]
     for j in range(H + 1):                       # the data's own action at each observation (the warm-up's next action)
         if k + j < n:
             out["a_next"][j], out["a_next_valid"][j] = act[k + j], 1.0

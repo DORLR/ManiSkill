@@ -132,7 +132,8 @@ def work(job):
             ex.snapshot()
             ex.restore()
             summ, out = ex.attempt(agent, a["mode"], int(seed + 1000 * i), margin=a["margin"], max_retries=a["max_retries"],
-                                   p_shift=a["p_shift"], eps=a["eps"], v_low=a["v_low"])
+                                   p_shift=a["p_shift"], eps=a["eps"], n_candidates=a["candidates"], radius_mm=a["radius_mm"],
+                                   random_reposition=a["random_reposition"])
             entry["attempt"] = summ
             if a["pool"]:
                 rel = f"r{a['round']}/traj/{g['port']}/{g['grasp']}/s{i}.npz"
@@ -201,10 +202,12 @@ def main():
     ap.add_argument("--torch-mib", type=int, default=1500, help="torch memory cap per worker")
     ap.add_argument("--horizon", type=int, default=3)
     ap.add_argument("--margin", type=float, default=0.5)
-    ap.add_argument("--max-retries", type=int, default=2)
+    ap.add_argument("--max-retries", type=int, default=3)
+    ap.add_argument("--candidates", type=int, default=16, help="re-position candidates after a back-off")
+    ap.add_argument("--radius-mm", type=float, default=3.0, help="re-position candidates lie within this radius")
+    ap.add_argument("--random-reposition", type=float, default=0.5, help="collect: share of re-positions drawn at random")
     ap.add_argument("--p-shift", type=float, default=0.5)
     ap.add_argument("--eps", type=float, default=0.1)
-    ap.add_argument("--v-low", type=float, help="back off when blocked only below this mean of the value heads (required with the world model)")
     ap.add_argument("--max-crashed-frac", type=float, default=0.02, help="collect: a round with more crashed grasps gets no DONE")
     ap.add_argument("--seed", type=int, default=9_100_000)
     ap.add_argument("--retries", type=int, default=1)
@@ -217,8 +220,6 @@ def main():
     if collect and not (args.pool and args.round > 0):
         raise SystemExit("collect needs --pool and --round >= 1")
     rdir = Path(args.pool) / f"r{args.round}" if collect else None
-    if args.mode != "act" and args.v_low is None:
-        raise SystemExit("--v-low is required with the world model (it depends on the value's scale)")
     if collect and (rdir / "DONE").exists():
         print(f"{rdir} is complete already", flush=True)
         sys.exit(0)
@@ -232,7 +233,7 @@ def main():
     chosen = E.pick(len(every), args.grasps_n)                     # k = index in the whole list: a grasp keeps its seed
     gs = [every[k] for k in chosen]
     path = {g["grasp"]: out / g["port"] / f"{g['grasp']}.json" for g in gs}
-    a = {k: getattr(args, k) for k in ("mode", "margin", "max_retries", "p_shift", "eps", "v_low", "round")}
+    a = {k: getattr(args, k) for k in ("mode", "margin", "max_retries", "p_shift", "eps", "candidates", "radius_mm", "random_reposition", "round")}
     a["pool"] = str(args.pool) if collect else None
     print(f"{len(gs)} of {len(every)} grasps of split {args.split} x {args.starts} starts, mode {args.mode}, {args.workers} workers on GPUs {gpus}", flush=True)
     for _ in range(1 + args.retries):
@@ -246,7 +247,8 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     summary, complete = E.summarise(out, gs, args.starts, {"policy": f"wm320 agent ({args.mode})", "ckpt": args.ckpt, "split": args.split,
                                                           "mode": args.mode, "round": args.round, "starts_per_grasp": args.starts,
-                                                          "margin": args.margin, "horizon": args.horizon, "v_low": args.v_low})
+                                                          "margin": args.margin, "horizon": args.horizon, "candidates": args.candidates,
+                                                          "radius_mm": args.radius_mm, "max_retries": args.max_retries})
     rows = [json.loads(path[g["grasp"]].read_text()) for g in gs if E.grasp_state(path[g["grasp"]]) == "done"]
     att = [st["attempt"] for r in rows for st in r.get("starts", []) if "attempt" in st]
     summary["attempts"] = len(att)

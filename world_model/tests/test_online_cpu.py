@@ -65,7 +65,6 @@ def test_write_fast(tmp):
     for k in ("delta", "q", "done", "depth", "probe"):
         assert np.allclose(tr[k], tr0[k]), k
     assert tr["term"][-1] == float(tr["end_seated"]), "an online attempt ends for good only when FK says seated"
-    assert not tr["boot_ok"].any(), "no scripted-jam continuation for an online attempt"
     s = D.policy_sample(tmp / rel, len(out["img_step"]) - 1)
     assert s["rgb"].shape == (4, 320, 320, 3) and s["a"].shape == (D.CHUNK * D.JOINTS,)
     return f"{tr['n']} decisions, {ent['n_images']} pictures; labels equal to the source's"

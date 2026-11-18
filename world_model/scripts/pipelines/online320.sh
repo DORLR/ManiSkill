@@ -13,12 +13,8 @@
 #     logged 1000 more steps (so that last.pt holds at least 500 steps on it).
 # Every such wait checks every 5 minutes: the learner finished (DONE.json) -> the rounds end (exit 0); its unit not
 # running at two checks in a row -> the rounds end (exit 1; a non-finite stop also ends the unit); the wait breaks only
-# while the unit runs. Then the learner's newest last.pt is copied to <pool>/r<R>/model.pt; the back-off threshold of
-# that very checkpoint is computed (calibrate_vlow320.py: midway between the medians of the mean value before the
-# board face of selection pushes that jammed and that went in) into r<R>/v_low.json (a file without
-# "value": "mean_V" is from an older version and is recomputed); when the value does not rank them (v_low
-# null) the round runs without back-offs (v_low -1e9, logged); the agent (ACT head + corrections + done stop +
-# back-off, with exploration) runs on every training grasp x <starts> (default 3) and writes the round's
+# while the unit runs. Then the learner's newest last.pt is copied to <pool>/r<R>/model.pt; the agent (ACT head +
+# corrections + done stop + back-off and re-position, with exploration) runs on every training grasp x <starts> (default 3) and writes the round's
 # trajectories and manifest (run_wm320_attempts.py --mode collect); the learner mixes in rounds with DONE by itself.
 # Then the same model is tested on the selection grasps (all x 4 starts): the ACT head alone and with the world model.
 # Two rounds in a row without a better "with the world model" success than the best before end the rounds (exit 0).
@@ -85,24 +81,6 @@ wait_learner() {     # <R>: waits until the learner is ready for collecting roun
   done
 }
 
-calibrate() {        # sets vl: the threshold of round R's checkpoint (computed once, kept in r<R>/v_low.json); exits when there is none
-  local rc
-  if [ ! -s "$D/v_low.json" ] || ! grep -q '"value": "mean_V"' "$D/v_low.json"; then     # (older files: recompute)
-    [ -e "$D/model.pt" ] || { q320_log "online $run: round $R has no model.pt"; exit 1; }
-    [ ! -e "$D/v_low.json" ] || mv "$D/v_low.json" "$D/v_low.old.json"                    # never read a stale threshold
-    q320_run_when_fits "qx320-test-${run}-r$R-vlow" 30 "${gpus%%,*}" "$mib" test 1 "$Q/logs/online_${run}_r${R}_vlow.log" \
-      python world_model/scripts/online/calibrate_vlow320.py --data "$Q/data/wm_v1_fast" --ckpt "$D/model.pt" --out "$D/v_low.json"
-    rc=$?
-    [ "$rc" = 0 ] || q320_log "online $run: round $R threshold calibration code $rc"
-  fi
-  vl=$(python -c "import json,sys
-try:
-    v = json.load(open(sys.argv[1]))['v_low']
-    print(-1e9 if v is None else float(v))
-except Exception:
-    pass" "$D/v_low.json")
-  [[ "$vl" =~ ^-?[0-9]+(\.[0-9]+)?(e[+-]?[0-9]+)?$ ]] || { q320_log "online $run: round $R has no usable v_low.json"; exit 1; }
-}
 success_of() {       # <summary.json> -> the success figure of all selection grasps, or nothing
   python -c "import json,sys
 try:
@@ -121,21 +99,19 @@ for R in $(seq 1 "$r1"); do
       wait_learner "$R"
       cp "$L/last.pt" "$D/model.pt.tmp" && mv "$D/model.pt.tmp" "$D/model.pt" || exit 1
     fi
-    calibrate
-    q320_log "online $run: round $R collects with v_low $vl ($(tr -d '\n' < "$D/v_low.json" | cut -c1-400))"
+    q320_log "online $run: round $R collects with $D/model.pt"
     q320_run_when_fits "qx320-collect-${run}-r$R" "$ram" "$gpus" "$mib" test 1 "$Q/logs/online_${run}_r$R.log" \
       python world_model/scripts/online/run_wm320_attempts.py --grasps "$Q/data/wm_v1" --ckpt "$D/model.pt" --mode collect --split train \
-      --pool "$P" --round "$R" --starts "$starts" --workers "$workers" --gpus "$gpus" --torch-mib "$tmib" --v-low="$vl"
+      --pool "$P" --round "$R" --starts "$starts" --workers "$workers" --gpus "$gpus" --torch-mib "$tmib"
     rc=$?
     [ -e "$D/DONE" ] || { q320_log "online $run: round $R has no DONE (collector code $rc); rounds stop"; exit 1; }
   fi
-  if [ ! -e "$D/select_act/summary.json" ] || [ ! -e "$D/select_wm/summary.json" ]; then calibrate; fi
   for m in act wm; do
     O=$D/select_$m
     [ -e "$O/summary.json" ] && continue
     q320_run_when_fits "qx320-test-${run}-r$R-$m" "$ram" "$gpus" "$mib" test 1 "$Q/logs/online_${run}_r${R}_select_$m.log" \
       python world_model/scripts/online/run_wm320_attempts.py --grasps "$Q/data/wm_v1" --ckpt "$D/model.pt" --mode "$m" --split select \
-      --out "$O" --starts 4 --workers "$workers" --gpus "$gpus" --torch-mib "$tmib" --v-low="$vl" \
+      --out "$O" --starts 4 --workers "$workers" --gpus "$gpus" --torch-mib "$tmib" \
       || q320_log "online $run: round $R select test $m code $?"
   done
   s=$(success_of "$D/select_wm/summary.json")

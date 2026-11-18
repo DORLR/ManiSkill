@@ -17,21 +17,23 @@ Per decision of "wm"/"collect" (every 0.4 s):
      all 8 targets (damped least squares on the FK Jacobian, rotation held). Excluded directions (5) are left out.
   4. correction when the best corrected copy beats the proposal by more than `margin` on the mean of the value
      heads' scores AND on every head (agent320.score); otherwise the proposal as it is.
-  5. blocked: the FK hand moved less than 0.2 mm over 8 decisions (as the policies' test). The hand backs off only
-     when the model judges the state bad: done p < 0.2 (not seated) and the mean of the value heads V < `v_low`
-     (required; online320.sh computes it on each round's own checkpoint with calibrate_vlow320.py: midway between
-     the median V before the face of selection pushes that jammed and that went in; when the value does not rank
-     them the round passes -1e9: no back-off); and only when
-     the remaining decisions leave room for the back-off and a new try (2 + 8 + 1). Back-off: 5 mm in 2 decisions
-     along the reverse of this try's motion (from where the try began; when that is under 1 mm, towards the
-     attempt's free-space start; when that too is under 1 mm the attempt ends "stalled"). The candidate direction
+  5. blocked (agreed with the researcher 2026-11-17): the FK hand moved less than 0.2 mm over 8 decisions (as the
+     policies' test) AND the done head says not seated (p < 0.5); and the remaining decisions leave room for the
+     back-off, the re-position and a new try (2 + 1 + 8 + 1). Back-off: 5 mm in 2 decisions along the reverse of
+     this try's motion (from where the try began; when that is under 1 mm, towards the attempt's free-space start;
+     when that too is under 1 mm the attempt ends "stalled"). Re-position: `n_candidates` positions drawn
+     uniformly in a disc of radius `radius_mm` in the plane across the way in (hand frame of the measured joints and
+     the motion itself; no H*); each is imagined as one decision that moves the hand there, then the ACT head going
+     on (agent320.score, `horizon` decisions); the best mean score is executed (collect: with probability
+     `random_reposition` a random one instead, so the data holds re-positions of every kind and the model's choice
+     can be compared with chance). Then the attempt goes on. The candidate direction
      most aligned with the model's own corrections of this try (in total; random candidates do not count) is
      excluded for the rest of the attempt (only when they add up to at least 0.5 mm); when nothing is excluded the
      next try would repeat the same approach (the agent is deterministic), so every back-off halves the correction
      margin of the attempt instead (the model corrects more readily). Otherwise, or after `max_retries` back-offs,
      the attempt ends "stalled".
   6. ends: seated (2), stalled (5), left (hand more than 6 cm from the start), 150 decisions in total (back-off
-     decisions included).
+     and re-position decisions included).
 Exploration in "collect" (labels may be used here: training grasps only, as the scripted sets did):
   - with probability `p_shift` per attempt, once, when the pin tips are first 0.5-4 mm in front of the board face
     (FK and H*), the hand is moved by 0.5-2 mm in a random direction across the insertion axis during that decision;
@@ -62,9 +64,9 @@ EXECUTE = WD.EXECUTE
 LEFT_M = 0.06                                  # as the policies' closed-loop test ("free" stops)
 STEPS_MM = (0.5, 1.5)
 BACKOFF_MM, BACKOFF_DECISIONS = 5.0, 2
-DONE_P, DONE_TIMES, NOT_DONE_P = 0.5, 2, 0.2
+DONE_P, DONE_TIMES, NOT_DONE_P = 0.5, 2, 0.5
 MIN_TRY_MM, MIN_CORR_MM = 1.0, 0.5
-KINDS = {"proposal": 0, "correction": 1, "random": 2, "shift": 3, "backoff": 4}
+KINDS = {"proposal": 0, "correction": 1, "random": 2, "shift": 3, "backoff": 4, "reposition": 5}
 
 
 class OnlineTester(Brancher):
@@ -87,13 +89,12 @@ class OnlineTester(Brancher):
 
     # ------------------------------------------------------------ one attempt
     def attempt(self, agent, mode: str, seed: int, max_decisions: int = B.MAX_DECISIONS, margin: float = 0.5,
-                max_retries: int = 2, p_shift: float = 0.5, eps: float = 0.1, v_low: float | None = None) -> tuple[dict, dict]:
+                max_retries: int = 3, p_shift: float = 0.5, eps: float = 0.1, n_candidates: int = 16, radius_mm: float = 3.0,
+                random_reposition: float = 0.5) -> tuple[dict, dict]:
         """-> (summary, recording). The recording is FullRecorder.end() plus `rgb_jpeg_list` (the stored JPEG bytes)
         and `dec_kind` (one KINDS value per executed decision)."""
         import torch
         assert mode in ("act", "wm", "collect")
-        if mode != "act" and v_low is None:
-            raise ValueError("v_low is required with the world model (it depends on the value's scale)")
         r, rng = self.robot, np.random.default_rng(seed)
         torch.manual_seed(seed)
         np.random.seed(seed % (2 ** 32))
@@ -125,7 +126,8 @@ class OnlineTester(Brancher):
         hands, start_hand = [r.hand_pose()[:3, 3].copy()], r.hand_pose()[:3, 3].copy()
         try_start, try_corr = start_hand.copy(), np.zeros(3)
         excluded: list[np.ndarray] = []
-        log = {"interventions": 0, "random_candidates": 0, "retries": 0, "shift": None, "done_p": [], "v_mean": [], "stall_states": []}
+        log = {"interventions": 0, "random_candidates": 0, "retries": 0, "shift": None, "done_p": [], "v_mean": [], "stall_states": [],
+               "repositions": []}
         shifted, done_run, why, q_last, k = mode != "collect" or rng.random() >= p_shift, 0, "time", r.qpos()[:7], 0
         p, vm, m_now = None, None, margin
         while k < max_decisions:
@@ -190,8 +192,8 @@ class OnlineTester(Brancher):
             hands.append(hand)
             if len(hands) > B.STALL_DECISIONS and np.linalg.norm(hands[-1] - hands[-1 - B.STALL_DECISIONS]) < B.STALL_M:
                 log["stall_states"].append({"decision": k, "done_p": None if p is None else round(p, 3), "v_mean": None if vm is None else round(vm, 3)})
-                room = max_decisions - k >= BACKOFF_DECISIONS + B.STALL_DECISIONS + 1
-                bad = mode != "act" and p < NOT_DONE_P and vm < v_low
+                room = max_decisions - k >= BACKOFF_DECISIONS + 1 + B.STALL_DECISIONS + 1
+                bad = mode != "act" and p < NOT_DONE_P
                 d = hand - try_start
                 if np.linalg.norm(d) < MIN_TRY_MM / 1000.0:
                     d = hand - start_hand
@@ -211,6 +213,34 @@ class OnlineTester(Brancher):
                     ramp = q9[None, :7] + o[None] * (np.arange(1, EXECUTE + 1)[:, None] / EXECUTE)
                     q_last = execute(ramp, ramp, "backoff")
                     k += 1
+                if np.linalg.norm(r.hand_pose()[:3, 3] - start_hand) > LEFT_M:
+                    why = "left"
+                    break
+                # re-position: candidate positions across the way in, each imagined, the best (or a random one) taken
+                j = len(rec.buf["rgb"]) - 1
+                idx = D.context_indices(j)
+                q9 = r.qpos().astype(np.float64)
+                q = q9[:7].copy()
+                z = agent.encode(np.stack([picture(i) for i in idx]), np.stack([rec.buf["depth"][i] for i in idx]), q)
+                ax = -d                                        # the way in
+                e1 = np.cross(ax, [0.0, 0.0, 1.0]) if abs(ax[2]) < 0.9 else np.cross(ax, [1.0, 0.0, 0.0])
+                e1 /= np.linalg.norm(e1)
+                e2 = np.cross(ax, e1)
+                rad = radius_mm / 1000.0 * np.sqrt(rng.uniform(0.0, 1.0, n_candidates))
+                ang = rng.uniform(0.0, 2 * np.pi, n_candidates)
+                pos = rad[:, None] * (np.cos(ang)[:, None] * e1 + np.sin(ang)[:, None] * e2)
+                Jr = self.jacobian(q9)
+                ramp = np.arange(1, EXECUTE + 1)[:, None] / EXECUTE
+                rp = np.stack([offset(Jr, mv)[None] * ramp for mv in pos])     # (N, 8, 7) relative to q
+                sc = agent.score(z, rp).mean(1)
+                best = int(np.argmax(sc))
+                pick, how = best, "model"
+                if mode == "collect" and rng.random() < random_reposition:
+                    pick, how = int(rng.integers(n_candidates)), "random"
+                q_last = execute(q[None] + rp[pick], q[None] + rp[pick], "reposition")
+                k += 1
+                log["repositions"].append({"decision": k, "how": how, "mm": [round(float(x) * 1000, 3) for x in pos[pick]],
+                                           "score_pick": round(float(sc[pick]), 3), "score_best": round(float(sc[best]), 3)})
                 hands = [r.hand_pose()[:3, 3].copy()]
                 try_start, try_corr, done_run = hands[0].copy(), np.zeros(3), 0
                 if np.linalg.norm(hands[0] - start_hand) > LEFT_M:
@@ -227,7 +257,7 @@ class OnlineTester(Brancher):
         truth = truth_outcome(out["eval_rel"][-1])
         summary = {"mode": mode, "stopped": why, "decisions": k, "seated_fk": bool(lab["seated"][0]), "seated_fk_after_hold": bool(lab["seated"][1]),
                    "success": is_success(truth), **{key: float(truth[key]) for key in D.SUCCESS},
-                   **{key: log[key] for key in ("interventions", "random_candidates", "retries", "shift", "stall_states")},
+                   **{key: log[key] for key in ("interventions", "random_candidates", "retries", "shift", "stall_states", "repositions")},
                    "decision_kinds": {name: int((out["dec_kind"] == v).sum()) for name, v in KINDS.items()},
                    "done_p": log["done_p"], "v_mean": log["v_mean"], "model_step": agent.step}
         return summary, out

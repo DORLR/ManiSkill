@@ -32,7 +32,7 @@ def _phi(e, k):
 
 
 def test_labels_and_windows():
-    n_ok, kinds, jams = 0, set(), 0
+    n_ok, kinds = 0, set()
     for e in D.load_entries(FAST):
         if e["steps"] < WD.EXECUTE:                         # e.g. an expert that failed before its first step: no decision
             continue
@@ -50,20 +50,11 @@ def test_labels_and_windows():
             assert abs(tr1["reward"][-1] - (tr0["reward"][-1] + 0.3 * (0.967 * 0 - _phi(e, n - 1)))) < 1e-3
         else:                                                # a cut end keeps its potential
             assert abs(tr1["reward"][-1] - (tr0["reward"][-1] + 0.3 * (0.967 * _phi(e, n) - _phi(e, n - 1)))) < 1e-3
-        L_mm = 1000 * e["pin_length_m"]
-        jam = e["kind"] == "contact" and not tr0["end_seated"] and tr0["probe"][n, 0] >= -L_mm - 1.0
-        jams += int(jam)
-        assert tr1["boot_ok"][-1] == float(jam) and not tr1["boot_ok"][:-1].any(), "boot only at a jam's last decision"
-        if jam:
-            assert abs(tr1["boot"][-1] + 0.3 * _phi(e, n)) < 1e-3 and tr0["boot"][-1] == 0.0
         if e["outcome"] == "inserted" and e["kind"] != "contact":
             assert tr0["end_seated"], "a successful expert trajectory ends seated by the FK rule"
         s0, top = WD.action_scale([tr0])
         for k in range(n):
             w = WD.window(tr0, k, s0, top)
-            w1 = WD.window(tr1, k, s0, top)
-            mm = int(w1["valid"].sum())
-            assert (w1["boot_ok"][:mm] == tr1["boot_ok"][k:k + mm]).all() and np.allclose(w1["boot"][:mm], tr1["boot"][k:k + mm])
             assert list(w["slots"]) == list(np.clip(2 * k - 6 + 2 * np.arange(8), 0, 2 * n))
             for j in range(WD.H + 1):                       # observation j's pictures are the policy's context of decision k+j
                 if k + j <= n:
@@ -72,8 +63,7 @@ def test_labels_and_windows():
             assert m == min(WD.H, n - k) and w["obs_valid"].sum() == min(WD.H, n - k) + 1
             assert np.allclose(w["reward"][:m], tr0["reward"][k:k + m]) and (np.abs(w["action"]) <= 1).all()
         kinds.add(e["kind"]); n_ok += 1
-    assert jams > 0, "the sample has no push that ended at a jam: the boot branch is not tested"
-    return f"{n_ok} trajectories ({sorted(kinds)}), {jams} jams: reward sums, terminal flags, boot targets, window slots and masks"
+    return f"{n_ok} trajectories ({sorted(kinds)}): reward sums, terminal flags, window slots and masks"
 
 
 def run(out, *extra):
