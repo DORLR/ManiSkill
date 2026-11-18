@@ -42,7 +42,7 @@ def _init(model, vecnorm, scale, shaping, gamma):
         _S["model"] = PPO.load(model, device="cpu")
         with open(vecnorm, "rb") as f:
             _S["vn"] = pickle.load(f)
-        _S["env"] = StateInsertEnv([], np.array(json.loads(Path(scale).read_text())), 0, shaping, gamma, stop_on_seated=False,
+        _S["env"] = StateInsertEnv([], json.loads(Path(scale).read_text()), 0, shaping, gamma, stop_on_seated=False,
                                    catch_errors=False)
     except Exception as exc:
         _S["init_error"] = f"{type(exc).__name__}: {exc}"[:500]

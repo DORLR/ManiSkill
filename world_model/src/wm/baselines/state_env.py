@@ -7,8 +7,11 @@ geometry is handed to it; its numbers are an upper reference, not a competitor u
 One step = one decision (0.4 s = 8 control steps at 20 Hz), as the policies and the world model.
   observation  joints (7) [rad]; their change over the last decision (7) [mrad]; hand offset from H* in the insertion
                axis frame: along, lateral x, lateral y [mm]; rotation from H* as a rotation vector [deg]   (20 numbers)
-  action       7 numbers in [-1, 1]: the joint target for the decision = measured joints + action * per-joint scale
-               (the 99.9th percentile of the demonstrations' per-decision joint motion), held for 8 control steps
+  action       7 numbers a in [-1, 1]: the joint target for the decision = measured joints + d, held for 8 control
+               steps, with the world model's asinh scaling per joint (wmdata320.scale_action, inverted):
+               d = s0 * sinh(a * asinh(top / s0)); s0 = the median and top = the 99.9th percentile (at least 2 s0)
+               over the demonstrations' decisions of the largest |commanded target - joints at the decision's start| (fine steps near 0, the full range at |a| = 1; with a linear
+               scale the first smoke run left the 6 cm box in a median of 6 decisions under random actions)
   reward       the world model's reward (wm/tdmpc/wmdata320.py): FK depth gained [mm] + shaping * (gamma * phi' - phi)
                + 10 when seated (1.5 mm, 4 deg); the potential counts as 0 at a terminal state
   episode end  training: seated (terminal); hand more than 6 cm from where it started (terminal); a stall of the hand
@@ -68,11 +71,14 @@ def _rotvec_deg(R: np.ndarray) -> np.ndarray:
 class StateInsertEnv(gym.Env):
     metadata = {"render_modes": []}
 
-    def __init__(self, grasps: list[dict], act_scale: np.ndarray, seed: int, shaping: float, gamma: float,
+    def __init__(self, grasps: list[dict], act_scale: dict, seed: int, shaping: float, gamma: float,
                  episodes_per_grasp: int = 16, max_decisions: int = MAX_DECISIONS, stop_on_seated: bool = True,
                  catch_errors: bool = True, start_delay_s: float = 0.0):
         super().__init__()
-        self.grasps, self.scale = list(grasps), np.asarray(act_scale, np.float64)
+        self.grasps = list(grasps)
+        self.s0, self.top = np.asarray(act_scale["s0"], np.float64), np.asarray(act_scale["top"], np.float64)
+        if not (self.s0.shape == self.top.shape == (7,) and (self.s0 > 0).all() and (self.top > self.s0).all()):
+            raise ValueError("act_scale needs s0 and top, 7 positive numbers each, top > s0")
         self.stop_on_seated, self.fresh, self.catch, self.start_delay_s = stop_on_seated, [], catch_errors, start_delay_s
         self.errors, self.placed_on_grasp, self.last_obs, self.reload = {}, 0, np.zeros(20, np.float32), False
         self.rng = np.random.default_rng(seed)
@@ -222,7 +228,9 @@ class StateInsertEnv(gym.Env):
     def _step(self, action):
         r = self.robot
         q = r.qpos()[:7].copy()
-        target = (q + np.clip(np.asarray(action, np.float64), -1, 1) * self.scale).astype(np.float32).astype(np.float64)   # as the policies' test
+        a = np.clip(np.asarray(action, np.float64), -1, 1)
+        d = self.s0 * np.sinh(a * np.arcsinh(self.top / self.s0))         # the world model's action scaling, inverted
+        target = (q + d).astype(np.float32).astype(np.float64)             # as the policies' test
         for _ in range(EXECUTE):
             r._command(target, 1)
         self.k += 1
