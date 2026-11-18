@@ -1,8 +1,9 @@
 #!/bin/bash
 # Online rounds of the 320 px world model, next to its learner (wm320.sh ... online: train_wm320.py --online <pool>).
 #   online320.sh <run> <gpus> <workers> <torch_mib per worker> <gpu_mib per GPU> <ram_gb> <last round> <min_step> [starts]
-# <gpus>: GPUs WITHOUT the learner (the budget leaves no room for a collector worker beside a learner); the workers are
-# spread evenly over them; <gpu_mib> must cover ceil(workers / GPUs) x (<torch_mib> + 1500 for context and renderer).
+# <gpus>: the collectors' GPUs; the workers are spread evenly over them; <gpu_mib> must cover ceil(workers / GPUs) x
+# (<torch_mib> + 1500 for context and renderer). Beside a learner that declares 18,500 MiB of a 24 GB A5000, one worker
+# per GPU fits (<gpu_mib> 3500: free minus the learner's unused declaration must exceed it by the budget's 2,000 margin).
 # Start it only after the learner's unit qx320-train-<run> runs (not while the learner waits in the budget queue).
 # Round R = 1..<last round>; finished parts of a round are skipped, so a restart resumes (the selection tests of
 # collected rounds run whatever the learner's state). Before collecting round R, wait until the learner
@@ -89,7 +90,7 @@ calibrate() {        # sets vl: the threshold of round R's checkpoint (computed 
   if [ ! -s "$D/v_low.json" ] || ! grep -q '"value": "unshaped"' "$D/v_low.json"; then   # (older files: recompute)
     [ -e "$D/model.pt" ] || { q320_log "online $run: round $R has no model.pt"; exit 1; }
     [ ! -e "$D/v_low.json" ] || mv "$D/v_low.json" "$D/v_low.old.json"                    # never read a stale threshold
-    q320_run_when_fits "qx320-test-${run}-r$R-vlow" 30 "${gpus%%,*}" 6000 test 1 "$Q/logs/online_${run}_r${R}_vlow.log" \
+    q320_run_when_fits "qx320-test-${run}-r$R-vlow" 30 "${gpus%%,*}" "$mib" test 1 "$Q/logs/online_${run}_r${R}_vlow.log" \
       python world_model/scripts/online/calibrate_vlow320.py --data "$Q/data/wm_v1_fast" --ckpt "$D/model.pt" --out "$D/v_low.json"
     rc=$?
     [ "$rc" = 0 ] || q320_log "online $run: round $R threshold calibration code $rc"
