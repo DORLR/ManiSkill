@@ -152,6 +152,10 @@ class WM320(nn.Module):
         return torch.stack([self.enc.fuse(tok[:, j:j + D.CONTEXT], q[:, j]) for j in range(S - D.CONTEXT + 1)], 1)
 
     # ---- training
+    def forward(self, *args, **kwargs):
+        """= loss(): DistributedDataParallel synchronises gradients only through forward()."""
+        return self.loss(*args, **kwargs)
+
     def loss(self, W: dict, Bc: dict | None, step: int, warmup: int, bc_weight: float, detail: bool = False):
         cfg, M = self.cfg, self.math
         B = W["q"].shape[0]

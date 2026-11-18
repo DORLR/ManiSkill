@@ -1,6 +1,9 @@
 """PPO baseline on the privileged state (wm/baselines/state_env.py), with Stable-Baselines3: PPO, SubprocVecEnv,
 VecNormalize (observations and rewards), checkpoints with the normalisation statistics. Training grasps only (the
-training split of demo320.split320: no selection, held-out or test grasp); each worker gets its own share of them.
+training split of demo320.split320: no selection, held-out or test grasp); each worker gets whole ports (its own
+share of them, balanced by grasp count, so its simulator is rebuilt only when it moves to another port); the workers'
+first resets (where their simulators are built) are 20 s apart. A resume refuses changed settings; every start or
+resume writes its own log folder and args file.
 The action scale per joint is the 99.9th percentile of the demonstrations' per-decision joint motion.
 Resumable from the newest checkpoint; DONE.json at the end.
 
@@ -41,11 +44,25 @@ def action_scale(data: str, n: int = 600, seed: int = 0) -> np.ndarray:
     return np.percentile(d, 99.9, axis=0)
 
 
-def make_env(grasps, scale, seed, shaping, gamma, per_grasp):
+def make_env(grasps, scale, seed, shaping, gamma, per_grasp, delay_s):
     def f():
         from wm.baselines.state_env import StateInsertEnv
-        return StateInsertEnv(grasps, scale, seed, shaping, gamma, per_grasp)
+        return StateInsertEnv(grasps, scale, seed, shaping, gamma, per_grasp, start_delay_s=delay_s)
     return f
+
+
+def port_shares(gs: list[dict], n: int) -> list[list[dict]]:
+    """Whole ports to n workers, largest port first to the worker with the fewest grasps so far."""
+    by = {}
+    for g in gs:
+        by.setdefault(g["port"], []).append(g)
+    share = [[] for _ in range(n)]
+    for p in sorted(by, key=lambda p: (-len(by[p]), p)):
+        min(share, key=len).extend(by[p])
+    return share
+
+
+SAME = ("shaping", "gamma", "n_envs", "episodes_per_grasp", "seed", "n_steps", "batch", "epochs", "lr", "grasps", "data")
 
 
 def main():
@@ -59,7 +76,7 @@ def main():
     ap.add_argument("--gamma", type=float, default=1 - 1 / 30)
     ap.add_argument("--episodes-per-grasp", type=int, default=16)
     ap.add_argument("--n-steps", type=int, default=256)
-    ap.add_argument("--batch", type=int, default=4096)
+    ap.add_argument("--batch", type=int, default=3072)          # divides n_steps x n_envs = 6144
     ap.add_argument("--epochs", type=int, default=10)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--save-every", type=int, default=500_000)
@@ -72,27 +89,46 @@ def main():
         raise SystemExit(f"{out} is finished")
     if not args.resume and (out / "args.json").exists():
         raise SystemExit(f"{out} already holds a run; use --resume to continue it")
+    if args.resume and (out / "args.json").exists():
+        old = json.loads((out / "args.json").read_text())
+        diff = {k: (old.get(k), getattr(args, k)) for k in SAME if old.get(k) != getattr(args, k)}
+        if diff:
+            raise SystemExit(f"--resume with changed settings {diff}: start a new run instead")
     out.mkdir(parents=True, exist_ok=True)
     torch.set_num_threads(args.threads)
     gs = train_grasps(args.grasps)
+    if len({g["port"] for g in gs}) < args.n_envs:
+        raise SystemExit(f"{len({g['port'] for g in gs})} training ports for {args.n_envs} workers")
     scale = action_scale(args.data, seed=args.seed) if not (out / "action_scale.json").exists() else np.array(json.loads((out / "action_scale.json").read_text()))
     (out / "action_scale.json").write_text(json.dumps(scale.tolist()))
-    (out / "args.json").write_text(json.dumps({**vars(args), "train_grasps": len(gs)}))
-    fns = [make_env(gs[i::args.n_envs], scale, args.seed * 1000 + i, args.shaping, args.gamma, args.episodes_per_grasp) for i in range(args.n_envs)]
-    venv = VecMonitor(SubprocVecEnv(fns, start_method="spawn"), info_keywords=("is_success",))
-    ck = sorted(glob.glob(str(out / "ckpt" / "ppo_*_steps.zip")), key=lambda p: int(re.search(r"_(\d+)_steps", p).group(1)))
-    if args.resume and ck:
-        steps = re.search(r"_(\d+)_steps", ck[-1]).group(1)
-        venv = VecNormalize.load(str(out / "ckpt" / f"ppo_vecnormalize_{steps}_steps.pkl"), venv)
+    if not (out / "args.json").exists():
+        (out / "args.json").write_text(json.dumps({**vars(args), "train_grasps": len(gs)}))
+    nstep = lambda p: int(re.search(r"ppo_(\d+)_steps\.zip$", p).group(1))  # noqa: E731
+    ck = sorted((p for p in glob.glob(str(out / "ckpt" / "ppo_*_steps.zip"))      # only checkpoints whose statistics were written too
+                 if (out / "ckpt" / f"ppo_vecnormalize_{nstep(p)}_steps.pkl").exists()), key=nstep) if args.resume else []
+    done = nstep(ck[-1]) if ck else 0
+    tag = f"log_from_{done}" if done else "log"
+    n = 1
+    while (out / (tag if n == 1 else f"{tag}_{n}")).exists():                       # never overwrite an earlier log
+        n += 1
+    tag = tag if n == 1 else f"{tag}_{n}"
+    share = port_shares(gs, args.n_envs)
+    fns = [make_env(share[i], scale, args.seed * 1000 + i + done, args.shaping, args.gamma, args.episodes_per_grasp, 20 * i)
+           for i in range(args.n_envs)]
+    venv = VecMonitor(SubprocVecEnv(fns, start_method="spawn"), filename=str(out / f"monitor_{tag}"),
+                      info_keywords=("is_success", "stopped", "decisions"))
+    if ck:
+        venv = VecNormalize.load(str(out / "ckpt" / f"ppo_vecnormalize_{done}_steps.pkl"), venv)
         model = PPO.load(ck[-1], env=venv, device="cpu")
     else:
         venv = VecNormalize(venv, gamma=args.gamma)
         model = PPO("MlpPolicy", venv, n_steps=args.n_steps, batch_size=args.batch, n_epochs=args.epochs, gamma=args.gamma, gae_lambda=0.95,
                     learning_rate=args.lr, clip_range=0.2, ent_coef=0.0, seed=args.seed, device="cpu", verbose=0,
                     policy_kwargs=dict(net_arch=dict(pi=[256, 256], vf=[256, 256])))
-    model.set_logger(configure(str(out), ["csv", "stdout"]))
+    (out / f"args_{tag}.json").write_text(json.dumps({**vars(args), "train_grasps": len(gs), "from_timesteps": done}))
+    model.set_logger(configure(str(out / tag), ["csv", "stdout"]))
     cb = CheckpointCallback(save_freq=max(1, args.save_every // args.n_envs), save_path=str(out / "ckpt"), name_prefix="ppo", save_vecnormalize=True)
-    model.learn(total_timesteps=args.total_steps, callback=cb, reset_num_timesteps=not (args.resume and ck))
+    model.learn(total_timesteps=max(0, args.total_steps - done), callback=cb, reset_num_timesteps=not ck)   # SB3 counts on from `done`
     model.save(str(out / "final.zip"))
     venv.save(str(out / "final_vecnormalize.pkl"))
     (out / "DONE.json").write_text(json.dumps({"event": "done", "timesteps": int(model.num_timesteps)}))

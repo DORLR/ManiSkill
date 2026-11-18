@@ -5,6 +5,7 @@
 #  - when the machine's memory pressure reaches 20 %, stop OUR newest job, one every 45 s until it is below 20 %.
 # Only units that our own launcher registered are ever stopped, by name.
 source "$(dirname "$(readlink -f "$0")")/lib320.sh"
+echo "$$" > "${Q320_STATE:?}/.watchdog_lists"     # this watchdog's lib knows GPU lists (q320_watchdog_lists)
 q320_log "watchdog started"
 while true; do
   for f in "${Q320_STATE:?}"/*.state; do
