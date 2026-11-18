@@ -24,8 +24,9 @@ loader has --workers-wm // 2 extra workers per process), and the online attempts
 try (after the last back-off) whose next 16 targets lie in decisions where the proposal or the model's correction was
 executed (no exploration shift or random candidate; the final hold counts as part of the last decision) -- the world
 model's corrections are distilled into the head. Online trajectories are training grasps only (checked).
-Validation also logs the median value before the board face of pushes that jammed and of pushes that went in (the
-online rounds take their back-off threshold midway between them).
+Validation also logs, before the board face of pushes that jammed and of pushes that went in, the AUC and the medians
+of the value without the shaping term (WM320.unshaped_value: what the online agent's back-off compares; its threshold
+is computed per round on the round's checkpoint by calibrate_vlow320.py) and the probe's error on the potential.
 Several GPUs: start with torchrun (PyTorch's DistributedDataParallel, NCCL): every process draws its own windows and
 samples, gradients are averaged over the processes; --accum is per process, so one optimiser step holds
 processes x --accum micro-batches (processes x accum = the single-GPU accum keeps the single-GPU recipe). Only
@@ -135,6 +136,7 @@ def validate(model, sets, args, dev):
     out = {}
     for name, (wl, fl, el, bl) in sets.items():
         num, done_s, done_y, di_s, di_y, v0, end, imag, real, outc = defaultdict(list), [], [], [], [], [], [], [], [], []
+        v0u, phi_err, vpress = [], [], []
         for W in wl:
             W = to(W, dev)
             _, info = model.loss(W, None, args.td_warmup, args.td_warmup, 0.0, detail=True)
@@ -147,12 +149,15 @@ def validate(model, sets, args, dev):
         for W in fl:
             W = to(W, dev)
             _, info = model.loss(W, None, args.td_warmup, args.td_warmup, 0.0, detail=True)
-            v0.append(info["_v0"]); end.append(W["end_seated"].cpu().numpy())
+            v0.append(info["_v0"]); end.append(W["end_seated"].cpu().numpy()); v0u.append(info["_v0u"])
+            pr = W["probe"][:, 0].cpu().numpy()                        # the FK labels of observation 0 (along, lx, ly, angle)
+            phi_err.append(np.abs(info["_phi0"] + (np.abs(pr[:, 0]) + np.hypot(pr[:, 1], pr[:, 2]) + pr[:, 3])))
         for W in el:
             W = to(W, dev)
             _, info = model.loss(W, None, args.td_warmup, args.td_warmup, 0.0, detail=True)
             ok = W["obs_valid"][:, -1].cpu().numpy() > 0
             imag.append(info["_imagined_probe"][ok, 0]); real.append(W["probe"][:, -1, 0].cpu().numpy()[ok])
+            vpress.append(info["_vpress_u"][ok])
             outc.append(W["end_seated"].cpu().numpy()[ok])
         err = []
         for b in bl:
@@ -167,11 +172,18 @@ def validate(model, sets, args, dev):
         if v0:
             vv, ee = np.concatenate(v0), np.concatenate(end) > 0.5
             rec["auc_V_before_face_contact"] = auc(vv, ee)
+            vu = np.concatenate(v0u)
+            rec["auc_Vunshaped_before_face_contact"] = auc(vu, ee)
+            rec["phi_probe_abs_err_before_face"] = float(np.mean(np.concatenate(phi_err)))
             for tag, sel in (("jammed", ~ee), ("inserted", ee)):
                 if sel.any():
                     rec[f"V_before_face_{tag}_median"] = float(np.median(vv[sel]))
+                    rec[f"Vunshaped_before_face_{tag}_median"] = float(np.median(vu[sel]))
         if imag:
             im, re, oc = np.concatenate(imag), np.concatenate(real), np.concatenate(outc) > 0.5
+            vp = np.concatenate(vpress)
+            if (~oc).any():                                            # ~0 when the jam's value is learned (unshaped)
+                rec["Vunshaped_last_pressing_state_jammed_median"] = float(np.median(vp[~oc]))
             for tag, sel in (("jammed", ~oc), ("inserted", oc)):
                 if sel.any():
                     rec[f"imagined_minus_real_along_mm_{tag}"] = float(np.mean(im[sel] - re[sel]))
@@ -243,6 +255,8 @@ def main():
     ents = [e for e in D.load_entries(args.data) if e["split"] != "test" and e["steps"] >= WD.EXECUTE]
     by = {s: [e for e in ents if e["split"] == s] for s in ("train", "select", "heldout")}
     ck = torch.load(run / "last.pt", map_location="cpu", weights_only=False) if resume else None
+    if ck and ck.get("labels") != WD.LABELS:                       # a changed design is trained from scratch, never resumed
+        raise SystemExit(f"{run}/last.pt was trained with labels {ck.get('labels')}, this code has {WD.LABELS}: start a new run")
     if ck:
         stats = ck["stats"]
     else:
@@ -280,7 +294,7 @@ def main():
                 torch.cuda.set_rng_state(ck["rng_cuda"][0], dev)
     if ddp:          # the model was built identically everywhere (same seed); from here each process draws its own
         torch.manual_seed(args.seed + RS * rank + step)     # shifts, noise and dropout (a resumed run: a fresh stream from the step on)
-    info0 = {"format": "wm320-1", "stem": args.stem, "shaping": args.shaping, "cfg": {"gamma": args.gamma}, "stats": stats}
+    info0 = {"format": "wm320-1", "labels": WD.LABELS, "stem": args.stem, "shaping": args.shaping, "cfg": {"gamma": args.gamma}, "stats": stats}
 
     def checkpoint(full: bool):
         c = {**info0, "state": model.state_dict(), "step": step, "skipped": skipped, "args": vars(args)}

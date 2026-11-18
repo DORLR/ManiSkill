@@ -17,7 +17,7 @@ TR=world_model/scripts/train/train_wm320.py
 DDP=(python -m torch.distributed.run --standalone --nproc_per_node=2)
 frac=$(q320_fraction 18800 "$lg") || exit 1
 
-# 1. collector: 3 training grasps x 2 starts, 3 workers on one GPU (v_low 12: a value between the jammed and inserted medians measured on the sample)
+# 1. collector: 3 training grasps x 2 starts, 3 workers on one GPU (v_low: any number for a smoke; the rounds compute it per checkpoint)
 step collect 40 "$cg" 9000 test 1 "$S/collect.log" python $ATT --grasps "$Q/data/wm_v1" --ckpt "$S/model.pt" --mode collect --split train \
   --pool "$S/pool" --round 1 --grasps-n 3 --starts 2 --workers 3 --gpus "$cg" --torch-mib 1500 --v-low 12
 # 2. tests of the agent on 2 selection grasps x 1 start
@@ -33,10 +33,11 @@ rm -f "$S/learner/DONE.json"
 step ddp-online 140 "$lg" 20000 train "$frac" "$S/ddp_online.log" "${DDP[@]}" $TR --data "$Q/data/wm_v1_fast" --out "$S/learner" --stem standard \
   --shift-px 4 --shaping 0.3 --wm-batch 16 --bc-batch 32 --accum 2 --workers-wm 8 --workers-bc 8 --steps 280 --eval-every 1000 --keep-every 1000 \
   --save-every 10 --online "$S/pool" --resume
-# 4. PPO: 4 workers, 3,072 steps; then its test on 2 selection grasps x 1 start
-step ppo 40 - 0 cpu 1 "$S/ppo.log" python world_model/scripts/train/train_ppo_state.py --grasps "$Q/data/wm_v1" --data "$Q/data/wm_v1_fast" \
+# 4. PPO: 4 workers, 3,072 steps; then its test on 2 selection grasps x 1 start (on the collector GPU: the simulators
+#    need a GPU for their renderer even without pictures)
+step ppo 40 "$cg" 8000 test 1 "$S/ppo.log" python world_model/scripts/train/train_ppo_state.py --grasps "$Q/data/wm_v1" --data "$Q/data/wm_v1_fast" \
   --out "$S/ppo" --n-envs 4 --total-steps 3072 --n-steps 256 --batch 512 --shaping 0.3 --save-every 1024
-step ppo-test 20 - 0 cpu 1 "$S/ppo_test.log" python world_model/scripts/eval/eval_ppo_state.py --grasps "$Q/data/wm_v1" --split select \
+step ppo-test 20 "$cg" 6000 test 1 "$S/ppo_test.log" python world_model/scripts/eval/eval_ppo_state.py --grasps "$Q/data/wm_v1" --split select \
   --model "$S/ppo/final.zip" --vecnorm "$S/ppo/final_vecnormalize.pkl" --scale "$S/ppo/action_scale.json" --out "$S/ppo_select" \
   --grasps-n 2 --starts 1 --workers 2
 q320_log "smoke $tag: all steps ran"

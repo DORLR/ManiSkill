@@ -118,6 +118,19 @@ class WM320(nn.Module):
     def scalar(self, logits):
         return self.math.two_hot_inv(logits, self.cfg)
 
+    def phi_hat(self, z):
+        """(B,) the shaping potential read by the probe: -(|along| + |lateral| [mm] + angle [deg]) (wmdata320's phi)."""
+        p = self._probe(z) * 10.0
+        return -(p[..., 0].abs() + torch.hypot(p[..., 1], p[..., 2]) + p[..., 3].clamp(min=0))
+
+    def unshaped_value(self, z):
+        """(B,) mean over the value heads of V(z) with the shaping term removed: the learned value is
+        V_orig - shaping * phi(s) (potential-based shaping, potential 0 at terminal states), and -phi grows with the
+        distance from the seated pose, so a far-away hand would look valuable; V_orig ~ V + shaping * phi_hat.
+        For decisions that compare states (the agent's back-off, its threshold); candidates of one state are ranked
+        on the shaped score (the term is the same for all of them)."""
+        return self.scalar(self.V(z))[..., 0].mean(0) + float(self.shaping) * self.phi_hat(z)
+
     def act_chunk(self, z):
         """The built-in ACT head: the next 16 joint targets relative to the measured joints [rad], (B, 16, 7)."""
         return (self._act(z) * self.a_std + self.a_mean).view(-1, CHUNK, D.JOINTS)
@@ -161,6 +174,7 @@ class WM320(nn.Module):
         B = W["q"].shape[0]
         z = self.observe(W["rgb"], W["depth"], W["q"])                        # (B, H+1, L)
         act, rew, term, valid = W["action"].transpose(0, 1), W["reward"].T, W["term"].T, W["valid"].T
+        boot, bok = W["boot"].T, W["boot_ok"].T                              # a jam's continuation (wmdata320)
         ov, vv = W["obs_valid"].T, W["v_valid"].T
         zs, cons = [z[:, 0]], 0.0
         for t in range(WD.H):
@@ -175,8 +189,8 @@ class WM320(nn.Module):
             else:
                 a_nx, a_ok = self.policy_action(zd), torch.ones_like(ov)
             tv = self.target_value(zd, a_nx).clamp(-self.ret_max, self.ret_max)    # (H+1, B)
-            y = (rew + cfg.gamma * (1 - term) * tv[1:]).clamp(-self.ret_max, self.ret_max)
-            q_ok = valid * (term + (1 - term) * a_ok[1:])
+            y = (rew + cfg.gamma * (1 - term) * torch.where(bok > 0, boot, tv[1:])).clamp(-self.ret_max, self.ret_max)
+            q_ok = valid * (term + bok + (1 - term - bok) * a_ok[1:])
             v_ok = vv * a_ok
         rp, qs, vs = self.reward(zs[:-1], act), self.Q(zs[:-1], act), self.V(zs)
         rl, ql, vl = 0.0, 0.0, 0.0
@@ -206,6 +220,9 @@ class WM320(nn.Module):
         if detail:
             with torch.no_grad():
                 info["_v0"] = self.scalar(self.V(z[:, 0]))[..., 0].mean(0).cpu().numpy()
+                info["_v0u"] = self.unshaped_value(z[:, 0]).cpu().numpy()
+                info["_phi0"] = self.phi_hat(z[:, 0]).cpu().numpy()
+                info["_vpress_u"] = self.unshaped_value(z[:, -2]).cpu().numpy()   # observation H-1: of an end window, the last pressing state
                 info["_done"] = torch.sigmoid(dlog).cpu().numpy()
                 info["_done_imag"] = torch.sigmoid(dimg).cpu().numpy()
                 info["_imagined_probe"] = (self._probe(zs[-1]) * 10.0).cpu().numpy()

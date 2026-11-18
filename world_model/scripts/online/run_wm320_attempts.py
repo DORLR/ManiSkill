@@ -204,7 +204,7 @@ def main():
     ap.add_argument("--max-retries", type=int, default=2)
     ap.add_argument("--p-shift", type=float, default=0.5)
     ap.add_argument("--eps", type=float, default=0.1)
-    ap.add_argument("--v-low", type=float, help="back off when blocked only below this mean value (required with the world model)")
+    ap.add_argument("--v-low", type=float, help="back off when blocked only below this value without the shaping term (required with the world model)")
     ap.add_argument("--max-crashed-frac", type=float, default=0.02, help="collect: a round with more crashed grasps gets no DONE")
     ap.add_argument("--seed", type=int, default=9_100_000)
     ap.add_argument("--retries", type=int, default=1)

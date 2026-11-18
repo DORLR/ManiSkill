@@ -44,11 +44,17 @@ def test_labels_and_windows():
         gain = (tr0["depth"][-1] - tr0["depth"][0]) * 1000
         assert abs(tr0["reward"].sum() - gain - (10 if tr0["end_seated"] else 0)) < 1e-3, "reward = depth gained (+10)"
         assert np.isfinite(tr1["reward"]).all() and tr1["reward"].shape == (n,)
-        L_mm = 1000 * e["pin_length_m"]
-        want = float(tr0["probe"][n, 0] >= -L_mm - 1.0) if e["kind"] == "contact" else 0.0 if e["kind"] == "random" else float(tr0["end_seated"])
+        want = 0.0 if e["kind"] == "random" else float(tr0["end_seated"])
         assert tr0["term"][-1] == want and not tr0["term"][:-1].any(), "term from FK only"
         if tr1["term"][-1]:                                  # potential 0 at a terminal state
             assert abs(tr1["reward"][-1] - (tr0["reward"][-1] + 0.3 * (0.967 * 0 - _phi(e, n - 1)))) < 1e-3
+        else:                                                # a cut end keeps its potential
+            assert abs(tr1["reward"][-1] - (tr0["reward"][-1] + 0.3 * (0.967 * _phi(e, n) - _phi(e, n - 1)))) < 1e-3
+        L_mm = 1000 * e["pin_length_m"]
+        jam = e["kind"] == "contact" and not tr0["end_seated"] and tr0["probe"][n, 0] >= -L_mm - 1.0
+        assert tr1["boot_ok"][-1] == float(jam) and not tr1["boot_ok"][:-1].any(), "boot only at a jam's last decision"
+        if jam:
+            assert abs(tr1["boot"][-1] + 0.3 * _phi(e, n)) < 1e-3 and tr0["boot"][-1] == 0.0
         if e["outcome"] == "inserted" and e["kind"] != "contact":
             assert tr0["end_seated"], "a successful expert trajectory ends seated by the FK rule"
         s0, top = WD.action_scale([tr0])

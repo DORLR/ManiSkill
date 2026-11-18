@@ -3,20 +3,24 @@
 #   online320.sh <run> <gpus> <workers> <torch_mib per worker> <gpu_mib per GPU> <ram_gb> <last round> <min_step> [starts]
 # <gpus>: GPUs WITHOUT the learner (the budget leaves no room for a collector worker beside a learner); the workers are
 # spread evenly over them; <gpu_mib> must cover ceil(workers / GPUs) x (<torch_mib> + 1500 for context and renderer).
-# Before round 1: waits until the learner's newest start/resume record reads this pool (--online) and its log has
-# reached step <min_step> (e.g. the end of the value warm-up). Every wait ends the script (exit 1) when the learner
-# is finished (DONE.json), when its unit qx320-train-<run> was seen running and then found inactive at two checks
-# 5 minutes apart, or when its newest start/resume record reads another pool (or none).
-# Round R = 1..<last round> (finished parts of a round are skipped, so a restart resumes): from round 2 on, first waits
-# until the learner has read round R-1 and trained 500 steps on it; the learner's newest last.pt is copied to
-# <pool>/r<R>/model.pt; the back-off threshold of that very checkpoint is computed (calibrate_vlow320.py: midway
-# between the median value before the board face of selection pushes that jammed and that went in; the value holds
-# -shaping * phi, so no fixed number fits) into r<R>/v_low.json; when the value does not rank them (v_low null) the
-# round runs without back-offs (v_low -1e9, logged); the agent (ACT head + corrections + done stop + back-off, with exploration) runs
-# on every training grasp x <starts> (default 3) and writes the round's trajectories and manifest
-# (run_wm320_attempts.py --mode collect); the learner mixes in rounds with DONE by itself. Then the same model is tested
-# on the selection grasps (all x 4 starts): the ACT head alone and with the world model. Two rounds in a row without a
-# better "with the world model" success than the best before end the rounds (exit 0).
+# Start it only after the learner's unit qx320-train-<run> runs (not while the learner waits in the budget queue).
+# Round R = 1..<last round>; finished parts of a round are skipped, so a restart resumes (the selection tests of
+# collected rounds run whatever the learner's state). Before collecting round R, wait until the learner
+#   - R = 1: reads this pool (its newest start/resume record has --online <pool>) and has logged step >= <min_step> + 500
+#     (e.g. the end of the value warm-up; +500: last.pt, written every 500 steps, is then past <min_step>);
+#   - R > 1: has read round R-1 (the first data record of the newest unbroken run of data records that list it) and
+#     logged 1000 more steps (so that last.pt holds at least 500 steps on it).
+# Every such wait checks every 5 minutes: the learner finished (DONE.json) -> the rounds end (exit 0); its unit not
+# running at two checks in a row -> the rounds end (exit 1; a non-finite stop also ends the unit); the wait breaks only
+# while the unit runs. Then the learner's newest last.pt is copied to <pool>/r<R>/model.pt; the back-off threshold of
+# that very checkpoint is computed (calibrate_vlow320.py: midway between the medians of the value without the
+# shaping term before the board face of selection pushes that jammed and that went in) into r<R>/v_low.json (a file
+# without "value": "unshaped" is from an older version and is recomputed); when the value does not rank them (v_low
+# null) the round runs without back-offs (v_low -1e9, logged); the agent (ACT head + corrections + done stop +
+# back-off, with exploration) runs on every training grasp x <starts> (default 3) and writes the round's
+# trajectories and manifest (run_wm320_attempts.py --mode collect); the learner mixes in rounds with DONE by itself.
+# Then the same model is tested on the selection grasps (all x 4 starts): the ACT head alone and with the world model.
+# Two rounds in a row without a better "with the world model" success than the best before end the rounds (exit 0).
 # Run it from a frozen copy of the code (as wm320.sh).
 source "$(dirname "$(readlink -f "$0")")/lib320.sh"
 CODE=$(cd "$(dirname "$(readlink -f "$0")")/../../.." && pwd)
@@ -32,49 +36,59 @@ cd "$CODE" || exit 1
 export PYTHONPATH=$CODE/world_model/src${PYTHONPATH:+:$PYTHONPATH}
 L=$Q/runs/$run; P=$Q/data/online320_$run; mkdir -p "$P"
 
-learner_state() {    # [round] -> "<reads this pool: 1 | 0 no | -1 no start record yet> <newest logged step> <step at which it first read the round, or -1>"
+learner_state() {    # [round] -> "<reads this pool: 1 | 0> <newest logged step>
+  #                      <step of the first data record of the newest unbroken run of data records listing the round, or -1>"
   python - "$L/log.jsonl" "$P" "${1:-}" <<'EOF'
 import json, sys
-ok, step, seen = -1, 0, -1
+ok, step, seen = 0, 0, -1
 try:
     for line in open(sys.argv[1]):
         try:
             r = json.loads(line)
         except ValueError:                     # a line being written
             continue
-        if r.get("event") in ("start", "resume"):
+        ev = r.get("event")
+        if ev in ("start", "resume"):
             ok = int((r.get("args") or {}).get("online") == sys.argv[2])
         if isinstance(r.get("step"), int):
             step = max(step, r["step"])
-        if r.get("event") == "data" and sys.argv[3] and sys.argv[3] in (r.get("online_rounds") or []) and seen < 0:
-            seen = r["step"]
+        if ev == "data" and sys.argv[3]:
+            if sys.argv[3] in (r.get("online_rounds") or []):
+                seen = r["step"] if seen < 0 else seen
+            else:
+                seen = -1                      # the round is not (or no longer) read
 except OSError:
     pass
 print(ok, step, seen)
 EOF
 }
-idle=0; seen_running=""
-learner_alive() {    # <ok>: fails (after logging) when the learner is finished, reads another pool, or its unit stopped
-  [ -e "$L/DONE.json" ] && { q320_log "online $run: the learner is finished; rounds end"; return 1; }
-  [ "$1" = 0 ] && { q320_log "online $run: the learner's newest start/resume does not read $P; rounds end"; return 1; }
-  if systemctl --user is-active --quiet "qx320-train-$run.scope"; then idle=0; seen_running=1
-  elif [ -n "$seen_running" ]; then idle=$(( idle + 1 )); fi        # (a learner still queued for its budget is not idle)
-  [ "$idle" -lt 2 ] || { q320_log "online $run: the learner's unit is not running; rounds end"; return 1; }
+
+wait_learner() {     # <R>: waits until the learner is ready for collecting round R (header); exits when it is gone
+  local down=0 said="" ok step seen running n=0
+  while true; do
+    read -r ok step seen < <(learner_state "r$(( $1 - 1 ))")
+    [ -e "$L/DONE.json" ] && { q320_log "online $run: the learner is finished; rounds end before round $1"; exit 0; }
+    running=""; systemctl --user is-active --quiet "qx320-train-$run.scope" && running=1
+    if [ -n "$running" ]; then down=0; else down=$(( down + 1 )); fi
+    [ "$down" -lt 2 ] || { q320_log "online $run: the learner's unit is not running; rounds end before round $1"; exit 1; }
+    if [ -n "$running" ] && [ "$ok" = 1 ]; then
+      if [ "$1" = 1 ]; then [ "$step" -ge $(( min_step + 500 )) ] && [ -e "$L/last.pt" ] && return 0
+      else [ "$seen" -ge 0 ] && [ "$step" -ge $(( seen + 1000 )) ] && return 0; fi
+    fi
+    if [ -z "$said" ] || [ $(( n % 12 )) = 0 ]; then                   # once, then hourly
+      q320_log "online $run: round $1 waits for the learner (unit running: ${running:-no}, reads $P: $ok, step $step, round $(( $1 - 1 )) read at step $seen)"
+      said=1
+    fi
+    n=$(( n + 1 ))
+    sleep 300
+  done
 }
-said=""; idle=0
-while true; do
-  read -r ok step seen < <(learner_state)
-  [ "$ok" = 1 ] && [ "$step" -ge "$min_step" ] && break
-  [ -n "$said" ] || { q320_log "online $run: waiting for the learner (reads $P: $ok, step $step of $min_step)"; said=1; }
-  learner_alive "$ok" || exit 1
-  sleep 300
-done
-q320_log "online $run: rounds start (learner at step $step)"
 
 calibrate() {        # sets vl: the threshold of round R's checkpoint (computed once, kept in r<R>/v_low.json); exits when there is none
   local rc
-  if [ ! -s "$D/v_low.json" ]; then
+  if [ ! -s "$D/v_low.json" ] || ! grep -q '"value": "unshaped"' "$D/v_low.json"; then   # (older files: recompute)
     [ -e "$D/model.pt" ] || { q320_log "online $run: round $R has no model.pt"; exit 1; }
+    [ ! -e "$D/v_low.json" ] || mv "$D/v_low.json" "$D/v_low.old.json"                    # never read a stale threshold
     q320_run_when_fits "qx320-test-${run}-r$R-vlow" 30 "${gpus%%,*}" 6000 test 1 "$Q/logs/online_${run}_r${R}_vlow.log" \
       python world_model/scripts/online/calibrate_vlow320.py --data "$Q/data/wm_v1_fast" --ckpt "$D/model.pt" --out "$D/v_low.json"
     rc=$?
@@ -96,27 +110,18 @@ try:
 except Exception:
     pass" "$1"
 }
+
 best=-1; worse=0
 for R in $(seq 1 "$r1"); do
   D=$P/r$R
   if [ ! -e "$D/DONE" ]; then
     mkdir -p "$D"
-    if [ ! -e "$D/model.pt" ] && [ "$R" -gt 1 ]; then          # the learner has trained on the previous round
-      said=""; idle=0
-      while true; do
-        read -r ok step seen < <(learner_state "r$(( R - 1 ))")
-        [ "$ok" = 1 ] && [ "$seen" -ge 0 ] && [ "$step" -ge $(( seen + 500 )) ] && break
-        [ -n "$said" ] || { q320_log "online $run: round $R waits for the learner to train on round $(( R - 1 ))"; said=1; }
-        learner_alive "$ok" || exit 1
-        sleep 300
-      done
-    fi
     if [ ! -e "$D/model.pt" ]; then
-      [ -e "$L/last.pt" ] || { q320_log "online $run: no $L/last.pt"; exit 1; }
+      wait_learner "$R"
       cp "$L/last.pt" "$D/model.pt.tmp" && mv "$D/model.pt.tmp" "$D/model.pt" || exit 1
     fi
     calibrate
-    q320_log "online $run: round $R collects with v_low $vl ($(tr -d '\n' < "$D/v_low.json" | cut -c1-300))"
+    q320_log "online $run: round $R collects with v_low $vl ($(tr -d '\n' < "$D/v_low.json" | cut -c1-400))"
     q320_run_when_fits "qx320-collect-${run}-r$R" "$ram" "$gpus" "$mib" test 1 "$Q/logs/online_${run}_r$R.log" \
       python world_model/scripts/online/run_wm320_attempts.py --grasps "$Q/data/wm_v1" --ckpt "$D/model.pt" --mode collect --split train \
       --pool "$P" --round "$R" --starts "$starts" --workers "$workers" --gpus "$gpus" --torch-mib "$tmib" --v-low="$vl"

@@ -18,10 +18,11 @@ Per decision of "wm"/"collect" (every 0.4 s):
   4. correction when the best corrected copy beats the proposal by more than `margin` on the mean of the value
      heads' scores AND on every head (agent320.score); otherwise the proposal as it is.
   5. blocked: the FK hand moved less than 0.2 mm over 8 decisions (as the policies' test). The hand backs off only
-     when the model judges the state bad: done p < 0.2 (not seated) and the mean value V < `v_low` (required: it
-     depends on the shaping weight, since V holds -shaping * phi; online320.sh computes it on each round's own
-     checkpoint with calibrate_vlow320.py: midway between the median V before the face of selection pushes that
-     jammed and that went in); and only when
+     when the model judges the state bad: done p < 0.2 (not seated) and the value without the shaping term
+     (WM320.unshaped_value: the shaping makes a far-away hand look valuable) < `v_low` (required; online320.sh
+     computes it on each round's own
+     checkpoint with calibrate_vlow320.py: midway between the median unshaped V before the face of selection pushes that
+     jammed and that went in; when the value does not rank them the round passes -1e9: no back-off); and only when
      the remaining decisions leave room for the back-off and a new try (2 + 8 + 1). Back-off: 5 mm in 2 decisions
      along the reverse of this try's motion (from where the try began; when that is under 1 mm, towards the
      attempt's free-space start; when that too is under 1 mm the attempt ends "stalled"). The candidate direction
@@ -138,7 +139,7 @@ class OnlineTester(Brancher):
             target, kind = chunk, "proposal"
             if mode != "act":
                 p = agent.done(z)
-                vm = float(agent.values(z).mean())
+                vm = agent.value_unshaped(z)
                 log["done_p"].append(round(p, 3))
                 log["v_mean"].append(round(vm, 3))
                 done_run = done_run + 1 if p > DONE_P else 0
@@ -189,7 +190,10 @@ class OnlineTester(Brancher):
                 break
             hands.append(hand)
             if len(hands) > B.STALL_DECISIONS and np.linalg.norm(hands[-1] - hands[-1 - B.STALL_DECISIONS]) < B.STALL_M:
-                log["stall_states"].append({"decision": k, "done_p": None if p is None else round(p, 3), "v_mean": None if vm is None else round(vm, 3)})
+                log["stall_states"].append({"decision": k, "done_p": None if p is None else round(p, 3), "v_unshaped": None if vm is None else round(vm, 3),
+                                            "phi_hat": None if mode == "act" else round(agent.phi_hat(z), 2),
+                                            "phi_fk_after": round(float(WD.decision_labels({"H_star": self.H_star, "axis": self.F[:, 0], "pin_length_m": self.L},
+                                                                                    r.hand_pose()[None], np.array([0]))["phi"][0]), 2)})
                 room = max_decisions - k >= BACKOFF_DECISIONS + B.STALL_DECISIONS + 1
                 bad = mode != "act" and p < NOT_DONE_P and vm < v_low
                 d = hand - try_start

@@ -10,6 +10,12 @@ Per decision (0.4 s):
             sum_t gamma^t c_t r_t + gamma^h c_h V_k(z_h), with c_t the imagined probability that the attempt has not
             ended yet (product of 1 - done) -- a seated state ends the sum, as a terminal state does in training
   done      the done head's probability that the plug is seated now
+  value     unshaped_value(): the mean of the value heads with the shaping term removed. With potential-based shaping
+            (reward + shaping * (gamma phi' - phi)) the learned value is V_orig - shaping * phi(s), and -phi grows with
+            the hand's distance from the seated pose: a hand far away would look valuable. The distance phi(s) is
+            estimated by the model's probe head (a linear read-out of the latent, trained on the FK labels; at run time
+            it reads only pictures and joints), so V_orig ~ V + shaping * phi_hat. Used for the back-off decision and its
+            threshold (calibrate_vlow320.py), never for ranking candidates (there the term cancels: same state).
 Nothing here reads H*, the insertion axis or the simulator's truth.
 """
 
@@ -23,10 +29,17 @@ from ..tdmpc import wmdata320 as WD
 from ..tdmpc.wm320 import WM320
 
 
+def unshaped_value(m, z: torch.Tensor) -> torch.Tensor:
+    """(B,) WM320.unshaped_value: mean over the value heads of V(z) + shaping * phi_hat(z) (phi from the probe head)."""
+    return m.unshaped_value(z)
+
+
 class WMAgent:
     def __init__(self, ckpt: str, device: str = "cuda", horizon: int = 3):
         self.device = torch.device(device)
         ck = torch.load(ckpt, map_location="cpu", weights_only=False)           # as wm320.load, read once
+        if ck.get("labels") != WD.LABELS:
+            raise ValueError(f"{ckpt} was trained with labels {ck.get('labels')}, this code has {WD.LABELS}")
         self.m = WM320(ck["stem"], ck["stats"], ck.get("shaping", 0.0), **ck["cfg"])
         self.m.load_state_dict(ck["state"])
         self.m.to(self.device).eval()
@@ -54,6 +67,14 @@ class WMAgent:
     def values(self, z: torch.Tensor) -> np.ndarray:
         """V of every value head at z, (num_q,)."""
         return self.m.scalar(self.m.V(z))[:, 0, 0].double().cpu().numpy()
+
+    @torch.no_grad()
+    def value_unshaped(self, z: torch.Tensor) -> float:
+        return float(self.m.unshaped_value(z)[0])
+
+    @torch.no_grad()
+    def phi_hat(self, z: torch.Tensor) -> float:
+        return float(self.m.phi_hat(z)[0])
 
     @torch.no_grad()
     def score(self, z: torch.Tensor, deltas: np.ndarray) -> np.ndarray:
