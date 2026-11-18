@@ -26,8 +26,9 @@ executed (no exploration shift or random candidate; the final hold counts as par
 model's corrections are distilled into the head. Online trajectories are training grasps only (checked).
 Validation also logs the unshaped value at the last pressing state of pushes that ended at a jam (their continuation
 is the boot target; ~0 once learned), and, before the board face of pushes that jammed and of pushes that went in,
-the AUC and the medians of the value without the shaping term (WM320.unshaped_value: what the online agent's back-off compares; its threshold
-is computed per round on the round's checkpoint by calibrate_vlow320.py) and the probe's error on the potential.
+the AUC and the medians of the value without the shaping term and the probe's error on the potential (diagnostics
+only, logged; nothing decides on them). The online agent's back-off compares the plain mean of the value heads
+(V_before_face_*_median here); its threshold is computed per round by calibrate_vlow320.py.
 Several GPUs: start with torchrun (PyTorch's DistributedDataParallel, NCCL): every process draws its own windows and
 samples, gradients are averaged over the processes; --accum is per process, so one optimiser step holds
 processes x --accum micro-batches (processes x accum = the single-GPU accum keeps the single-GPU recipe). Only

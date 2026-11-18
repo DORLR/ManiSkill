@@ -204,7 +204,7 @@ def main():
     ap.add_argument("--max-retries", type=int, default=2)
     ap.add_argument("--p-shift", type=float, default=0.5)
     ap.add_argument("--eps", type=float, default=0.1)
-    ap.add_argument("--v-low", type=float, help="back off when blocked only below this value without the shaping term (required with the world model)")
+    ap.add_argument("--v-low", type=float, help="back off when blocked only below this mean of the value heads (required with the world model)")
     ap.add_argument("--max-crashed-frac", type=float, default=0.02, help="collect: a round with more crashed grasps gets no DONE")
     ap.add_argument("--seed", type=int, default=9_100_000)
     ap.add_argument("--retries", type=int, default=1)
@@ -218,7 +218,7 @@ def main():
         raise SystemExit("collect needs --pool and --round >= 1")
     rdir = Path(args.pool) / f"r{args.round}" if collect else None
     if args.mode != "act" and args.v_low is None:
-        raise SystemExit("--v-low is required with the world model (it depends on the shaping weight)")
+        raise SystemExit("--v-low is required with the world model (it depends on the value's scale)")
     if collect and (rdir / "DONE").exists():
         print(f"{rdir} is complete already", flush=True)
         sys.exit(0)

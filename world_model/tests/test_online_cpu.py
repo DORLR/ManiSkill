@@ -91,7 +91,6 @@ def test_agent(tmp):
     idx = D.context_indices(4)
     z = ag.encode(np.stack([unjpeg(out["rgb_jpeg_list"][i]) for i in idx]), out["depth"][idx], out["qpos"][16])   # picture 4 = step 16
     p = ag.propose(z)
-    assert np.isfinite(ag.value_unshaped(z)) and ag.phi_hat(z) <= 0.0
     assert p.shape == (D.CHUNK, D.JOINTS) and 0.0 <= ag.done(z) <= 1.0 and ag.values(z).shape == (ag.m.cfg.num_q,)
     cands = np.stack([p[:WD.EXECUTE], p[:WD.EXECUTE] + 1e-3, p[:WD.EXECUTE] - 1e-3])
     sc = ag.score(z, cands)

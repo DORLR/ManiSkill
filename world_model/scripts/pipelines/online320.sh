@@ -14,9 +14,9 @@
 # Every such wait checks every 5 minutes: the learner finished (DONE.json) -> the rounds end (exit 0); its unit not
 # running at two checks in a row -> the rounds end (exit 1; a non-finite stop also ends the unit); the wait breaks only
 # while the unit runs. Then the learner's newest last.pt is copied to <pool>/r<R>/model.pt; the back-off threshold of
-# that very checkpoint is computed (calibrate_vlow320.py: midway between the medians of the value without the
-# shaping term before the board face of selection pushes that jammed and that went in) into r<R>/v_low.json (a file
-# without "value": "unshaped" is from an older version and is recomputed); when the value does not rank them (v_low
+# that very checkpoint is computed (calibrate_vlow320.py: midway between the medians of the mean value before the
+# board face of selection pushes that jammed and that went in) into r<R>/v_low.json (a file without
+# "value": "mean_V" is from an older version and is recomputed); when the value does not rank them (v_low
 # null) the round runs without back-offs (v_low -1e9, logged); the agent (ACT head + corrections + done stop +
 # back-off, with exploration) runs on every training grasp x <starts> (default 3) and writes the round's
 # trajectories and manifest (run_wm320_attempts.py --mode collect); the learner mixes in rounds with DONE by itself.
@@ -87,7 +87,7 @@ wait_learner() {     # <R>: waits until the learner is ready for collecting roun
 
 calibrate() {        # sets vl: the threshold of round R's checkpoint (computed once, kept in r<R>/v_low.json); exits when there is none
   local rc
-  if [ ! -s "$D/v_low.json" ] || ! grep -q '"value": "unshaped"' "$D/v_low.json"; then   # (older files: recompute)
+  if [ ! -s "$D/v_low.json" ] || ! grep -q '"value": "mean_V"' "$D/v_low.json"; then     # (older files: recompute)
     [ -e "$D/model.pt" ] || { q320_log "online $run: round $R has no model.pt"; exit 1; }
     [ ! -e "$D/v_low.json" ] || mv "$D/v_low.json" "$D/v_low.old.json"                    # never read a stale threshold
     q320_run_when_fits "qx320-test-${run}-r$R-vlow" 30 "${gpus%%,*}" "$mib" test 1 "$Q/logs/online_${run}_r${R}_vlow.log" \

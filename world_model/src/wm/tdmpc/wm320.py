@@ -128,8 +128,7 @@ class WM320(nn.Module):
         """(B,) mean over the value heads of V(z) with the shaping term removed: the learned value is
         V_orig - shaping * phi(s) (potential-based shaping, potential 0 at terminal states), and -phi grows with the
         distance from the seated pose, so a far-away hand would look valuable; V_orig ~ V + shaping * phi_hat.
-        For decisions that compare states (the agent's back-off, its threshold); candidates of one state are ranked
-        on the shaped score (the term is the same for all of them)."""
+        A validation diagnostic only (train_wm320.validate); the online agent does not use it."""
         return self.scalar(self.V(z))[..., 0].mean(0) + float(self.shaping) * self.phi_hat(z)
 
     def act_chunk(self, z):
