@@ -19,12 +19,15 @@ Starts: the policies' start box (collect/branch.py sample_start), placed with FK
 insertion is run once (as the closed-loop test does). A worker gets whole ports and stays on one grasp for
 `episodes_per_grasp` episodes; the next grasp comes from the same port while it has untried ones, so the simulator
 (one per port) is rebuilt rarely. A grasp whose reference insertion or stand-off fails is dropped, as is one with no
-successful placement in a whole turn, or with two simulator errors in a row (no successful decision between them:
-a grasp whose load, placement or first decision always fails); every drop is printed. After a simulator error the
-same grasp is loaded again and its turn goes on (a new turn when its episodes were used up); sporadic errors never
-add up. Training (catch_errors=True): an exception of the
-simulator in reset or step is caught: the simulator is closed and rebuilt at the next reset, the episode is cut
-(truncated); only a worker left without any grasp raises RuntimeError (which ends the training).
+successful placement in a whole turn, or with ERRORS_IN_A_ROW (5) simulator errors with no successful decision between
+them (a grasp whose load, placement or first decision always fails; a reload after an error spans hundreds of
+control steps, so sporadic errors could otherwise hit two reloads in a row); only a successful decision resets the
+count; every drop is printed. After a simulator error the same grasp is loaded again and its turn goes on (a new
+turn when its episodes were used up). Training (catch_errors=True): an exception of the simulator in reset or step
+is caught: the simulator is closed and rebuilt at the next reset, the episode is cut (truncated; is_success None, so
+that the logged success rate leaves it out); an exception in the final hold or truth read of an episode that ended
+keeps the decision's real result (truth missing in info); only a worker left without any grasp raises RuntimeError
+(which ends the training).
 A worker's first reset waits `start_delay_s` (the simulators of the workers are then not built at the same moment).
 `info` at the end also holds the first decision at which FK said "seated" (None if never), so that a test can count
 attempts that were seated once but failed at the end.
@@ -51,6 +54,7 @@ from ..tdmpc.demo320 import is_success
 
 EXECUTE, MAX_DECISIONS = WD.EXECUTE, 150
 LEFT_M = 0.06
+ERRORS_IN_A_ROW = 5
 
 
 def _rotvec_deg(R: np.ndarray) -> np.ndarray:
@@ -130,8 +134,8 @@ class StateInsertEnv(gym.Env):
             raise RuntimeError("no usable grasp is left in this worker")
 
     def _broken(self, where: str, exc: Exception):
-        """A simulator error in training: close the simulator (rebuilt at the next reset, same grasp); two errors in a
-        row drop the grasp."""
+        """A simulator error in training: close the simulator (rebuilt at the next reset: the same grasp, or the next
+        one when its turn is over); ERRORS_IN_A_ROW errors with no successful decision between them drop the grasp."""
         if not self.catch:
             raise exc
         print(f"state_env: {where} on {self.g and self.g['grasp']}: {type(exc).__name__}: {exc}"[:400], file=sys.stderr, flush=True)
@@ -143,9 +147,9 @@ class StateInsertEnv(gym.Env):
             pass
         if self.g is not None:
             self.errors[self.g["grasp"]] = self.errors.get(self.g["grasp"], 0) + 1
-            self.reload = self.errors[self.g["grasp"]] < 2                # the same grasp again, its turn goes on
+            self.reload = self.errors[self.g["grasp"]] < ERRORS_IN_A_ROW  # the same grasp again, its turn goes on
             if not self.reload:
-                self._drop(self.g, "two simulator errors in a row")
+                self._drop(self.g, f"{ERRORS_IN_A_ROW} simulator errors in a row")
 
     # ---- gym API
     def reset(self, *, seed=None, options=None):
@@ -162,7 +166,6 @@ class StateInsertEnv(gym.Env):
                     if self.ex is not None and self.placed_on_grasp == 0:  # a whole turn without one placement
                         self._drop(self.g, "no placement in a whole turn")
                     self.g, self.done_on_grasp, self.placed_on_grasp = self._next_grasp(), 0, 0
-                    self.errors[self.g["grasp"]] = 0                       # a new turn starts with no error
                 try:
                     ok = self._load(self.g)
                 except Exception as exc:
@@ -187,7 +190,7 @@ class StateInsertEnv(gym.Env):
 
     def _next_grasp(self) -> dict:
         """An untried grasp of the current port if there is one, else one of the port drawn next (a new cycle when all were tried)."""
-        port = self.robot.port_type if self.robot is not None else None
+        port = self.robot.port_type if self.robot is not None else (self.g["port"] if self.g is not None else None)
         if not self.fresh:
             self.fresh = list(self.grasps)
         same = [g for g in self.fresh if g["port"] == port]
@@ -211,7 +214,7 @@ class StateInsertEnv(gym.Env):
             out = self._step(action)
         except Exception as exc:
             self._broken("step", exc)                                  # raises outside training
-            return self.last_obs, 0.0, False, True, {"is_success": False, "stopped": "error", "decisions": getattr(self, "k", 0),
+            return self.last_obs, 0.0, False, True, {"is_success": None, "stopped": "error", "decisions": getattr(self, "k", 0),
                                                      "error": f"{type(exc).__name__}"}
         self.errors[self.g["grasp"]] = 0                                   # a successful decision: errors no longer in a row
         return out
@@ -247,12 +250,17 @@ class StateInsertEnv(gym.Env):
         obs, info = self._obs(lab), {}                                  # the observation of the decision's end, before any hold
         self.last_obs = obs
         if terminated or truncated:
-            for _ in range(4):                                          # the closed-loop test's final hold
-                r._command(target, 1)
-            t = truth_outcome(_truth_rel(r))
-            info = {"is_success": is_success(t), "stopped": why, "decisions": self.k, "seated_fk": bool(self._labels()["seated"]),
-                    "first_seated_decision": self.first_seated,
-                    **{k: float(t[k]) for k in ("depth_left_mm", "angle_deg", "lateral_mm")}}
+            try:
+                for _ in range(4):                                      # the closed-loop test's final hold
+                    r._command(target, 1)
+                t = truth_outcome(_truth_rel(r))
+                info = {"is_success": is_success(t), "stopped": why, "decisions": self.k, "seated_fk": bool(self._labels()["seated"]),
+                        "first_seated_decision": self.first_seated,
+                        **{k: float(t[k]) for k in ("depth_left_mm", "angle_deg", "lateral_mm")}}
+            except Exception as exc:                                    # the decision itself stands
+                self._broken("final hold", exc)                         # raises outside training
+                info = {"is_success": None, "stopped": why, "decisions": self.k, "first_seated_decision": self.first_seated,
+                        "error": f"{type(exc).__name__} in the final hold"}
         return obs, float(rew), terminated, truncated, info
 
 

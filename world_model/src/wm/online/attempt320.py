@@ -19,8 +19,9 @@ Per decision of "wm"/"collect" (every 0.4 s):
      heads' scores AND on every head (agent320.score); otherwise the proposal as it is.
   5. blocked: the FK hand moved less than 0.2 mm over 8 decisions (as the policies' test). The hand backs off only
      when the model judges the state bad: done p < 0.2 (not seated) and the mean value V < `v_low` (required: it
-     depends on the shaping weight, since V holds -shaping * phi; online320.sh takes it from the learner's
-     validation: midway between the median V before the face of jammed and of inserted pushes); and only when
+     depends on the shaping weight, since V holds -shaping * phi; online320.sh computes it on each round's own
+     checkpoint with calibrate_vlow320.py: midway between the median V before the face of selection pushes that
+     jammed and that went in); and only when
      the remaining decisions leave room for the back-off and a new try (2 + 8 + 1). Back-off: 5 mm in 2 decisions
      along the reverse of this try's motion (from where the try began; when that is under 1 mm, towards the
      attempt's free-space start; when that too is under 1 mm the attempt ends "stalled"). The candidate direction
