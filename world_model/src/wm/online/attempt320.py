@@ -92,8 +92,8 @@ class OnlineTester(Brancher):
                 max_retries: int = 3, p_shift: float = 0.5, eps: float = 0.1, n_candidates: int = 16, radius_mm: float = 3.0,
                 random_reposition: float = 0.5, inside_mm: float | None = None) -> tuple[dict, dict]:
         """-> (summary, recording). `inside_mm` (2026-11-18, the user's decision; None = off): once the estimated pin-tip
-        depth g_t = agent.gap_mm(z_t, L) < -inside_mm, the attempt is in the hole for good and only the proposal is executed
-        (no correction, no random candidate). The decision and g_t at entry are logged (`inside_at`, `inside_gap_mm`). The recording is FullRecorder.end() plus `rgb_jpeg_list` (the stored JPEG bytes)
+        depth g_t = agent.gap_mm(z_t, L) < -inside_mm, the try is in the hole and only the proposal is executed
+        (no correction, no random candidate, no exploration push) until a back-off starts a new try. The decision and g_t at entry are logged (`inside_at`, `inside_gap_mm`). The recording is FullRecorder.end() plus `rgb_jpeg_list` (the stored JPEG bytes)
         and `dec_kind` (one KINDS value per executed decision)."""
         import torch
         assert mode in ("act", "wm", "collect")
@@ -131,7 +131,7 @@ class OnlineTester(Brancher):
         log = {"interventions": 0, "random_candidates": 0, "retries": 0, "shift": None, "done_p": [], "v_mean": [], "stall_states": [],
                "repositions": [], "inside_at": None, "inside_gap_mm": None}
         shifted, done_run, why, q_last, k = mode != "collect" or rng.random() >= p_shift, 0, "time", r.qpos()[:7], 0
-        p, vm, m_now = None, None, margin
+        p, vm, m_now, inside = None, None, margin, False
         while k < max_decisions:
             j = len(rec.buf["rgb"]) - 1                         # the picture of this decision's start
             idx = D.context_indices(j)
@@ -146,10 +146,12 @@ class OnlineTester(Brancher):
                 log["done_p"].append(round(p, 3))
                 log["v_mean"].append(round(vm, 3))
                 done_run = done_run + 1 if p > DONE_P else 0
-                if inside_mm is not None and log["inside_at"] is None:
+                if inside_mm is not None and not inside:
                     g = agent.gap_mm(z, self.L * 1000.0)
                     if g is not None and g < -inside_mm:
-                        log["inside_at"], log["inside_gap_mm"] = k, round(g, 3)
+                        inside = True                           # for the rest of this try (a back-off starts a new one)
+                        if log["inside_at"] is None:
+                            log["inside_at"], log["inside_gap_mm"] = k, round(g, 3)
                 if done_run >= DONE_TIMES:                      # one more push with the proposal, then the end
                     q_last = execute(q[None] + chunk, q[None] + chunk, "proposal")
                     k += 1
@@ -159,7 +161,7 @@ class OnlineTester(Brancher):
                 Rh = r.hand_pose()[:3, :3]
                 dirs = [s * Rh[:, i] for i in range(3) for s in (1.0, -1.0)]
                 dirs = [d for d in dirs if not any(d @ e > np.cos(np.radians(45.0)) for e in excluded)]
-                moves = [d * mm / 1000.0 for d in dirs for mm in STEPS_MM] if log["inside_at"] is None else []   # in the hole: none
+                moves = [d * mm / 1000.0 for d in dirs for mm in STEPS_MM] if not inside else []   # in the hole: none
                 offs = [offset(J, mv) for mv in moves]
                 cands = np.stack([chunk] + [chunk + o[None] for o in offs])
                 pick = 0
@@ -180,7 +182,7 @@ class OnlineTester(Brancher):
                 target, kind = cands[pick], ("proposal" if pick == 0 else "correction" if pick == model_pick else "random")
                 if pick and pick == model_pick:                # the model's own corrections only
                     try_corr = try_corr + moves[pick - 1]
-                if mode == "collect" and not shifted and 0.5 <= gap <= 4.0:
+                if mode == "collect" and not shifted and 0.5 <= gap <= 4.0 and not inside:   # no push in the hole
                     shifted = True
                     a = self.F[:, 0]
                     u = rng.normal(size=3)
@@ -248,7 +250,7 @@ class OnlineTester(Brancher):
                 log["repositions"].append({"decision": k, "how": how, "mm": [round(float(x) * 1000, 3) for x in pos[pick]],
                                            "score_pick": round(float(sc[pick]), 3), "score_best": round(float(sc[best]), 3)})
                 hands = [r.hand_pose()[:3, 3].copy()]
-                try_start, try_corr, done_run = hands[0].copy(), np.zeros(3), 0
+                try_start, try_corr, done_run, inside = hands[0].copy(), np.zeros(3), 0, False
                 if np.linalg.norm(hands[0] - start_hand) > LEFT_M:
                     why = "left"
                     break

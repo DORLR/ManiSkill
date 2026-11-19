@@ -235,6 +235,12 @@ def main():
     if out is None:
         raise SystemExit("--out is needed for a test")
     gpus = [int(x) for x in args.gpus.split(",")]
+    if args.inside_mm is not None:                             # the rule reads the offset head; without it, it would be silently off
+        import torch
+        if args.inside_mm <= 0:
+            raise SystemExit("--inside-mm must be > 0 (a depth inside the hole)")
+        if not torch.load(args.ckpt, map_location="cpu", weights_only=False).get("offset_weight", 0.0) > 0:
+            raise SystemExit(f"--inside-mm needs a checkpoint with the offset read-out head; {args.ckpt} has none")
     seed = args.seed + 1_000_003 * args.round if collect else args.seed
     every = [json.loads(Path(f).read_text()) for f in sorted(glob.glob(f"{args.grasps}/*/*/grasp.json"))]
     every = [g for g in every if g.get("reference_ok") and D.split320(g["port"], g["pitch_deg"], g["grasp_pos_m"], g["grasp"]) == args.split]
@@ -260,7 +266,9 @@ def main():
     summary, complete = E.summarise(out, gs, args.starts, {"policy": f"wm320 agent ({args.mode})", "ckpt": args.ckpt, "split": args.split,
                                                           "mode": args.mode, "round": args.round, "starts_per_grasp": args.starts,
                                                           "margin": args.margin, "horizon": args.horizon, "candidates": args.candidates,
-                                                          "radius_mm": args.radius_mm, "max_retries": args.max_retries})
+                                                          "radius_mm": args.radius_mm, "max_retries": args.max_retries,
+                                                          "inside_mm": args.inside_mm, "p_shift": args.p_shift, "eps": args.eps,
+                                                          "random_reposition": args.random_reposition})
     rows = [json.loads(path[g["grasp"]].read_text()) for g in gs if E.grasp_state(path[g["grasp"]]) == "done"]
     att = [st["attempt"] for r in rows for st in r.get("starts", []) if "attempt" in st]
     summary["attempts"] = len(att)

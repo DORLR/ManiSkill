@@ -101,7 +101,7 @@ for R in $(seq 1 "$r1"); do
       wait_learner "$R"
       cp "$L/last.pt" "$D/model.pt.tmp" && mv "$D/model.pt.tmp" "$D/model.pt" || exit 1
     fi
-    q320_log "online $run: round $R collects with $D/model.pt"
+    q320_log "online $run: round $R collects with $D/model.pt (extra options: ${ATT_EXTRA:-none})"
     q320_run_when_fits "qx320-collect-${run}-r$R" "$ram" "$gpus" "$mib" test 1 "$Q/logs/online_${run}_r$R.log" \
       python world_model/scripts/online/run_wm320_attempts.py --grasps "$Q/data/wm_v1" --ckpt "$D/model.pt" --mode collect --split train \
       --pool "$P" --round "$R" --starts "$starts" --workers "$workers" --gpus "$gpus" --torch-mib "$tmib" "${att_extra[@]}"
