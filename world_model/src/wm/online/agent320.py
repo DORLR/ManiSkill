@@ -36,6 +36,7 @@ class WMAgent:
         self.m.load_state_dict(ck["state"])
         self.m.to(self.device).eval()
         self.horizon, self.gamma, self.step = horizon, float(self.m.cfg.gamma), int(ck.get("step", -1))
+        self.shaping = float(ck.get("shaping", 0.0))                           # the reward's shaping weight (for true returns)
         del ck
 
     @torch.no_grad()
@@ -56,14 +57,21 @@ class WMAgent:
         return float(torch.sigmoid(self.m._done(z))[0, 0])
 
     @torch.no_grad()
+    def offset_mm(self, z: torch.Tensor) -> np.ndarray | None:
+        """The offset read-out head on z: the hand's estimated offset from H* (along the insertion axis, lateral x,
+        lateral y [mm], tilt [deg]; wmdata320.decision_labels' "probe" frame), (4,). None without the head."""
+        if self.m._offset is None:
+            return None
+        return (self.m._offset(z) * self.m.off_scale)[0].double().cpu().numpy()
+
+    @torch.no_grad()
     def gap_mm(self, z: torch.Tensor, pin_length_mm: float) -> float | None:
         """Estimated distance of the pin tips in front of the board face [mm] (negative: that deep in the hole), from the
         offset read-out head on z (z comes from the pictures and joints only; no H* at test time). None without the head.
-        2026-11-18, the user's decision: used only to tell the phase (in the hole or not), never to score or move."""
-        if self.m._offset is None:
-            return None
-        along = float((self.m._offset(z) * self.m.off_scale)[0, 0])
-        return -along - pin_length_mm
+        2026-11-18, the user's decision: used only to tell the phase (in the hole or not), never to score or move
+        (the ablation modes "servo" of attempt320 move by the read-out on purpose)."""
+        o = self.offset_mm(z)
+        return None if o is None else float(-o[0] - pin_length_mm)
 
     @torch.no_grad()
     def values(self, z: torch.Tensor) -> np.ndarray:
@@ -71,8 +79,9 @@ class WMAgent:
         return self.m.scalar(self.m.V(z))[:, 0, 0].double().cpu().numpy()
 
     @torch.no_grad()
-    def score(self, z: torch.Tensor, deltas: np.ndarray) -> np.ndarray:
-        """deltas (C, 8, 7): each candidate's 8 executed joint targets minus the measured joints [rad] -> (C, num_q)."""
+    def score(self, z: torch.Tensor, deltas: np.ndarray, parts: bool = False):
+        """deltas (C, 8, 7): each candidate's 8 executed joint targets minus the measured joints [rad] -> (C, num_q).
+        parts=True: (that, G) with G (C,) = the imagined reward sum alone (sum_t gamma^t c_t r_t, no value term)."""
         m, C = self.m, len(deltas)
         a = m.scale(torch.from_numpy(np.asarray(deltas, np.float32).reshape(C, WD.ACTION_DIM)).to(self.device))
         zc = z.expand(C, -1)
@@ -85,7 +94,8 @@ class WMAgent:
             zc = m.next(zc, a)
             cont = cont * (1 - torch.sigmoid(m._done(zc))[:, 0])
         V = m.scalar(m.V(zc))[..., 0]                                         # (num_q, C)
-        return (G[None] + (cont * self.gamma ** self.horizon)[None] * V).T.double().cpu().numpy()
+        total = (G[None] + (cont * self.gamma ** self.horizon)[None] * V).T.double().cpu().numpy()
+        return (total, G.double().cpu().numpy()) if parts else total
 
 
 __all__ = ["WMAgent"]

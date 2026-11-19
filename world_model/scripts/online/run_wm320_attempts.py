@@ -8,10 +8,12 @@ Two uses:
       (otherwise exit 2 and no DONE). Since 2026-11-18 the learner (train_wm320.py --online <pool>) also reads the
       finished grasps of a round without DONE (their result files, written whole); grasps run in random order so
       that those cover all ports from the start, and a finished grasp is never run again.
-  test (--mode act | wm, --split select | heldout): the same grasps, starts and seeds as eval_policy320.py (its
-      grasp list, even selection, per-grasp start generator, placement retries, snapshot/restore), its result files
-      and summary (summarise / show: clustered standard errors, the one success criterion). Nothing is written but
-      the result files.
+  test (--mode act | wm | servo | random, --split select | heldout): the same grasps, starts and seeds as
+      eval_policy320.py (its grasp list, even selection, per-grasp start generator, placement retries,
+      snapshot/restore), its result files and summary (summarise / show: clustered standard errors, the one success
+      criterion). servo / random are the ablations of attempt320 (2026-11-19). Nothing is written but the result
+      files, unless --record <dir>: then every attempt is also written as a fast-copy trajectory
+      (<dir>/traj/<port>/<grasp>/s<i>.npz, kind "test") and listed in <dir>/manifest.json (for the fidelity checks).
 Per grasp: the reference insertion (H*, axis: labels of the collect mode only, and the start placement), then for
 every start the placement, snapshot/restore, one attempt. Per-grasp result file <out>/<port>/<grasp>.json as
 eval_policy320 (with error_kind setup / crash); crashed grasps are retried; a dying worker rebuilds the pool.
@@ -108,8 +110,10 @@ def work(job):
                 old.env.close()
             _S["robot"], _S["port"] = Robot(g["port"]), g["port"]
         robot, agent = _S["robot"], _S["agent"]
-        if a["pool"]:                                          # a retried grasp: no file of an earlier try stays behind
-            shutil.rmtree(Path(a["pool"]) / f"r{a['round']}" / "traj" / g["port"] / g["grasp"], ignore_errors=True)
+        root = Path(a["pool"]) if a["pool"] else (Path(a["record"]) if a["record"] else None)
+        sub = f"r{a['round']}/traj" if a["pool"] else "traj"
+        if root is not None:                                   # a retried grasp: no file of an earlier try stays behind
+            shutil.rmtree(root / sub / g["port"] / g["grasp"], ignore_errors=True)
         rng = np.random.default_rng(seed)
         robot.reset(g["episode_seed"], g["pitch_deg"], g["grasp_pos_m"])
         expert = Expert(robot)
@@ -120,7 +124,13 @@ def work(job):
         if not ex.remember_standoff():
             s.update(error="standoff not reachable", error_kind="setup")
             return s
+        # tests (2026-11-19): every start begins from the state after the reference insertion and the standoff, not
+        # from where the previous attempt ended (a jam or slip in the fingers would otherwise carry over, differently
+        # per agent); start 0 is as before. collect keeps its old behaviour.
+        base = None if a["pool"] else robot.base.get_state_dict()
         for i in range(starts):
+            if base is not None and i > 0:
+                robot.base.set_state_dict(base)
             fails = []
             for _ in range(B.PLACEMENT_ATTEMPTS):
                 start = B.sample_start(rng)
@@ -135,19 +145,22 @@ def work(job):
                 continue
             ex.snapshot()
             ex.restore()
+            entry["start_hand_mm"] = [round(float(x) * 1000.0, 3) for x in robot.hand_pose()[:3, 3]]
             summ, out = ex.attempt(agent, a["mode"], int(seed + 1000 * i), margin=a["margin"], max_retries=a["max_retries"],
                                    p_shift=a["p_shift"], eps=a["eps"], n_candidates=a["candidates"], radius_mm=a["radius_mm"],
-                                   random_reposition=a["random_reposition"], inside_mm=a["inside_mm"])
+                                   random_reposition=a["random_reposition"], inside_mm=a["inside_mm"],
+                                   servo_axis=a["servo_axis"], random_p=a["random_p"], probe_max=a["probe_max"],
+                                   probe_gap_mm=a["probe_gap_mm"])
             entry["attempt"] = summ
-            if a["pool"]:
-                rel = f"r{a['round']}/traj/{g['port']}/{g['grasp']}/s{i}.npz"
+            if root is not None:
+                rel = f"{sub}/{g['port']}/{g['grasp']}/s{i}.npz"
                 meta = {**{k: g[k] for k in ("port", "grasp", "condition", "pitch_deg", "grasp_pos_m", "episode_seed")},
-                        "kind": "online", "outcome": "seated_fk" if summ["seated_fk"] else "not_seated", "source": rel,
+                        "kind": "online" if a["pool"] else "test", "outcome": "seated_fk" if summ["seated_fk"] else "not_seated", "source": rel,
                         "pin_length_m": float(ex.L), "H_star": ex.H_star.tolist(), "axis": ex.F[:, 0].tolist(),
                         "round": a["round"], "start": i, "start_pose": start, "attempt_seed": int(seed + 1000 * i),
                         "mode": a["mode"], "model_step": summ["model_step"],
                         "stopped": summ["stopped"], "interventions": summ["interventions"], "retries": summ["retries"]}
-                s["entries"].append(write_fast(Path(a["pool"]) / rel, out, meta))
+                s["entries"].append(write_fast(root / rel, out, meta))
             del out
             torch.cuda.empty_cache()
         del s["error"], s["error_kind"]
@@ -195,7 +208,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--grasps", required=True)
     ap.add_argument("--ckpt", required=True)
-    ap.add_argument("--mode", required=True, choices=["act", "wm", "collect"])
+    ap.add_argument("--mode", required=True, choices=["act", "wm", "collect", "servo", "random"])
     ap.add_argument("--split", required=True, choices=["train", "select", "heldout", "test"])
     ap.add_argument("--final-test", action="store_true")
     ap.add_argument("--out", help="result files (default: <pool>/r<round>/results for collect)")
@@ -216,6 +229,12 @@ def main():
     ap.add_argument("--random-reposition", type=float, default=0.5, help="collect: share of re-positions drawn at random")
     ap.add_argument("--p-shift", type=float, default=0.5)
     ap.add_argument("--eps", type=float, default=0.1)
+    ap.add_argument("--servo-axis", choices=["true", "motion"], default="true", help="servo: the frame of the read-out's lateral offset")
+    ap.add_argument("--random-p", help="random: 4 comma-separated correction probabilities, one per bin of the estimated gap "
+                                       "(< 0, 0-2, 2-6, >= 6 mm)")
+    ap.add_argument("--record", help="test modes: also write every attempt as a fast-copy trajectory under this directory")
+    ap.add_argument("--probe-max", type=int, default=0, help="wm: counterfactual probes per attempt and gap bin (attempt320; 0 = off)")
+    ap.add_argument("--probe-gap-mm", type=float, default=6.0, help="wm: probe only where the estimated gap is below this [mm]")
     ap.add_argument("--max-crashed-frac", type=float, default=0.02, help="collect: a round with more crashed grasps gets no DONE")
     ap.add_argument("--seed", type=int, default=9_100_000)
     ap.add_argument("--retries", type=int, default=1)
@@ -227,6 +246,26 @@ def main():
         raise SystemExit("collect runs on the training grasps only, and the training grasps are only collected on")
     if collect and not (args.pool and args.round > 0):
         raise SystemExit("collect needs --pool and --round >= 1")
+    if collect and args.record:
+        raise SystemExit("--record is for tests; collect writes its trajectories to the pool")
+    if args.mode in ("servo", "random") and args.inside_mm is None:
+        raise SystemExit(f"--mode {args.mode} is an ablation of the in-hole agent: it needs --inside-mm")
+    random_p = None
+    if args.mode == "random":
+        try:
+            random_p = [float(x) for x in (args.random_p or "").split(",")]
+        except ValueError:
+            raise SystemExit(f"--random-p must be 4 numbers, got {args.random_p!r}")
+        if len(random_p) != 4 or not all(0.0 <= x <= 1.0 for x in random_p):
+            raise SystemExit(f"--random-p needs 4 probabilities in [0, 1], got {args.random_p!r}")
+    elif args.random_p:
+        raise SystemExit("--random-p is for --mode random only")
+    if args.mode in ("servo", "random") and args.max_retries:
+        raise SystemExit(f"--mode {args.mode} runs without back-off: give --max-retries 0")
+    if args.probe_max < 0 or args.probe_gap_mm <= 0:
+        raise SystemExit("--probe-max must be >= 0 and --probe-gap-mm > 0")
+    if args.probe_max and (args.mode != "wm" or args.inside_mm is None):
+        raise SystemExit("--probe-max needs --mode wm with --inside-mm (the in-hole agent)")
     rdir = Path(args.pool) / f"r{args.round}" if collect else None
     if collect and (rdir / "DONE").exists():
         print(f"{rdir} is complete already", flush=True)
@@ -248,8 +287,12 @@ def main():
     gs = [every[k] for k in chosen]
     path = {g["grasp"]: out / g["port"] / f"{g['grasp']}.json" for g in gs}
     a = {k: getattr(args, k) for k in ("mode", "margin", "max_retries", "p_shift", "eps", "candidates", "radius_mm", "random_reposition", "round",
-                                         "inside_mm")}
+                                         "inside_mm", "servo_axis", "probe_max", "probe_gap_mm")}
     a["pool"] = str(args.pool) if collect else None
+    a["random_p"] = random_p
+    a["record"] = str(args.record) if args.record else None
+    if a["record"] and any(E.grasp_state(path[g["grasp"]]) != "missing" for g in gs):
+        raise SystemExit(f"--record needs a fresh --out ({out} has result files: their attempts would not be recorded)")
     print(f"{len(gs)} of {len(every)} grasps of split {args.split} x {args.starts} starts, mode {args.mode}, {args.workers} workers on GPUs {gpus}", flush=True)
     for _ in range(1 + args.retries):
         todo = [(k, g) for k, g in zip(chosen, gs) if E.grasp_state(path[g["grasp"]]) in ("missing", "crash")]
@@ -268,7 +311,11 @@ def main():
                                                           "margin": args.margin, "horizon": args.horizon, "candidates": args.candidates,
                                                           "radius_mm": args.radius_mm, "max_retries": args.max_retries,
                                                           "inside_mm": args.inside_mm, "p_shift": args.p_shift, "eps": args.eps,
-                                                          "random_reposition": args.random_reposition})
+                                                          "random_reposition": args.random_reposition,
+                                                          "servo_axis": args.servo_axis if args.mode == "servo" else None,
+                                                          "random_p": random_p, "record": a["record"],
+                                                          "probe_max": args.probe_max, "probe_gap_mm": args.probe_gap_mm,
+                                                          "seed": args.seed, "grasps_n": args.grasps_n})
     rows = [json.loads(path[g["grasp"]].read_text()) for g in gs if E.grasp_state(path[g["grasp"]]) == "done"]
     att = [st["attempt"] for r in rows for st in r.get("starts", []) if "attempt" in st]
     summary["attempts"] = len(att)
@@ -277,6 +324,11 @@ def main():
     summary["retries_per_attempt"] = float(np.mean([x["retries"] for x in att])) if att else None
     (out / ("summary.json" if complete else "summary_incomplete.json")).write_text(json.dumps(summary, indent=1))
     print(E.show(summary), flush=True)
+    if a["record"]:
+        entries = [e for r in rows for e in r.get("entries", [])]
+        Path(a["record"]).mkdir(parents=True, exist_ok=True)
+        (Path(a["record"]) / "manifest.json").write_text(json.dumps({"format": D.FORMAT, "ckpt": args.ckpt, "split": args.split,
+                                                                     "mode": args.mode, "entries": entries}))
     if collect:
         entries = [e for r in rows for e in r.get("entries", [])]
         (rdir / "manifest.json").write_text(json.dumps({"format": D.FORMAT, "round": args.round, "ckpt": args.ckpt, "entries": entries}))
