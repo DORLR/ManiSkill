@@ -69,6 +69,38 @@ def _init(counter, gpus: list[int], ckpt: str, torch_mib: int, horizon: int):
         _S["init_error"] = f"{type(exc).__name__}: {exc}"[:500]
 
 
+def side_camera(robot, H_star: np.ndarray, axis: np.ndarray, w: int = 480, h: int = 360):
+    """A static camera beside the socket for a visual check of insertion (2026-11-19; never seen by an agent): 12 cm to
+    the side of the insertion axis and 3 cm back, looking at the seated hand position plus 2 cm along the axis. -> a
+    function returning the current RGB picture (h, w, 3) uint8."""
+    import sapien
+    a = np.asarray(axis, float) / np.linalg.norm(axis)
+    side = np.cross(a, [0.0, 0.0, 1.0]) if abs(a[2]) < 0.9 else np.cross(a, [1.0, 0.0, 0.0])
+    side /= np.linalg.norm(side)
+    target = np.asarray(H_star, float)[:3, 3] + 0.02 * a
+    pos = target + 0.12 * side - 0.03 * a + 0.03 * np.array([0.0, 0.0, 1.0])
+    f = (target - pos) / np.linalg.norm(target - pos)          # sapien camera: x forward, y left, z up
+    left = np.cross([0.0, 0.0, 1.0], f)
+    left /= np.linalg.norm(left)
+    up = np.cross(f, left)
+    T = np.eye(4)
+    T[:3, 0], T[:3, 1], T[:3, 2], T[:3, 3] = f, left, up, pos
+    cam = sapien.render.RenderCameraComponent(w, h)
+    cam.set_fovy(np.radians(30.0))
+    cam.near, cam.far = 0.01, 3.0
+    ent = sapien.Entity()
+    ent.add_component(cam)
+    ent.set_pose(sapien.Pose(T))
+    robot.base.scene.sub_scenes[0].add_entity(ent)
+
+    def grab() -> np.ndarray:
+        robot.base.scene.update_render()
+        cam.take_picture()
+        rgb = np.asarray(cam.get_picture("Color"))[..., :3]
+        return (np.clip(rgb, 0, 1) * 255).astype(np.uint8) if rgb.dtype != np.uint8 else rgb
+    return grab
+
+
 def write_fast(path: Path, out: dict, meta: dict) -> dict:
     """One attempt -> a fast-copy trajectory file (demo320's format, byte for byte the same codecs); its manifest entry."""
     jp = out["rgb_jpeg_list"]
@@ -190,12 +222,30 @@ def work(job):
             ex.snapshot()
             ex.restore()
             entry["start_hand_mm"] = [round(float(x) * 1000.0, 3) for x in robot.hand_pose()[:3, 3]]
+            side = []
+            if a.get("side_video"):                            # visual check only: a static camera beside the socket
+                grab = side_camera(robot, ex.H_star, ex.F[:, 0])
+                side.append(grab())
+                ex.side_capture = lambda k: side.append(grab())
             summ, out = ex.attempt(agent, a["mode"], int(seed + 1000 * i), margin=a["margin"], max_retries=a["max_retries"],
                                    p_shift=a["p_shift"], eps=a["eps"], n_candidates=a["candidates"], radius_mm=a["radius_mm"],
                                    random_reposition=a["random_reposition"], inside_mm=a["inside_mm"],
                                    servo_axis=a["servo_axis"], random_p=a["random_p"], probe_max=a["probe_max"],
                                    probe_gap_mm=a["probe_gap_mm"])
             entry["attempt"] = summ
+            if side:
+                from PIL import Image, ImageDraw
+                ims = [Image.fromarray(x) for x in side]
+                txt = "%s start %d: %s (depth left %.2f mm, lateral %.2f mm, tilt %.1f deg)" % (
+                    g["grasp"], i, "SUCCESS" if summ["success"] else "FAILURE", summ["depth_left_mm"], summ["lateral_mm"], summ["angle_deg"])
+                for im in ims[-1:]:
+                    ImageDraw.Draw(im).text((6, 6), txt, fill=(255, 255, 0))
+                ims += [ims[-1]] * 10
+                vd = Path(a["side_video"])
+                vd.mkdir(parents=True, exist_ok=True)
+                ims[0].save(vd / f"{g['grasp']}_s{i}_{'success' if summ['success'] else 'failure'}.gif", save_all=True,
+                            append_images=ims[1:], duration=120, loop=0)
+                ex.side_capture = None
             if root is not None:
                 rel = f"{sub}/{g['port']}/{g['grasp']}/s{i}.npz"
                 meta = {**{k: g[k] for k in ("port", "grasp", "condition", "pitch_deg", "grasp_pos_m", "episode_seed")},
@@ -280,6 +330,7 @@ def main():
     ap.add_argument("--record", help="test modes: also write every attempt as a fast-copy trajectory under this directory")
     ap.add_argument("--probe-max", type=int, default=0, help="wm: counterfactual probes per attempt and gap bin (attempt320; 0 = off)")
     ap.add_argument("--probe-gap-mm", type=float, default=6.0, help="wm: probe only where the estimated gap is below this [mm]")
+    ap.add_argument("--side-video", help="tests: also write a GIF per attempt from a static camera beside the socket (visual check)")
     ap.add_argument("--max-crashed-frac", type=float, default=0.02, help="collect: a round with more crashed grasps gets no DONE")
     ap.add_argument("--seed", type=int, default=9_100_000)
     ap.add_argument("--retries", type=int, default=1)
@@ -342,6 +393,9 @@ def main():
     a["pool"] = str(args.pool) if collect else None
     a["random_p"] = random_p
     a["record"] = str(args.record) if args.record else None
+    a["side_video"] = str(args.side_video) if args.side_video else None
+    if collect and args.side_video:
+        raise SystemExit("--side-video is for tests")
     if a["record"] and any(E.grasp_state(path[g["grasp"]]) != "missing" for g in gs):
         raise SystemExit(f"--record needs a fresh --out ({out} has result files: their attempts would not be recorded)")
     print(f"{len(gs)} of {len(every)} grasps of split {args.split} x {args.starts} starts, mode {args.mode}, {args.workers} workers on GPUs {gpus}", flush=True)

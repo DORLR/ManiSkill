@@ -199,3 +199,56 @@ def test_holm_and_t_interval():
     assert abs(adj[0] - 0.03) < 1e-12 and abs(adj[2] - 0.06) < 1e-12 and abs(adj[1] - 0.06) < 1e-12
     lo, hi = A.t_ci([1, 0, 1, 1, 0, 1], ["a", "a", "b", "b", "c", "c"])
     assert 0.0 <= lo < 4 / 6 < hi <= 1.0
+
+
+def test_speed_metrics(tmp_path):
+    import speed320 as Sp
+    assert Sp.final_run_start([False, True, True]) == 2 and Sp.final_run_start([True, False, True, True]) == 3
+    assert Sp.final_run_start([True, True]) == 1 and Sp.final_run_start([True, False]) is None and Sp.final_run_start([]) is None
+    def ok_list(n, runs):                                  # runs: list of (first, last) 1-based decisions where ok
+        v = [False] * n
+        for a, b in runs:
+            for q in range(a - 1, b):
+                v[q] = True
+        return v
+    def arm(d, rows):
+        for grasp, port, starts in rows:
+            f = d / port / f"{grasp}.json"
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(json.dumps({"grasp": grasp, "port": port, "starts": [
+                {"idx": i, "start": {"s": i}, "attempt": {"success": ok, "decisions": n, "first_success_decision": fs,
+                                                          "truth_ok": tok, "latency_ms": [[q, 10.0] for q in range(n)]}}
+                for i, ok, n, fs, tok in starts]}))
+    ref, oth = tmp_path / "ref", tmp_path / "oth"
+    arm(ref, [("G01_g00", "G01", [(0, True, 30, 25, ok_list(30, [(25, 30)])), (1, True, 50, 10, ok_list(50, [(10, 12), (45, 50)]))]),
+              ("G46_g00", "G46", [(0, False, 40, None, ok_list(40, [])), (1, True, 20, None, ok_list(20, []))])])
+    arm(oth, [("G01_g00", "G01", [(0, True, 60, 50, ok_list(60, [(50, 60)])), (1, False, 90, 70, ok_list(90, [(70, 71)]))]),
+              ("G46_g00", "G46", [(0, True, 100, 100, ok_list(100, [(100, 100)])), (1, True, 21, 18, ok_list(21, [(18, 21)]))])])
+    a, ca = Sp.load(str(ref))
+    assert a[("G01_g00", 1)]["T"] == Sp.DT * 45 and a[("G01_g00", 1)]["T_first"] == Sp.DT * 10       # lasting insertion
+    assert ca["reseated_after_loss"] == 1 and ca["success_only_in_hold"] == 1 and a[("G46_g00", 1)]["T"] == Sp.DT * 20
+    b, cb = Sp.load(str(oth))
+    assert cb["touched_then_failed"] == 1 and b[("G01_g00", 1)]["T"] == np.inf
+    st = Sp.arm_stats(a)                                    # T: 10, 18, inf, 8 s
+    assert abs(st["within"]["8"] - 0.25) < 1e-12 and abs(st["within"]["20"] - 0.75) < 1e-12 and abs(st["within"]["60"] - 0.75) < 1e-12
+    assert abs(st["rmst_s"] - (10 + 18 + 60 + 8) / 4) < 1e-9 and st["latency_ms"]["median"] == 10.0
+    p = Sp.paired(a, b)                                     # arm T: 20, inf, 40, 7.2
+    assert p["pairs"] == 4 and p["both_succeed"] == 2
+    assert abs(p["d_rmst_s"] - ((20 - 10) + (60 - 18) + (40 - 60) + (7.2 - 8)) / 4) < 1e-9
+    assert abs(p["net_benefit_ref"] - (1 + 1 - 1 - 1) / 4) < 1e-12
+    assert 0 < p["by_port"]["d_rmst_p"] <= 1 and p["by_port"]["clusters"] == 2
+    old = tmp_path / "old" / "G01"
+    old.mkdir(parents=True)
+    (old / "G01_g00.json").write_text(json.dumps({"grasp": "G01_g00", "port": "G01", "starts": [{"idx": 0, "start": {}, "attempt": {"success": True, "decisions": 9}}]}))
+    with pytest.raises(SystemExit):
+        Sp.load(str(tmp_path / "old"))
+    assert Sp.signflip([1.0] * 20) >= 1 / (1 + Sp.DRAWS)
+    assert abs(a[("G01_g00", 0)]["T_wall"] - (Sp.DT * 25 + 25 * 0.010)) < 1e-9        # 25 decisions of 10 ms before insertion
+    lo, hi = Sp.boot_ci(np.array([1.0, 0.0]), ["x", "y"])
+    assert np.isnan(lo) and np.isnan(hi)                                                # too few clusters: no interval
+    assert Sp.arm_stats({}) == {"attempts": 0}
+    b2 = {k: dict(v, start="other") for k, v in b.items()}
+    q = Sp.paired(a, b2)
+    assert q["pairs"] == 0 and q["start_mismatch"] == 4
+    two = {k: a[k] for k in list(a)[:2]}
+    assert Sp.arm_stats(two)["median_s_all"] == min(v["T"] for v in two.values())     # smallest t with F(t) >= 0.5

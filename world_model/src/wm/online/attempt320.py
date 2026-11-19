@@ -34,6 +34,12 @@ branch, seated, depth gain and lateral offset after the branch, the model's pick
 after each restore, the repeated proposal's R and first-decision hand deviation from the first, and after the real
 decision the deviation of the hand from the branch of the executed candidate.
 The attempt itself goes on exactly as mode "wm".
+Insertion time (2026-11-19, reporting only; never an input of the agent): after every executed agent decision of every
+mode (back-off and re-position decisions included) the simulator-truth success criterion (demo320.is_success) is
+checked; the summary keeps the number of decisions after which it first held (`first_success_decision`, None if never),
+per executed decision whether it held (`truth_ok`) and the true depth left and lateral offset (`truth_depth_mm`,
+`truth_lateral_mm`), and per main-loop agent decision [decisions executed before it, wall-clock ms of the agent's
+computation from the pictures to the chosen action, GPU synchronised; the counterfactual probe excluded] (`latency_ms`).
 Per agent decision of every mode but "act" the summary keeps g_t, the read-out's lateral |(o_x, o_y)|, whether
 candidates were offered, and the pick (0 proposal, i a corrected copy, -1 the servo's move) in `per_decision`
 (back-off and re-position decisions are not agent decisions and are not in it); for reporting only, also the FK
@@ -226,17 +232,31 @@ class OnlineTester(Brancher):
                 dev = max(dev, float(np.linalg.norm(r.hand_pose()[:3, 3] - hand0[:3, 3]) * 1000.0))
             return res, dev
 
+        def truth_check(k_done: int):
+            """Reporting only: the success criterion on the simulator's truth after k_done executed decisions."""
+            tr = truth_outcome(rec.buf["eval_rel"][-1])
+            ok = bool(is_success(tr))
+            log["truth_ok"].append(ok)
+            log["truth_depth_mm"].append(round(float(tr["depth_left_mm"]), 2))
+            log["truth_lateral_mm"].append(round(float(tr["lateral_mm"]), 2))
+            if log["first_success_decision"] is None and ok:
+                log["first_success_decision"] = k_done
+
         hands, start_hand = [r.hand_pose()[:3, 3].copy()], r.hand_pose()[:3, 3].copy()
         try_start, try_corr = start_hand.copy(), np.zeros(3)
         excluded: list[np.ndarray] = []
         log = {"interventions": 0, "random_candidates": 0, "retries": 0, "shift": None, "done_p": [], "v_mean": [], "stall_states": [],
-               "repositions": [], "inside_at": None, "inside_gap_mm": None, "servo_moves": 0, "per_decision": [], "probes": []}
+               "repositions": [], "inside_at": None, "inside_gap_mm": None, "servo_moves": 0, "per_decision": [], "probes": [],
+               "first_success_decision": None, "truth_ok": [], "truth_depth_mm": [], "truth_lateral_mm": [], "latency_ms": []}
         shifted, done_run, why, q_last, k = mode != "collect" or rng.random() >= p_shift, 0, "time", r.qpos()[:7], 0
         Bt = WD._basis(np.asarray(self.F[:, 0], np.float64))   # label frame of the true axis: reporting only
         servo_hist, ax_last = [], None                         # servo moves per agent decision of this try; last axis
         probes_in_bin = [0] * (len(RANDOM_EDGES_MM) + 1)
         p, vm, m_now, inside = None, None, margin, False
         while k < max_decisions:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            t_dec, lat_ms = time.perf_counter(), None            # latency (reporting only): pictures -> chosen action
             j = len(rec.buf["rgb"]) - 1                         # the picture of this decision's start
             idx = D.context_indices(j)
             q9 = r.qpos().astype(np.float64)
@@ -267,6 +287,7 @@ class OnlineTester(Brancher):
                 if done_run >= DONE_TIMES:                      # one more push with the proposal, then the end
                     q_last = execute(q[None] + chunk, q[None] + chunk, "proposal")
                     k += 1
+                    truth_check(k)
                     why = "seated"
                     break
                 J = self.jacobian(q9)
@@ -325,6 +346,9 @@ class OnlineTester(Brancher):
                         rec_d["move_mm"] = [round(float(x), 3) for x in Bt @ mv * 1000.0]
                         log["servo_moves"] += 1
                     servo_hist.append(mv)
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                lat_ms = (time.perf_counter() - t_dec) * 1000.0    # the choice is made; the probe below is not counted
                 probe_rec = None
                 if probing:                                    # B2: every candidate really executed, then restored
                     t_p = time.time()
@@ -355,8 +379,16 @@ class OnlineTester(Brancher):
                     mm = float(rng.uniform(0.5, 2.0))
                     target, kind = target + offset(J, u * mm / 1000.0)[None], "shift"
                     log["shift"] = {"decision": k, "mm": round(mm, 3), "gap_mm": round(gap, 3)}
+            if lat_ms is None:                                 # mode act: the proposal is the choice
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                lat_ms = (time.perf_counter() - t_dec) * 1000.0
+            log["latency_ms"].append([k, round(lat_ms, 2)])
             q_last = execute(q[None] + target, q[None] + chunk, kind)
+            if getattr(self, "side_capture", None) is not None:   # visual check only (run_wm320_attempts --side-video)
+                self.side_capture(k)
             k += 1
+            truth_check(k)
             hand = r.hand_pose()[:3, 3].copy()
             if mode != "act" and probe_rec is not None:       # the executed branch against the real decision
                 probe_rec["first_step_dev_mm"] = round(float(np.linalg.norm(hand - probe_rec.pop("first_hand")) * 1000.0), 4)
@@ -387,6 +419,7 @@ class OnlineTester(Brancher):
                     ramp = q9[None, :7] + o[None] * (np.arange(1, EXECUTE + 1)[:, None] / EXECUTE)
                     q_last = execute(ramp, ramp, "backoff")
                     k += 1
+                    truth_check(k)
                 if np.linalg.norm(r.hand_pose()[:3, 3] - start_hand) > LEFT_M:
                     why = "left"
                     break
@@ -413,6 +446,7 @@ class OnlineTester(Brancher):
                     pick, how = int(rng.integers(n_candidates)), "random"
                 q_last = execute(q[None] + rp[pick], q[None] + rp[pick], "reposition")
                 k += 1
+                truth_check(k)
                 log["repositions"].append({"decision": k, "how": how, "mm": [round(float(x) * 1000, 3) for x in pos[pick]],
                                            "score_pick": round(float(sc[pick]), 3), "score_best": round(float(sc[best]), 3)})
                 hands = [r.hand_pose()[:3, 3].copy()]
@@ -433,7 +467,9 @@ class OnlineTester(Brancher):
         summary = {"mode": mode, "stopped": why, "decisions": k, "seated_fk": bool(lab["seated"][0]), "seated_fk_after_hold": bool(lab["seated"][1]),
                    "success": is_success(truth), **{key: float(truth[key]) for key in D.SUCCESS},
                    **{key: log[key] for key in ("interventions", "random_candidates", "retries", "shift", "stall_states", "repositions",
-                                                "inside_at", "inside_gap_mm", "servo_moves", "per_decision", "probes")},
+                                                "inside_at", "inside_gap_mm", "servo_moves", "per_decision", "probes",
+                                                "first_success_decision", "truth_ok", "truth_depth_mm", "truth_lateral_mm",
+                                                "latency_ms")},
                    "servo_axis": servo_axis if mode == "servo" else None,
                    "random_p": [float(x) for x in random_p] if mode == "random" else None,
                    "decision_kinds": {name: int((out["dec_kind"] == v).sum()) for name, v in KINDS.items()},
