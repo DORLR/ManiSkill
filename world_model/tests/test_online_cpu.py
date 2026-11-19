@@ -129,10 +129,23 @@ def test_online_learner(tmp):
     got, names = T.online_entries(pool)
     assert names == ["r1"] and len(got) == 2 and [g["bc"] for g in got] == [True, False] and all(Path(g["path"]).is_absolute() for g in got)
     run = tmp / "wm_online"
-    _run(run, "--steps", "3", "--online", str(pool), "--online-frac", "0.5", "--wm-batch", "2", "--refresh-every", "2")
+    _run(run, "--steps", "3", "--online", str(pool), "--online-frac", "0.5", "--wm-batch", "2", "--refresh-every", "2", "--online-min", "1")
     log = [json.loads(line) for line in (run / "log.jsonl").read_text().splitlines()]
     data = [r for r in log if r.get("event") == "data"]
     assert data and data[0]["online_trajectories"] == 2 and data[0]["online_seated"] == 1 and data[0]["online_windows_per_micro_batch"] == 1
+    r5 = pool / "r5" / "results" / e["port"]                 # a round still being collected: its finished grasps only
+    r5.mkdir(parents=True)
+    (r5 / "a.json").write_text(json.dumps({"entries": [ents[0]]}))
+    (r5 / "b.json").write_text(json.dumps({"error": "crash", "entries": [ents[1]]}))
+    (r5 / "c.json").write_text("{ half written")
+    got, names = T.online_entries(pool)
+    assert names == ["r1"] and len(got) == 3 and [g.get("partial") for g in got] == [False, False, True], [g.get("partial") for g in got]
+    run2 = tmp / "wm_online_min"
+    _run(run2, "--steps", "2", "--online", str(pool), "--online-frac", "0.5", "--wm-batch", "2", "--refresh-every", "1", "--online-min", "4")
+    d2 = [r for r in (json.loads(line) for line in (run2 / "log.jsonl").read_text().splitlines()) if r.get("event") == "data"]
+    assert d2[0]["online_trajectories"] == 3 and d2[0]["online_partial_trajectories"] == 1 and d2[0]["online_windows_per_micro_batch"] == 0, \
+        "fewer than --online-min trajectories are not mixed in"
+    shutil.rmtree(pool / "r5")
     bad = dict(ents[0], pitch_deg=-40.0)                    # a held-out grasp (pitch strip) in the pool must stop the learner
     (pool / "r3").mkdir()
     (pool / "r3" / "manifest.json").write_text(json.dumps({"entries": [bad]}))
@@ -142,7 +155,8 @@ def test_online_learner(tmp):
         raise AssertionError("a non-training grasp was accepted")
     except SystemExit:
         pass
-    return "only complete rounds are read; 1 of 2 micro-batch windows online; seated attempts join imitation; foreign grasps refused"
+    return ("complete rounds and the finished grasps of a round in progress are read (crashed / half-written ones not); "
+            "1 of 2 micro-batch windows online; not before --online-min; seated attempts join imitation; foreign grasps refused")
 
 
 def _run(out, *extra):

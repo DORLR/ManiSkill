@@ -1,6 +1,9 @@
 #!/bin/bash
 # The 320 px world model (scripts/train/train_wm320.py): training on the GPU(s) given, under the budget of lib320.sh.
 #   wm320.sh <stem> <gpus> <shift_px> <shaping> <wm_batch> <bc_batch> <accum> <gpu_mib> <ram_gb> <workers_wm> <workers_bc> [new|resume] [seed] [online]
+#   IMAGENET=1 in the environment: the training gets --imagenet (the ResNet starts from ImageNet weights; 2026-11-18)
+#   and the run is named wm320_<stem>_imnet_s<seed> (its online pool data/online320_<run>). OFFSET=1: --offset-weight 1.0
+#   (training-only offset read-out head on z), name suffix _off.
 # "online": the learner mixes in the complete rounds of $Q/data/online320_<run name> (online320.sh writes them).
 # <gpus>: one GPU, or a comma list (e.g. 3,4,5,6,7) for data parallelism: one process per GPU started by torchrun
 # (python -m torch.distributed.run --standalone); <wm_batch>, <bc_batch>, <accum>, <gpu_mib> and the loader workers are
@@ -21,7 +24,10 @@ for v in "$shift_px" "$wb" "$bb" "$acc" "$mib" "$ram" "$ww" "$bw" "$seed"; do q3
 case "$mode" in new|resume) ;; *) echo "mode must be new or resume"; exit 1 ;; esac
 cd "$CODE" || exit 1
 export PYTHONPATH=$CODE/world_model/src${PYTHONPATH:+:$PYTHONPATH}
-name=wm320_${stem}_s$seed; O=$Q/runs/$name; extra=()
+tag=; [ "${IMAGENET:-0}" = 1 ] && tag=_imnet; [ "${OFFSET:-0}" = 1 ] && tag=${tag}_off
+name=wm320_${stem}${tag}_s$seed; O=$Q/runs/$name; extra=()
+[ "${IMAGENET:-0}" = 1 ] && extra+=(--imagenet)
+[ "${OFFSET:-0}" = 1 ] && extra+=(--offset-weight 1.0)
 [ -z "$online" ] || { mkdir -p "$Q/data/online320_$name"; extra+=(--online "$Q/data/online320_$name"); }
 if [ "$mode" = resume ]; then extra+=(--resume)
 elif [ -e "$O/log.jsonl" ]; then q320_log "$name: $O exists; pass 'resume' to continue it"; exit 1; fi

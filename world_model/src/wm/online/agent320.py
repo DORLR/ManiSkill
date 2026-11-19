@@ -31,7 +31,8 @@ class WMAgent:
         ck = torch.load(ckpt, map_location="cpu", weights_only=False)           # as wm320.load, read once
         if ck.get("labels") != WD.LABELS:
             raise ValueError(f"{ckpt} was trained with labels {ck.get('labels')}, this code has {WD.LABELS}")
-        self.m = WM320(ck["stem"], ck["stats"], ck.get("shaping", 0.0), **ck["cfg"])
+        self.m = WM320(ck["stem"], ck["stats"], ck.get("shaping", 0.0), imagenet=ck.get("imagenet", False),
+                       offset_weight=ck.get("offset_weight", 0.0), **ck["cfg"])
         self.m.load_state_dict(ck["state"])
         self.m.to(self.device).eval()
         self.horizon, self.gamma, self.step = horizon, float(self.m.cfg.gamma), int(ck.get("step", -1))
@@ -53,6 +54,16 @@ class WMAgent:
     @torch.no_grad()
     def done(self, z: torch.Tensor) -> float:
         return float(torch.sigmoid(self.m._done(z))[0, 0])
+
+    @torch.no_grad()
+    def gap_mm(self, z: torch.Tensor, pin_length_mm: float) -> float | None:
+        """Estimated distance of the pin tips in front of the board face [mm] (negative: that deep in the hole), from the
+        offset read-out head on z (z comes from the pictures and joints only; no H* at test time). None without the head.
+        2026-11-18, the user's decision: used only to tell the phase (in the hole or not), never to score or move."""
+        if self.m._offset is None:
+            return None
+        along = float((self.m._offset(z) * self.m.off_scale)[0, 0])
+        return -along - pin_length_mm
 
     @torch.no_grad()
     def values(self, z: torch.Tensor) -> np.ndarray:

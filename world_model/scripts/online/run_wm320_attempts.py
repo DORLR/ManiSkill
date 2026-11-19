@@ -5,7 +5,9 @@ Two uses:
       attempt is written as a trajectory in the fast copy's format (<pool>/r<R>/traj/<port>/<grasp>/s<i>.npz) and
       listed in <pool>/r<R>/manifest.json (paths relative to <pool>, with every decision's kind), then
       <pool>/r<R>/DONE is written when the round is complete or at most --max-crashed-frac of its grasps crashed
-      (otherwise exit 2 and no DONE); the learner (train_wm320.py --online <pool>) reads rounds with DONE only.
+      (otherwise exit 2 and no DONE). Since 2026-11-18 the learner (train_wm320.py --online <pool>) also reads the
+      finished grasps of a round without DONE (their result files, written whole); grasps run in random order so
+      that those cover all ports from the start, and a finished grasp is never run again.
   test (--mode act | wm, --split select | heldout): the same grasps, starts and seeds as eval_policy320.py (its
       grasp list, even selection, per-grasp start generator, placement retries, snapshot/restore), its result files
       and summary (summarise / show: clustered standard errors, the one success criterion). Nothing is written but
@@ -87,6 +89,8 @@ def write_fast(path: Path, out: dict, meta: dict) -> dict:
 
 def work(job):
     g, out_file, starts, seed, a = job
+    if a["pool"] and E.grasp_state(Path(out_file)) == "done":        # finished, though its return was lost to a dead worker:
+        return json.loads(Path(out_file).read_text())                # never re-run (the learner may be reading its files)
     s = {k: g[k] for k in ("grasp", "port", "condition", "pitch_deg", "grasp_pos_m", "episode_seed")}
     s.update(stop=a["mode"], starts=[], entries=[], error="interrupted", error_kind="crash")
     t0 = time.time()
@@ -133,7 +137,7 @@ def work(job):
             ex.restore()
             summ, out = ex.attempt(agent, a["mode"], int(seed + 1000 * i), margin=a["margin"], max_retries=a["max_retries"],
                                    p_shift=a["p_shift"], eps=a["eps"], n_candidates=a["candidates"], radius_mm=a["radius_mm"],
-                                   random_reposition=a["random_reposition"])
+                                   random_reposition=a["random_reposition"], inside_mm=a["inside_mm"])
             entry["attempt"] = summ
             if a["pool"]:
                 rel = f"r{a['round']}/traj/{g['port']}/{g['grasp']}/s{i}.npz"
@@ -152,7 +156,9 @@ def work(job):
     finally:
         s["seconds"] = round(time.time() - t0, 1)
         Path(out_file).parent.mkdir(parents=True, exist_ok=True)
-        Path(out_file).write_text(json.dumps(s))
+        tmp = Path(out_file).with_name(Path(out_file).name + ".tmp")   # whole or absent: the learner reads finished grasps
+        tmp.write_text(json.dumps(s))                                   # of a round in progress (train_wm320.online_entries)
+        os.replace(tmp, out_file)
     return s
 
 
@@ -203,6 +209,8 @@ def main():
     ap.add_argument("--horizon", type=int, default=3)
     ap.add_argument("--margin", type=float, default=0.5)
     ap.add_argument("--max-retries", type=int, default=3)
+    ap.add_argument("--inside-mm", type=float, default=None,
+                    help="wm/collect: no correction once the estimated pin-tip depth is below -this [mm] (needs the offset head)")
     ap.add_argument("--candidates", type=int, default=16, help="re-position candidates after a back-off")
     ap.add_argument("--radius-mm", type=float, default=3.0, help="re-position candidates lie within this radius")
     ap.add_argument("--random-reposition", type=float, default=0.5, help="collect: share of re-positions drawn at random")
@@ -233,7 +241,8 @@ def main():
     chosen = E.pick(len(every), args.grasps_n)                     # k = index in the whole list: a grasp keeps its seed
     gs = [every[k] for k in chosen]
     path = {g["grasp"]: out / g["port"] / f"{g['grasp']}.json" for g in gs}
-    a = {k: getattr(args, k) for k in ("mode", "margin", "max_retries", "p_shift", "eps", "candidates", "radius_mm", "random_reposition", "round")}
+    a = {k: getattr(args, k) for k in ("mode", "margin", "max_retries", "p_shift", "eps", "candidates", "radius_mm", "random_reposition", "round",
+                                         "inside_mm")}
     a["pool"] = str(args.pool) if collect else None
     print(f"{len(gs)} of {len(every)} grasps of split {args.split} x {args.starts} starts, mode {args.mode}, {args.workers} workers on GPUs {gpus}", flush=True)
     for _ in range(1 + args.retries):
@@ -242,7 +251,10 @@ def main():
             break
         for _, g in todo:
             path[g["grasp"]].unlink(missing_ok=True)
-        todo.sort(key=lambda kg: kg[1]["port"])
+        if collect:                                            # random order: the learner uses a round while it is collected
+            todo = [todo[i] for i in np.random.default_rng(seed).permutation(len(todo))]     # (all ports from the start)
+        else:
+            todo.sort(key=lambda kg: kg[1]["port"])
         run_pool([(g, str(path[g["grasp"]]), args.starts, seed + 100_003 * k, a) for k, g in todo], args, gpus)
     out.mkdir(parents=True, exist_ok=True)
     summary, complete = E.summarise(out, gs, args.starts, {"policy": f"wm320 agent ({args.mode})", "ckpt": args.ckpt, "split": args.split,

@@ -3,10 +3,11 @@
 Trained once and then kept fixed; any external policy is used with it through a small "policy stand-in" on its
 latent (see stand-in training, separate). Inside:
   encoder   one picture (RGB + depth, 320 x 320) -> 100 tokens (policy320.PictureTokens, ResNet-18, group norm, from
-            scratch); a transformer over the tokens of the 4 pictures of an observation (0.4 s apart, exactly the
+            scratch or, with imagenet=True (2026-11-18), from ImageNet weights; trained); a transformer over the tokens of the 4 pictures of an observation (0.4 s apart, exactly the
             policy's context) and a token of the 7 joints -> latent z (512, TD-MPC2's SimNorm)
   heads     TD-MPC2's own layers: dynamics z' = d(z, a); reward r(z, a); Q x5 (z, a); V x5 (z) (two-hot bins); plus
-            done(z) = "seated now" and a built-in ACT head z -> the next 16 joint targets (8 executed)
+            done(z) = "seated now" and a built-in ACT head z -> the next 16 joint targets (8 executed); optionally
+            (offset_weight > 0) a training-only head z -> the hand's offset from H*, which no decision reads
   action    a = the 8 executed joint targets minus the measured joints (56 numbers, asinh-scaled)
 Built-in ACT head: trained by imitation of the successful expert demonstrations (the old policy's samples: every
 picture, independently drawn); its loss also trains the encoder (the expert's aligning motion needs the direction of
@@ -33,17 +34,17 @@ from . import demo320 as D
 from . import use_tdmpc2
 from . import wmdata320 as WD
 from .model import make_cfg
-from .policy320 import TOKEN_DIM, TOKENS, PictureTokens, _amp
+from .policy320 import OFFSET_SCALE, TOKEN_DIM, TOKENS, PictureTokens, _amp
 
 CHUNK = D.CHUNK
 PHI_MAX = 150.0                        # largest |shaping potential| [mm + deg] of a start (gap <= 18 + pin 20 + lateral 14 + 6 deg x)
 
 
 class Encoder(nn.Module):
-    def __init__(self, stem: str, cfg, d: int = 256, layers: int = 4, heads: int = 8):
+    def __init__(self, stem: str, cfg, d: int = 256, layers: int = 4, heads: int = 8, imagenet: bool = False):
         super().__init__()
         from common import layers as L
-        self.pic = PictureTokens(stem)
+        self.pic = PictureTokens(stem, imagenet=imagenet)
         self.inp = nn.Linear(TOKEN_DIM, d)
         self.token_pos = nn.Parameter(torch.randn(TOKENS, d) * 0.02)
         self.frame_pos = nn.Parameter(torch.randn(D.CONTEXT, d) * 0.02)
@@ -70,8 +71,13 @@ class Encoder(nn.Module):
 
 
 class WM320(nn.Module):
-    def __init__(self, stem: str, stats: dict, shaping: float = 0.0, **cfg_over):
+    def __init__(self, stem: str, stats: dict, shaping: float = 0.0, imagenet: bool = False, offset_weight: float = 0.0, **cfg_over):
+        """offset_weight > 0 (the user's decision 2026-11-18): a training-only head reads the hand's offset from H*
+        (wmdata320's "probe": along, lateral x, lateral y [mm], tilt [deg]) from the latents the reward head sees (the
+        encoded z and the imagined z of the window); its loss, with this weight, trains the encoder and the dynamics to
+        carry the offset. No decision uses it; validation reports its error."""
         super().__init__()
+        self.offset_weight = float(offset_weight)
         self.ret_max = 20.0 + 10.0 + shaping * PHI_MAX                    # value targets lie within +-ret_max
         self.shaping = shaping
         use_tdmpc2()
@@ -79,13 +85,14 @@ class WM320(nn.Module):
         cfg = make_cfg(**cfg_over)
         self.cfg, self.math = cfg, M
         Ld, A, Md = cfg.latent_dim, WD.ACTION_DIM, cfg.mlp_dim
-        self.enc = Encoder(stem, cfg)
+        self.enc = Encoder(stem, cfg, imagenet=imagenet)
         self._dynamics = L.mlp(Ld + A, 2 * [Md], Ld, act=L.SimNorm(cfg))
         self._reward = L.mlp(Ld + A, 2 * [Md], cfg.num_bins)
         self._Qs = L.Ensemble([L.mlp(Ld + A, 2 * [Md], cfg.num_bins, dropout=cfg.dropout) for _ in range(cfg.num_q)])
         self._Vs = L.Ensemble([L.mlp(Ld, 2 * [Md], cfg.num_bins, dropout=cfg.dropout) for _ in range(cfg.num_q)])
         self._done = L.mlp(Ld, [256], 1)
         self._act = L.mlp(Ld, 3 * [512], CHUNK * D.JOINTS)
+        self.register_buffer("off_scale", torch.tensor(OFFSET_SCALE), persistent=False)
         for m in (self._dynamics, self._reward, self._Qs, self._Vs, self._done, self._act):
             m.apply(init.weight_init)
         init.zero_([self._reward[-1].weight, self._Qs.params["2", "weight"], self._Vs.params["2", "weight"]])
@@ -94,6 +101,11 @@ class WM320(nn.Module):
         self._Qt.train(False)
         for k, v in stats.items():
             self.register_buffer(k, torch.tensor(np.asarray(v), dtype=torch.float32))
+        self._offset = None
+        if self.offset_weight > 0:
+            with torch.random.fork_rng(devices=[]):         # the other parts start from the same weights as without it
+                self._offset = L.mlp(Ld, [256], 4)
+                self._offset.apply(init.weight_init)
 
     def train(self, mode: bool = True):
         super().train(mode)
@@ -196,9 +208,21 @@ class WM320(nn.Module):
             tok = self.enc.tokens(Bc["rgb"].flatten(0, 1), Bc["depth"].flatten(0, 1)).view(*Bc["depth"].shape[:2], TOKENS, TOKEN_DIM)
             zb = self.enc.fuse(tok, Bc["q"])
             bc = (self._act(zb) - (Bc["a"] - self.a_mean) / self.a_std).abs().mean()
-        total = cfg.consistency_coef * cons + cfg.reward_coef * rl + cfg.value_coef * (ql + vl) + 0.1 * dl + bc_weight * bc
+        ol, oinfo = zs.sum() * 0, {}
+        if self._offset is not None:                                          # the encoded z (t = 0) and the imagined ones
+            tgt = W["probe"].transpose(0, 1) / self.off_scale                 # (H+1, B, 4)
+            pr = self._offset(zs)
+            per = F.smooth_l1_loss(pr, tgt, reduction="none").mean(-1)       # (H+1, B)
+            ol = sum((per[t] * ov[t]).sum() / B * cfg.rho ** t for t in range(WD.H + 1)) / (WD.H + 1)
+            with torch.no_grad():
+                err = (pr - tgt) * self.off_scale
+                lat = err[..., 1:3].norm(dim=-1)                              # lateral read-out error [mm]
+                oinfo = {"offset_loss": ol, "offset_lat_err_mm_encoded": (lat[0] * ov[0]).sum() / ov[0].sum().clamp(min=1),
+                         "offset_along_err_mm_encoded": (err[0, :, 0].abs() * ov[0]).sum() / ov[0].sum().clamp(min=1),
+                         "offset_lat_err_mm_imagined_last": (lat[-1] * ov[-1]).sum() / ov[-1].sum().clamp(min=1)}
+        total = cfg.consistency_coef * cons + cfg.reward_coef * rl + cfg.value_coef * (ql + vl) + 0.1 * dl + bc_weight * bc + self.offset_weight * ol
         info = {"total": total, "consistency": cons, "reward_loss": rl, "q_loss": ql, "v_loss": vl, "done_loss": dl,
-                "bc_loss": bc, "z_spread": z[:, 0].std(0).mean(), "target_value_mean": (tv * v_ok).sum() / v_ok.sum().clamp(min=1)}
+                "bc_loss": bc, "z_spread": z[:, 0].std(0).mean(), "target_value_mean": (tv * v_ok).sum() / v_ok.sum().clamp(min=1), **oinfo}
         info = {k: float(v) for k, v in info.items()}
         if detail:
             with torch.no_grad():
@@ -212,7 +236,7 @@ def load(ckpt: str, device="cuda") -> "WM320":
     ck = torch.load(ckpt, map_location="cpu", weights_only=False)
     if ck.get("labels") != WD.LABELS:
         raise ValueError(f"{ckpt} was trained with labels {ck.get('labels')}, this code has {WD.LABELS}")
-    m = WM320(ck["stem"], ck["stats"], ck.get("shaping", 0.0), **ck["cfg"])
+    m = WM320(ck["stem"], ck["stats"], ck.get("shaping", 0.0), imagenet=ck.get("imagenet", False), offset_weight=ck.get("offset_weight", 0.0), **ck["cfg"])
     m.load_state_dict(ck["state"])
     return m.to(device).eval()
 

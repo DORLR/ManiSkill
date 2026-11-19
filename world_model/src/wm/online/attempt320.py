@@ -90,8 +90,10 @@ class OnlineTester(Brancher):
     # ------------------------------------------------------------ one attempt
     def attempt(self, agent, mode: str, seed: int, max_decisions: int = B.MAX_DECISIONS, margin: float = 0.5,
                 max_retries: int = 3, p_shift: float = 0.5, eps: float = 0.1, n_candidates: int = 16, radius_mm: float = 3.0,
-                random_reposition: float = 0.5) -> tuple[dict, dict]:
-        """-> (summary, recording). The recording is FullRecorder.end() plus `rgb_jpeg_list` (the stored JPEG bytes)
+                random_reposition: float = 0.5, inside_mm: float | None = None) -> tuple[dict, dict]:
+        """-> (summary, recording). `inside_mm` (2026-11-18, the user's decision; None = off): once the estimated pin-tip
+        depth g_t = agent.gap_mm(z_t, L) < -inside_mm, the attempt is in the hole for good and only the proposal is executed
+        (no correction, no random candidate). The decision and g_t at entry are logged (`inside_at`, `inside_gap_mm`). The recording is FullRecorder.end() plus `rgb_jpeg_list` (the stored JPEG bytes)
         and `dec_kind` (one KINDS value per executed decision)."""
         import torch
         assert mode in ("act", "wm", "collect")
@@ -127,7 +129,7 @@ class OnlineTester(Brancher):
         try_start, try_corr = start_hand.copy(), np.zeros(3)
         excluded: list[np.ndarray] = []
         log = {"interventions": 0, "random_candidates": 0, "retries": 0, "shift": None, "done_p": [], "v_mean": [], "stall_states": [],
-               "repositions": []}
+               "repositions": [], "inside_at": None, "inside_gap_mm": None}
         shifted, done_run, why, q_last, k = mode != "collect" or rng.random() >= p_shift, 0, "time", r.qpos()[:7], 0
         p, vm, m_now = None, None, margin
         while k < max_decisions:
@@ -144,6 +146,10 @@ class OnlineTester(Brancher):
                 log["done_p"].append(round(p, 3))
                 log["v_mean"].append(round(vm, 3))
                 done_run = done_run + 1 if p > DONE_P else 0
+                if inside_mm is not None and log["inside_at"] is None:
+                    g = agent.gap_mm(z, self.L * 1000.0)
+                    if g is not None and g < -inside_mm:
+                        log["inside_at"], log["inside_gap_mm"] = k, round(g, 3)
                 if done_run >= DONE_TIMES:                      # one more push with the proposal, then the end
                     q_last = execute(q[None] + chunk, q[None] + chunk, "proposal")
                     k += 1
@@ -153,7 +159,7 @@ class OnlineTester(Brancher):
                 Rh = r.hand_pose()[:3, :3]
                 dirs = [s * Rh[:, i] for i in range(3) for s in (1.0, -1.0)]
                 dirs = [d for d in dirs if not any(d @ e > np.cos(np.radians(45.0)) for e in excluded)]
-                moves = [d * mm / 1000.0 for d in dirs for mm in STEPS_MM]
+                moves = [d * mm / 1000.0 for d in dirs for mm in STEPS_MM] if log["inside_at"] is None else []   # in the hole: none
                 offs = [offset(J, mv) for mv in moves]
                 cands = np.stack([chunk] + [chunk + o[None] for o in offs])
                 pick = 0
@@ -257,7 +263,8 @@ class OnlineTester(Brancher):
         truth = truth_outcome(out["eval_rel"][-1])
         summary = {"mode": mode, "stopped": why, "decisions": k, "seated_fk": bool(lab["seated"][0]), "seated_fk_after_hold": bool(lab["seated"][1]),
                    "success": is_success(truth), **{key: float(truth[key]) for key in D.SUCCESS},
-                   **{key: log[key] for key in ("interventions", "random_candidates", "retries", "shift", "stall_states", "repositions")},
+                   **{key: log[key] for key in ("interventions", "random_candidates", "retries", "shift", "stall_states", "repositions",
+                                                "inside_at", "inside_gap_mm")},
                    "decision_kinds": {name: int((out["dec_kind"] == v).sum()) for name, v in KINDS.items()},
                    "done_p": log["done_p"], "v_mean": log["v_mean"], "model_step": agent.step}
         return summary, out

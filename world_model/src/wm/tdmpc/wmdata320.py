@@ -21,7 +21,8 @@ length only; never from the simulator's truth (the fast copy does not even conta
            state the shaping potential counts as 0, so the shaping leaves the best behaviour unchanged.
            Labels version LABELS.
   probe    (along, lateral x, lateral y, rotation) relative to H* [mm, deg]: FK labels used to find the decision
-           before the face (face_items); no model head reads or predicts them
+           before the face (face_items); also the target of the training-only offset read-out heads
+           (--offset-weight, 2026-11-18: wm320.WM320._offset, policy320.ResnetFMPolicy.off), never read at test time
 The bonus, the last reward and the seated label of the last observation all refer to the same instant (step 8n).
 """
 

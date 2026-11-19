@@ -15,8 +15,8 @@ observations with the pins in the hole or at the face (FK depth > 0); V just bef
 contact push against how it ended; the built-in head's action error on held imitation samples. Fixed random numbers, restored afterwards.
 Resume and DONE.json as train_policy320.py.
 Online rounds (--online <pool>, scripts/online/run_wm320_attempts.py --mode collect): every --refresh-every steps the
-complete rounds of the pool (r<R>/DONE written) are read; once the pool has at least as many windows as the online
-share of a micro-batch, --online-frac of every micro-batch's windows come from it (the rest from the fast copy; its
+complete rounds of the pool (r<R>/DONE written) and the finished grasps of a round still being collected are read
+(2026-11-18); once the pool holds --online-min trajectories, --online-frac of every micro-batch's windows come from it (the rest from the fast copy; its
 loader has --workers-wm // 2 extra workers per process), and the online attempts that ended seated by FK (1.5 mm,
 4 deg of H*: labels, never the simulator's truth) join the ACT head's imitation set: only the pictures of their last
 try (after the last back-off) whose next 16 targets lie in decisions where the proposal or the model's correction was
@@ -73,19 +73,39 @@ def loader(ds, batch, workers, seed, shuffle=True):
                                        pin_memory=torch.cuda.is_available())
 
 
+def _finished_grasps(r: Path) -> list[dict]:
+    """Manifest entries of the grasps a round in progress has finished: its result files (written whole, by rename)
+    without an error. A grasp that crashed is run again later and is not read before that."""
+    out = []
+    for f in sorted(r.glob("results/*/*.json")):
+        try:
+            s = json.loads(f.read_text())
+        except (ValueError, OSError):
+            continue
+        if not s.get("error"):
+            out += s.get("entries", [])
+    return out
+
+
 def online_entries(pool) -> tuple[list[dict], list[str]]:
-    """Trajectories of the complete rounds of the online pool (absolute paths), with split and bc; the round names."""
+    """Trajectories of the online pool (absolute paths), with split and bc: the complete rounds (DONE + manifest) and,
+    of a round still being collected, its finished grasps (2026-11-18, the user's decision: the learner uses a round
+    while it is collected; those entries carry partial=True). Returns them and the names of the complete rounds."""
     out, rounds = [], []
     for r in sorted(Path(pool).glob("r*"), key=lambda p: int(p.name[1:]) if p.name[1:].isdigit() else -1):
-        if not r.name[1:].isdigit() or not (r / "DONE").exists() or not (r / "manifest.json").exists():
+        if not r.name[1:].isdigit():
             continue
-        rounds.append(r.name)
-        for e in json.loads((r / "manifest.json").read_text())["entries"]:
+        if (r / "DONE").exists() and (r / "manifest.json").exists():
+            rounds.append(r.name)
+            ents, partial = json.loads((r / "manifest.json").read_text())["entries"], False
+        else:
+            ents, partial = _finished_grasps(r), True
+        for e in ents:
             sp = D.split320(e["port"], e["pitch_deg"], e["grasp_pos_m"], e["grasp"])
             if sp != "train":
                 raise SystemExit(f"online trajectory {e['path']} is of split {sp}: the pool must hold training grasps only")
-            if e["steps"] >= WD.EXECUTE:
-                out.append({**e, "path": str(Path(pool) / e["path"]), "split": sp, "bc": e.get("outcome") == "seated_fk"})
+            if e["steps"] >= WD.EXECUTE and (not partial or (Path(pool) / e["path"]).exists()):
+                out.append({**e, "path": str(Path(pool) / e["path"]), "split": sp, "bc": e.get("outcome") == "seated_fk", "partial": partial})
     return out, rounds
 
 
@@ -171,6 +191,8 @@ def main():
     ap.add_argument("--data", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--stem", required=True, choices=["standard", "nopool"])
+    ap.add_argument("--imagenet", action="store_true", help="the ResNet starts from ImageNet weights (policy320.PictureTokens.init_imagenet)")
+    ap.add_argument("--offset-weight", type=float, default=0.0, help="> 0: the training-only offset read-out head on z (wm320.WM320)")
     ap.add_argument("--shift-px", type=int, required=True)
     ap.add_argument("--shaping", type=float, required=True)
     ap.add_argument("--steps", type=int, default=100000)
@@ -194,7 +216,14 @@ def main():
     ap.add_argument("--online", help="online pool; its complete rounds are mixed in")
     ap.add_argument("--online-frac", type=float, default=0.5, help="share of every micro-batch's windows from the online pool")
     ap.add_argument("--refresh-every", type=int, default=250, help="steps between reads of the online pool")
+    ap.add_argument("--online-min", type=int, default=100, help="online trajectories needed before they are mixed in")
+    ap.add_argument("--online-reload", type=int, default=150, help="new online trajectories that make a read rebuild the loaders")
     args = ap.parse_args()
+    import resource                        # 2026-11-18: the loaders, rebuilt as an online round streams in, pass tensors
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)          # by file descriptor; a soft limit of 1024 ran out
+    resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))          # ("received 0 items of ancdata") at step 15,000
+    if args.offset_weight < 0:
+        raise SystemExit("--offset-weight must be >= 0")
     ddp = int(os.environ.get("WORLD_SIZE", "1")) > 1
     if ddp:
         local = int(os.environ["LOCAL_RANK"])
@@ -224,6 +253,10 @@ def main():
     ck = torch.load(run / "last.pt", map_location="cpu", weights_only=False) if resume else None
     if ck and ck.get("labels") != WD.LABELS:                       # a changed design is trained from scratch, never resumed
         raise SystemExit(f"{run}/last.pt was trained with labels {ck.get('labels')}, this code has {WD.LABELS}: start a new run")
+    if ck and ck.get("imagenet", False) != args.imagenet:
+        raise SystemExit(f"{run}/last.pt has imagenet={ck.get('imagenet', False)}, --imagenet is {args.imagenet}: start a new run")
+    if ck and ck.get("offset_weight", 0.0) != args.offset_weight:
+        raise SystemExit(f"{run}/last.pt has offset_weight={ck.get('offset_weight', 0.0)}, --offset-weight is {args.offset_weight}: start a new run")
     if ck:
         stats = ck["stats"]
     else:
@@ -245,7 +278,9 @@ def main():
         mk = lambda items: [{k: v.clone() for k, v in b.items()} for b in loader(WindowData(args.data, by[name], items, stats, args.shaping, args.gamma), 16, 4, 0, False)]  # noqa: E731
         sets[name] = (mk(wi), mk(fi) if len(fi) else [], [], [{k: v.clone() for k, v in b.items()} for b in policy_loader(args.data, bce, 32, 4, shuffle=False, items=bi)])
     torch.manual_seed(args.seed)
-    model = WM320(args.stem, stats, args.shaping, gamma=args.gamma).to(dev)
+    model = WM320(args.stem, stats, args.shaping, imagenet=args.imagenet, offset_weight=args.offset_weight, gamma=args.gamma)
+    copied = None if ck else model.enc.pic.init_imagenet() if args.imagenet else 0   # identical on every process
+    model = model.to(dev)
     net = DDP(model, device_ids=[dev.index], broadcast_buffers=False) if ddp else model     # broadcasts process 0's weights
     enc = list(model.enc.parameters())
     ids = {id(p) for p in enc}
@@ -260,7 +295,7 @@ def main():
                 torch.cuda.set_rng_state(ck["rng_cuda"][0], dev)
     if ddp:          # the model was built identically everywhere (same seed); from here each process draws its own
         torch.manual_seed(args.seed + RS * rank + step)     # shifts, noise and dropout (a resumed run: a fresh stream from the step on)
-    info0 = {"format": "wm320-1", "labels": WD.LABELS, "stem": args.stem, "shaping": args.shaping, "cfg": {"gamma": args.gamma}, "stats": stats}
+    info0 = {"format": "wm320-1", "labels": WD.LABELS, "stem": args.stem, "imagenet": args.imagenet, "offset_weight": args.offset_weight, "shaping": args.shaping, "cfg": {"gamma": args.gamma}, "stats": stats}
 
     def checkpoint(full: bool):
         c = {**info0, "state": model.state_dict(), "step": step, "skipped": skipped, "args": vars(args)}
@@ -274,10 +309,11 @@ def main():
         imitation_samples_per_step=world * args.bc_batch * args.accum, trajectories={k: len(v) for k, v in by.items()},
         windows=int(len(window_items(by["train"]))), imitation_samples=int(sum(e["n_images"] for e in by["train"] if e["bc"])),
         validation={k: [len(v[0]) * 16, len(v[1]) * 16, len(v[2]) * 16, len(v[3]) * 32] for k, v in sets.items()},
-        params_m=sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6, args=vars(args))
+        params_m=sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6, imagenet=args.imagenet, imagenet_tensors_copied=copied,
+        args=vars(args))
     wo = int(round(args.online_frac * args.wm_batch)) if args.online else 0
-    if args.online and args.refresh_every < 1:
-        raise SystemExit("--refresh-every must be at least 1")
+    if args.online and (args.refresh_every < 1 or args.online_min < 1 or args.online_reload < 1):
+        raise SystemExit("--refresh-every, --online-min and --online-reload must be at least 1")
     if args.online and not 0 < wo < args.wm_batch:
         raise SystemExit(f"--online-frac {args.online_frac} of {args.wm_batch} windows leaves no window to one of the two sources")
     rounds_in, onl, mix = None, [], False
@@ -291,15 +327,21 @@ def main():
         if mix:                                                # (fewer windows than wo: a drop_last loader would never yield)
             wl.append(cycle(loader(WindowData(args.data, onl, window_items(onl), stats, args.shaping, args.gamma), wo,
                                    args.workers_wm // 2, sd + 3)))
-        bce = [e for e in by["train"] if e["bc"]] + [e for e in onl if e["bc"]]
+        bce = [e for e in by["train"] if e["bc"]] + ([e for e in onl if e["bc"]] if mix else [])     # online data only once mixed in
         return wl, cycle(loader(PolicyData(args.data, bce, bc_items(bce)), args.bc_batch, args.workers_bc, sd + 1))
+
+    def mixes(entries):
+        return len(entries) >= args.online_min and len(window_items(entries)) >= wo
+
+    def data_record():
+        log(event="data", step=step, online_rounds=rounds_in, online_trajectories=len(onl), online_seated=sum(e["bc"] for e in onl),
+            online_partial_trajectories=sum(bool(e.get("partial")) for e in onl), online_windows_per_micro_batch=wo if mix else 0)
 
     if args.online:
         onl, rounds_in = online_entries(args.online)
-        mix = len(window_items(onl)) >= wo
+        mix = mixes(onl)
     wtrain, btrain = make_loaders()
-    log(event="data", step=step, online_rounds=rounds_in, online_trajectories=len(onl), online_seated=sum(e["bc"] for e in onl),
-        online_windows_per_micro_batch=wo if mix else 0)
+    data_record()
     params = [p for p in model.parameters() if p.requires_grad]
     acc, t0, event = defaultdict(list), time.time(), "done"
     early = {500, 1000, 2500}
@@ -309,13 +351,12 @@ def main():
         finite = True
         if args.online and step % args.refresh_every == 0:
             new, names = online_entries(args.online)
-            if names != rounds_in:
+            if names != rounds_in or len(new) - len(onl) >= args.online_reload or mixes(new) != mix:
                 del wtrain, btrain                                     # the old loaders' workers end with them
                 onl, rounds_in = new, names
-                mix = len(window_items(onl)) >= wo
+                mix = mixes(onl)
                 wtrain, btrain = make_loaders()
-                log(event="data", step=step, online_rounds=rounds_in, online_trajectories=len(onl), online_seated=sum(e["bc"] for e in onl),
-                    online_windows_per_micro_batch=wo if mix else 0)
+                data_record()
         for i in range(args.accum):
             W = to(next(wtrain[0]), dev) if len(wtrain) == 1 else cat(to(next(wtrain[0]), dev), to(next(wtrain[1]), dev))
             Bc = to(next(btrain), dev)

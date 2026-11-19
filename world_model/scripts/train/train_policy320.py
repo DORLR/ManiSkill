@@ -8,7 +8,8 @@ error more than 5 % above the best); a non-finite step is skipped, the run stops
 validation; action scales from 20,000 samples.
 
 What differs from the old policy's training, all on purpose:
-  encoder      ResNet-18 from scratch on the 320 px pictures, trained end to end (old: frozen DINOv2 latents); hence
+  encoder      ResNet-18 on the 320 px pictures, from scratch or (--imagenet, 2026-11-18) from ImageNet weights,
+               trained end to end (old: frozen DINOv2 latents); hence
                the clip and the weight decay also cover the encoder, and lr 3e-4 without warm-up is untested for it
   augmentation a random shift of --shift-px pixels per sample (old: none, its encoder was frozen); the value is a
                required argument and is logged
@@ -56,6 +57,9 @@ def main():
     ap.add_argument("--data", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--stem", required=True, choices=["standard", "nopool"])
+    ap.add_argument("--imagenet", action="store_true", help="the ResNet starts from ImageNet weights (policy320.PictureTokens.init_imagenet)")
+    ap.add_argument("--offset-weight", type=float, default=0.0,
+                    help="> 0: the training-only offset read-out head (policy320.ResnetFMPolicy.losses) with this loss weight")
     ap.add_argument("--shift-px", type=int, required=True)
     ap.add_argument("--steps", type=int, default=100000)
     ap.add_argument("--batch", type=int, default=64)
@@ -75,6 +79,8 @@ def main():
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--resume", action="store_true")
     args = ap.parse_args()
+    if args.offset_weight < 0:
+        raise SystemExit("--offset-weight must be >= 0")
     if args.batch * args.accum != args.effective_batch:
         raise SystemExit(f"--batch x --accum = {args.batch * args.accum}, not the effective batch {args.effective_batch}")
     run, dev = Path(args.out), torch.device(args.device)
@@ -90,6 +96,11 @@ def main():
     if not sets["train"] or not sets["select"]:
         raise SystemExit("no trajectories in the training or the selection split")
     ck = torch.load(run / "last.pt", map_location="cpu", weights_only=False) if resume else None
+    if ck and ck["info"].get("imagenet", False) != args.imagenet:
+        raise SystemExit(f"{run}/last.pt has imagenet={ck['info'].get('imagenet', False)}, --imagenet is {args.imagenet}: start a new run")
+    if ck and ck["info"].get("offset_weight", 0.0) != args.offset_weight:
+        raise SystemExit(f"{run}/last.pt has offset_weight={ck['info'].get('offset_weight', 0.0)}, --offset-weight is {args.offset_weight}: start a new run")
+    use_off = args.offset_weight > 0
     m, s = (ck["mean"], ck["std"]) if ck else D.action_stats(args.data, sets["train"], n=20000, seed=args.seed)
     (run / "stats.json").write_text(json.dumps({"mean": np.asarray(m).tolist(), "std": np.asarray(s).tolist()}))
     mean, std = torch.tensor(m, device=dev), torch.tensor(s, device=dev)
@@ -100,22 +111,25 @@ def main():
             val[name] = items[np.sort(np.random.default_rng(1).choice(len(items), size=min(n, len(items)), replace=False))]
 
     def validate(model):
-        return {k: evaluate_policy(model, policy_loader(args.data, sets[k], args.eval_batch, min(args.workers, 6), shuffle=False, items=v), mean, std, dev)
+        return {k: evaluate_policy(model, policy_loader(args.data, sets[k], args.eval_batch, min(args.workers, 6), shuffle=False, items=v, offset=use_off),
+                                   mean, std, dev)
                 for k, v in val.items()}
 
     torch.manual_seed(args.seed)                    # the model's initial weights depend on the seed only
-    model = ResnetFMPolicy(args.stem).to(dev)
+    model = ResnetFMPolicy(args.stem, imagenet=args.imagenet, offset=use_off)
+    copied = ck["info"].get("imagenet_tensors_copied", 0) if ck else model.enc.init_imagenet() if args.imagenet else 0
+    model = model.to(dev)
     opt = torch.optim.AdamW(model.parameters(), args.lr, weight_decay=args.weight_decay)
     ema = EMA(model, 0.999)
     step, best, bad, skipped = 0, None, 0, 0
     if ck:
         model.load_state_dict(ck["raw"]); ema.model.load_state_dict(ck["ema"]); opt.load_state_dict(ck["opt"])
         ema.n, step, best, bad, skipped = ck["ema_n"], ck["step"], ck["best"], ck["bad"], ck["skipped"]
-    info = {"source": "stand-alone", "stem": args.stem, "shift_px": args.shift_px, "effective_batch": args.effective_batch, "lr": args.lr,
+    info = {"source": "stand-alone", "stem": args.stem, "imagenet": args.imagenet, "imagenet_tensors_copied": copied, "offset_weight": args.offset_weight, "shift_px": args.shift_px, "effective_batch": args.effective_batch, "lr": args.lr,
             "trajectories": {k: len(v) for k, v in sets.items()}, "grasps": {k: len({e["grasp"] for e in v}) for k, v in sets.items()}}
 
     def policy_ck():
-        return {"format": "policy320-2", "model": {"stem": args.stem}, "ema": ema.model.state_dict(), "mean": np.asarray(m), "std": np.asarray(s),
+        return {"format": "policy320-2", "model": {"stem": args.stem, **({"imagenet": True} if args.imagenet else {}), **({"offset": True} if use_off else {})}, "ema": ema.model.state_dict(), "mean": np.asarray(m), "std": np.asarray(s),
                 "step": step, "info": info}
 
     if ck and bad == 0:                             # a kill between the checkpoint files: rewrite what the last validation owed
@@ -126,9 +140,9 @@ def main():
     log(event="resume" if ck else "start", step=step, **info, kinds=dict(Counter(e["kind"] for e in sets["train"])),
         samples={k: int(sum(e["n_images"] for e in v)) for k, v in sets.items()}, validation_samples={k: len(v) for k, v in val.items()},
         params_m=sum(p.numel() for p in model.parameters()) / 1e6, args=vars(args))
-    batches = cycle(policy_loader(args.data, sets["train"], args.batch, args.workers, seed=args.seed + step))
+    batches = cycle(policy_loader(args.data, sets["train"], args.batch, args.workers, seed=args.seed + step, offset=use_off))
     params = list(model.parameters())
-    losses, norms, t0, event = [], [], time.time(), "done"
+    losses, norms, offs, flows, t0, event = [], [], [], [], time.time(), "done"
     while step < args.steps:
         step += 1
         opt.zero_grad(set_to_none=True)
@@ -136,8 +150,12 @@ def main():
         for _ in range(args.accum):
             b = next(batches)
             rgb, depth = shift(b["rgb"].to(dev, non_blocking=True), b["depth"].to(dev, non_blocking=True), args.shift_px)
-            loss = model.loss(rgb, depth, b["q"].to(dev), (b["a"].to(dev) - mean) / std) / args.accum
+            fl, ox = model.losses(rgb, depth, b["q"].to(dev), (b["a"].to(dev) - mean) / std, b["off"].to(dev) if use_off else None)
+            loss = (fl if ox is None else fl + args.offset_weight * ox) / args.accum
             loss.backward()
+            if ox is not None:
+                offs.append(float(ox))
+                flows.append(float(fl))
             total += float(loss)
         gn = float(torch.nn.utils.clip_grad_norm_(params, 1.0))
         if math.isfinite(total) and math.isfinite(gn):
@@ -152,8 +170,9 @@ def main():
                 break
         if step % 250 == 0:
             log(step=step, train_loss=float(np.mean(losses)) if losses else None, grad_norm=float(np.mean(norms)) if norms else None,
+                **({"offset_loss": float(np.mean(offs)), "flow_loss": float(np.mean(flows))} if offs else {}),
                 it_per_s=250 / (time.time() - t0), gpu_GB=torch.cuda.max_memory_allocated() / 1e9 if dev.type == "cuda" else 0.0, skipped=skipped)
-            losses, norms, t0 = [], [], time.time()
+            losses, norms, offs, flows, t0 = [], [], [], [], time.time()
         if step % args.eval_every == 0 or step == args.steps:
             rec = validate(ema.model)
             score = rec["select"]["action_err_mrad"]

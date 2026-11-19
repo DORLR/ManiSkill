@@ -32,7 +32,7 @@ step ddp 140 "$lg" 20000 train "$frac" "$S/ddp.log" "${DDP[@]}" $TR --data "$Q/d
 rm -f "$S/learner/DONE.json"
 step ddp-online 140 "$lg" 20000 train "$frac" "$S/ddp_online.log" "${DDP[@]}" $TR --data "$Q/data/wm_v1_fast" --out "$S/learner" --stem standard \
   --shift-px 4 --shaping 0.3 --wm-batch 16 --bc-batch 32 --accum 2 --workers-wm 8 --workers-bc 8 --steps 280 --eval-every 1000 --keep-every 1000 \
-  --save-every 10 --online "$S/pool" --resume
+  --save-every 10 --online "$S/pool" --online-min 1 --resume
 # 4. PPO: 4 workers, 3,072 steps; then its test on 2 selection grasps x 1 start (on the collector GPU: the simulators
 #    need a GPU for their renderer even without pictures)
 step ppo 40 "$cg" 8000 test 1 "$S/ppo.log" python world_model/scripts/train/train_ppo_state.py --grasps "$Q/data/wm_v1" --data "$Q/data/wm_v1_fast" \

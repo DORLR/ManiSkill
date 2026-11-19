@@ -1,6 +1,9 @@
 #!/bin/bash
 # The 320 px ResNet policy: training, selection of the checkpoint, final test.
 #   policy320.sh <stem> <train_gpu> <test_gpu> <shift_px> <batch> <accum> <train_gpu_mib> <train_ram_gb> <loader_workers> [resume] [seed]
+#   IMAGENET=1 in the environment: the training gets --imagenet (the ResNet starts from ImageNet weights; 2026-11-18)
+#   and the run is named fm320_<stem>_imnet_s<seed>. OFFSET=1: --offset-weight 1.0 (training-only offset read-out head),
+#   name suffix _off (e.g. fm320_standard_imnet_off_s0).
 # While the training runs and afterwards, every kept checkpoint (step*.pt) is tested in closed loop on the SELECTION
 # split (all its grasps x 4 starts). After a regular end the checkpoint with the best selection success (ties: the
 # later one) is tested on all held-out grasps x 2 starts and on 50 training grasps x 2 starts. A training that did
@@ -13,7 +16,8 @@ tmib=${7:?GPU MiB of the training}; tram=${8:?memory cap of the training in GB};
 for v in "$shift_px" "$batch" "$accum" "$tmib" "$tram" "$wk" "$seed"; do q320_int "$v" || { echo "not a whole number: $v"; exit 1; }; done
 case "$mode" in new|resume) ;; *) echo "mode must be new or resume"; exit 1 ;; esac
 cd "$Q/code/ManiSkill" || exit 1
-R=$Q/runs; name=fm320_${stem}_s$seed; O=$R/$name; DATA=$Q/data/wm_v1_fast; GRASPS=$Q/data/wm_v1
+tag=; [ "${IMAGENET:-0}" = 1 ] && tag=_imnet; [ "${OFFSET:-0}" = 1 ] && tag=${tag}_off
+R=$Q/runs; name=fm320_${stem}${tag}_s$seed; O=$R/$name; DATA=$Q/data/wm_v1_fast; GRASPS=$Q/data/wm_v1
 TLOG=$Q/logs/${name}_train.log; ELOG=$Q/logs/${name}_tests.log
 efrac=$(q320_fraction "$EVAL_TORCH_MIB" "$tgpu") || exit 1; emib=$(( EVAL_WORKERS * (EVAL_TORCH_MIB + EVAL_EXTRA_MIB) ))
 
@@ -54,6 +58,8 @@ else
   extra=()
   if [ "$mode" = resume ]; then extra=(--resume)
   elif [ -e "$O/log.jsonl" ]; then q320_log "$name: $O exists; pass 'resume' to continue it"; exit 1; fi
+  [ "${IMAGENET:-0}" = 1 ] && extra+=(--imagenet)
+  [ "${OFFSET:-0}" = 1 ] && extra+=(--offset-weight 1.0)
   mkdir -p "$O"; rm -f -- "${O:?}/TRAIN_EXIT"
   tfrac=$(q320_fraction $(( tmib - 600 )) "$gpu") || exit 1
   ( q320_run_when_fits "qx320-train-$name" "$tram" "$gpu" "$tmib" train "$tfrac" "$TLOG" python world_model/scripts/train/train_policy320.py \

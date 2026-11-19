@@ -23,6 +23,8 @@ source "$(dirname "$(readlink -f "$0")")/lib320.sh"
 CODE=$(cd "$(dirname "$(readlink -f "$0")")/../../.." && pwd)
 run=${1:?learner run name}; gpus=${2:?gpus}; workers=${3:?workers}; tmib=${4:?torch MiB per worker}; mib=${5:?GPU MiB per GPU}
 ram=${6:?RAM GB}; r1=${7:?last round}; min_step=${8:?learner step before round 1}; starts=${9:-3}
+att_extra=(${ATT_EXTRA:-})        # extra run_wm320_attempts options for collection and tests (2026-11-18: ATT_EXTRA="--max-retries 0",
+                                  # the user's decision: no back-off until a reliable failure signal exists)
 q320_gpus_ok "$gpus" || { echo "GPUs must be one of 0-7 or a comma list of distinct ones"; exit 1; }
 for v in "$workers" "$tmib" "$mib" "$ram" "$r1" "$min_step" "$starts"; do q320_int "$v" || { echo "not a whole number: $v"; exit 1; }; done
 [ "$r1" -ge 1 ] && [ "$workers" -ge 1 ] || { echo "need at least one round and one worker"; exit 1; }
@@ -102,7 +104,7 @@ for R in $(seq 1 "$r1"); do
     q320_log "online $run: round $R collects with $D/model.pt"
     q320_run_when_fits "qx320-collect-${run}-r$R" "$ram" "$gpus" "$mib" test 1 "$Q/logs/online_${run}_r$R.log" \
       python world_model/scripts/online/run_wm320_attempts.py --grasps "$Q/data/wm_v1" --ckpt "$D/model.pt" --mode collect --split train \
-      --pool "$P" --round "$R" --starts "$starts" --workers "$workers" --gpus "$gpus" --torch-mib "$tmib"
+      --pool "$P" --round "$R" --starts "$starts" --workers "$workers" --gpus "$gpus" --torch-mib "$tmib" "${att_extra[@]}"
     rc=$?
     [ -e "$D/DONE" ] || { q320_log "online $run: round $R has no DONE (collector code $rc); rounds stop"; exit 1; }
   fi
@@ -111,7 +113,7 @@ for R in $(seq 1 "$r1"); do
     [ -e "$O/summary.json" ] && continue
     q320_run_when_fits "qx320-test-${run}-r$R-$m" "$ram" "$gpus" "$mib" test 1 "$Q/logs/online_${run}_r${R}_select_$m.log" \
       python world_model/scripts/online/run_wm320_attempts.py --grasps "$Q/data/wm_v1" --ckpt "$D/model.pt" --mode "$m" --split select \
-      --out "$O" --starts 4 --workers "$workers" --gpus "$gpus" --torch-mib "$tmib" \
+      --out "$O" --starts 4 --workers "$workers" --gpus "$gpus" --torch-mib "$tmib" "${att_extra[@]}" \
       || q320_log "online $run: round $R select test $m code $?"
   done
   s=$(success_of "$D/select_wm/summary.json")
