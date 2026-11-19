@@ -1,8 +1,10 @@
-"""PPO baseline on the privileged state (wm/baselines/state_env.py), with Stable-Baselines3: PPO, SubprocVecEnv,
-VecNormalize (observations and rewards), checkpoints with the normalisation statistics. Training grasps only (the
-training split of demo320.split320: no selection, held-out or test grasp); each worker gets whole ports (its own
-share of them, balanced by grasp count, so its simulator is rebuilt only when it moves to another port); the workers'
-first resets (where their simulators are built) are 20 s apart. A resume refuses changed settings; every start or
+"""PPO baseline on the privileged state (wm/baselines/state_env.py), with Stable-Baselines3: PPO, VecNormalize
+(observations and rewards), checkpoints with the normalisation statistics. The n_envs slots PPO steps in lock-step are
+served by a pool of `--engines` simulator processes (wm/baselines/pool_vec_env.py, 2026-11-18: a slot whose episode
+ends takes over an engine whose next start is already placed; with SubprocVecEnv every round waited for some
+worker's 3-13 s reset). Training grasps only (the training split of demo320.split320: no selection, held-out or test
+grasp); each engine gets whole ports (its own share of them, balanced by grasp count, so its simulator is rebuilt only
+when it moves to another port); the engines' first resets (where their simulators are built) are 20 s apart. A resume refuses changed settings; every start or
 resume writes its own log folder and args file.
 Actions use the world model's asinh scaling (state_env.py): per joint the median (s0) and the 99.9th percentile (top,
 at least 2 s0) over the training demonstrations' decisions of the largest |commanded target - joints measured at the
@@ -24,7 +26,9 @@ import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CheckpointCallback
 from stable_baselines3.common.logger import configure
-from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor, VecNormalize
+from stable_baselines3.common.vec_env import VecMonitor, VecNormalize
+
+from wm.baselines.pool_vec_env import PoolVecEnv
 
 from wm.tdmpc import demo320 as D
 from wm.tdmpc import wmdata320 as WD
@@ -66,7 +70,7 @@ def port_shares(gs: list[dict], n: int) -> list[list[dict]]:
     return share
 
 
-SAME = ("shaping", "gamma", "n_envs", "episodes_per_grasp", "seed", "n_steps", "batch", "epochs", "lr", "grasps", "data", "action_map")
+SAME = ("shaping", "gamma", "n_envs", "engines", "episodes_per_grasp", "seed", "n_steps", "batch", "epochs", "lr", "grasps", "data", "action_map")
 ACTION_MAP = "asinh"                   # 2026-11-17: the linear map of the first smoke run is not resumable
 
 
@@ -75,7 +79,8 @@ def main():
     ap.add_argument("--grasps", required=True)
     ap.add_argument("--data", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--n-envs", type=int, default=24)
+    ap.add_argument("--n-envs", type=int, default=24)                # slots PPO steps in lock-step
+    ap.add_argument("--engines", type=int, default=None)              # simulator processes serving them; default 2 x n_envs
     ap.add_argument("--total-steps", type=int, default=20_000_000)
     ap.add_argument("--shaping", type=float, required=True)
     ap.add_argument("--gamma", type=float, default=1 - 1 / 30)
@@ -90,6 +95,9 @@ def main():
     ap.add_argument("--resume", action="store_true")
     args = ap.parse_args()
     args.action_map = ACTION_MAP                                  # stored in args.json; a resume must match it
+    args.engines = 2 * args.n_envs if args.engines is None else args.engines
+    if args.engines < args.n_envs:
+        raise SystemExit(f"{args.engines} engines for {args.n_envs} slots")
     out = Path(args.out)
     if (out / "DONE.json").exists():
         raise SystemExit(f"{out} is finished")
@@ -103,8 +111,8 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     torch.set_num_threads(args.threads)
     gs = train_grasps(args.grasps)
-    if len({g["port"] for g in gs}) < args.n_envs:
-        raise SystemExit(f"{len({g['port'] for g in gs})} training ports for {args.n_envs} workers")
+    if len({g["port"] for g in gs}) < args.engines:
+        raise SystemExit(f"{len({g['port'] for g in gs})} training ports for {args.engines} engines")
     scale = action_scale(args.data, seed=args.seed) if not (out / "action_scale.json").exists() else json.loads((out / "action_scale.json").read_text())
     if not isinstance(scale, dict):
         raise SystemExit("action_scale.json is in the old linear format: start a new run")
@@ -120,10 +128,11 @@ def main():
     while (out / (tag if n == 1 else f"{tag}_{n}")).exists():                       # never overwrite an earlier log
         n += 1
     tag = tag if n == 1 else f"{tag}_{n}"
-    share = port_shares(gs, args.n_envs)
+    share = port_shares(gs, args.engines)
+    print(f"{len(gs)} training grasps over {args.engines} engines; grasps per engine {sorted(len(s) for s in share)}", flush=True)
     fns = [make_env(share[i], scale, args.seed * 1000 + i + done, args.shaping, args.gamma, args.episodes_per_grasp, 20 * i)
-           for i in range(args.n_envs)]
-    venv = VecMonitor(SubprocVecEnv(fns, start_method="spawn"), filename=str(out / f"monitor_{tag}"),
+           for i in range(args.engines)]
+    venv = VecMonitor(PoolVecEnv(fns, args.n_envs, start_method="spawn"), filename=str(out / f"monitor_{tag}"),
                       info_keywords=("is_success", "stopped", "decisions"))
     if ck:
         venv = VecNormalize.load(str(out / "ckpt" / f"ppo_vecnormalize_{done}_steps.pkl"), venv)
