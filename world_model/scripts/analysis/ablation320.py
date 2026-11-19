@@ -9,6 +9,13 @@ Arms are result directories of run_wm320_attempts.py on the same split, grasps, 
                 offered, g in bin b)
       printed as "p0,p1,p2,p3" (the --random-p of the ablation "random"); counts go to --json.
 
+  cells DIR [--arm NAME=DIR ...] --out <json>      (make_combo_grasps.py's 8 paired cells, 2026-11-19)
+      per arm and cell: judged starts, unusable grasps, success with a 95 % cluster-bootstrap interval (clusters: the
+      shape for cells with "shape", the grasp otherwise; 2,000 seeded draws); factor effects paired by the cells' shared
+      index i and the start: for every two cells that differ in one factor, mean(success_with - success_without) over
+      starts judged in both with the same drawn start, with a cluster sign-flip p (clusters: the held-out shape if a
+      cell has "shape", else i).
+
   compare --ref NAME=DIR --arm NAME=DIR [--arm ...] --out <json>
       per arm: success over all judged starts; paired against the reference on starts whose start pose is identical
       in both (placement can differ between runs): n, both rates, b = arm succeeds where the reference fails,
@@ -21,9 +28,9 @@ Arms are result directories of run_wm320_attempts.py on the same split, grasps, 
       summary and the keys that differ from the reference. Result files of crashed grasps (with "error") are skipped,
       as summarise does. A text table goes to stdout.
 
-Held-out groups (demo320.split320's numbers): unseen shape (OOD_VAL_SHAPES) with grasp pitch and position outside the
-held-out strips / inside a strip; seen shape with pitch in (-42, -38) deg only ("unseen angle"); with position in
-(-21, -19) mm only ("unseen position"); both (no such grasp in wm_v1).
+Held-out groups (demo320.split320's numbers): the combination of unseen factors, shape (OOD_VAL_SHAPES), angle (grasp
+pitch in (-42, -38) deg) and position (grasp position in (-21, -19) mm), e.g. "shape", "angle+position",
+"shape+angle+position" (wm_v1 has no "angle+position" grasp; scripts/eval/make_combo_grasps.py makes such test grasps).
 """
 
 from __future__ import annotations
@@ -44,16 +51,10 @@ N_BINS = len(RANDOM_EDGES_MM) + 1
 
 
 def group_of(port: str, pitch_deg: float, pos_m: float) -> str:
-    strip_a, strip_x = -42.0 < pitch_deg < -38.0, -21.0 < pos_m * 1000.0 < -19.0
-    if port in OOD_VAL_SHAPES:
-        return "unseen shape, angle+position in strip" if (strip_a or strip_x) else "unseen shape, angle+position seen"
-    if strip_a and strip_x:
-        return "unseen angle AND position"
-    if strip_a:
-        return "unseen angle only"
-    if strip_x:
-        return "unseen position only"
-    return "not held out"
+    """Which of the three factors are unseen: shape (OOD_VAL_SHAPES), angle (pitch in the held-out strip), position
+    (position in the held-out strip); "+"-joined in that order (7 combinations), "none" for none."""
+    unseen = (("shape", port in OOD_VAL_SHAPES), ("angle", -42.0 < pitch_deg < -38.0), ("position", -21.0 < pos_m * 1000.0 < -19.0))
+    return "+".join(n for n, v in unseen if v) or "none"
 
 
 def load_arm(d: str) -> dict:
@@ -226,17 +227,170 @@ def show(res: dict) -> str:
     return "\n".join(lines)
 
 
+def boot_ci(succ: list[float], clusters: list, draws: int = 2000, seed: int = 0) -> tuple[float, float]:
+    """95 % interval of the success rate, resampling whole clusters."""
+    ids = sorted(set(clusters))
+    idx = {c: i for i, c in enumerate(ids)}
+    k = np.array([idx[c] for c in clusters])
+    s_c = np.bincount(k, weights=np.asarray(succ, float), minlength=len(ids))
+    n_c = np.bincount(k, minlength=len(ids)).astype(float)
+    d = np.random.default_rng(seed).integers(len(ids), size=(draws, len(ids)))
+    r = s_c[d].sum(1) / n_c[d].sum(1)
+    return float(np.percentile(r, 2.5)), float(np.percentile(r, 97.5))
+
+
+def cell_of(grasp: str) -> tuple[int, int] | None:
+    """(cell index, pair index i) from a make_combo_grasps name <port>_c<cell><i:03d>."""
+    tail = grasp.rsplit("_", 1)[-1]
+    if len(tail) != 5 or tail[0] != "c" or not tail[1:].isdigit():
+        return None
+    return int(tail[1]), int(tail[2:])
+
+
+def load_cells(d: str) -> tuple[dict, dict]:
+    """-> ({(cell, i, start idx): {success, start, port, seed}}, {cell: counts of unusable / crashed grasps and unplaced starts})."""
+    out, counts = {}, {}
+    for f in sorted(glob.glob(f"{d}/*/*.json")):
+        j = json.loads(Path(f).read_text())
+        ci = cell_of(j.get("grasp", ""))
+        if ci is None:
+            continue
+        c = counts.setdefault(ci[0], {"unusable_grasps": 0, "crashed_grasps": 0, "unplaced_starts": 0})
+        if j.get("error"):
+            c["unusable_grasps" if j.get("error_kind") == "setup" else "crashed_grasps"] += 1
+            continue
+        for st in j.get("starts", []):
+            if st.get("placement_failed"):
+                c["unplaced_starts"] += 1
+            a = st.get("attempt")
+            if a and a.get("success") is not None:
+                out[(ci[0], ci[1], int(st["idx"]))] = {"success": bool(a["success"]), "port": j["port"],
+                                                       "start": json.dumps(st["start"], sort_keys=True),
+                                                       "seed": j.get("episode_seed_used", j.get("episode_seed"))}
+    return out, counts
+
+
+def holm(ps: list[float]) -> list[float]:
+    """Holm-adjusted p-values (family = the given list)."""
+    order = np.argsort(ps)
+    adj, run = [0.0] * len(ps), 0.0
+    for r, i in enumerate(order):
+        run = max(run, min(1.0, (len(ps) - r) * ps[i]))
+        adj[i] = run
+    return adj
+
+
+def t_ci(succ: list[float], clusters: list) -> tuple[float, float]:
+    """Cluster-robust 95 % interval with t on (clusters - 1) degrees of freedom (as eval_policy320's cluster_rate)."""
+    from scipy.stats import t as student
+    ids = sorted(set(clusters))
+    y = np.array([sum(s for s, c in zip(succ, clusters) if c == k) for k in ids], float)
+    m = np.array([sum(1 for c in clusters if c == k) for k in ids], float)
+    G, r = len(ids), y.sum() / m.sum()
+    if G < 2:
+        return float(r), float(r)
+    se = np.sqrt(G / (G - 1) * np.sum((y - r * m) ** 2)) / m.sum()
+    q = student.ppf(0.975, G - 1)
+    return float(max(0.0, r - q * se)), float(min(1.0, r + q * se))
+
+
+def cells(arms: dict[str, str]) -> dict:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "eval"))
+    from make_combo_grasps import CELLS
+    res = {"cells": list(CELLS), "arms": {}}
+    for name, d in arms.items():
+        rows, counts = load_cells(d)
+        per = {}
+        for ci, cell in enumerate(CELLS):
+            ks = [k for k in rows if k[0] == ci]
+            base = counts.get(ci, {"unusable_grasps": 0, "crashed_grasps": 0, "unplaced_starts": 0})
+            if not ks:
+                per[cell] = {"starts": 0, **base}
+                continue
+            succ = [rows[k]["success"] for k in ks]
+            cl = [rows[k]["port"] if "shape" in cell else k[1] for k in ks]
+            lo, hi = boot_ci(succ, cl)
+            tlo, thi = t_ci(succ, cl)
+            per[cell] = {"starts": len(ks), **base, "clusters": len(set(cl)), "successes": int(sum(succ)),
+                         "success": float(np.mean(succ)), "ci95": [lo, hi], "ci95_t": [tlo, thi]}
+        eff = {}
+        for a_i, a in enumerate(CELLS):
+            fa = set(a.split("+")) if a != "none" else set()
+            for b_i, b in enumerate(CELLS):
+                fb = set(b.split("+")) if b != "none" else set()
+                if not (fa < fb and len(fb - fa) == 1):
+                    continue
+                both = [(k, (b_i, k[1], k[2])) for k in rows if k[0] == a_i and (b_i, k[1], k[2]) in rows]
+                pairs = [(ka, kb) for ka, kb in both if rows[ka]["start"] == rows[kb]["start"]]
+                key = f"{a} -> {b} (+{next(iter(fb - fa))})"
+                if not pairs:
+                    eff[key] = {"judged_in_both": len(both), "pairs": 0, "error": "no pairs with the same start"}
+                    continue
+                diff = [float(rows[kb]["success"]) - float(rows[ka]["success"]) for ka, kb in pairs]
+                shape_cell = "shape" in fa or "shape" in fb
+                cl = [rows[kb]["port"] if shape_cell else ka[1] for ka, kb in pairs]
+                per_c = {}
+                for c, x in zip(cl, diff):
+                    per_c[c] = per_c.get(c, 0.0) + x
+                eff[key] = {"judged_in_both": len(both), "pairs": len(pairs),
+                            "same_seed_share": float(np.mean([rows[ka]["seed"] == rows[kb]["seed"] for ka, kb in pairs])),
+                            "rate_without": float(np.mean([rows[ka]["success"] for ka, _ in pairs])),
+                            "rate_with": float(np.mean([rows[kb]["success"] for _, kb in pairs])),
+                            "mean_diff": float(np.mean(diff)), "clusters": len(per_c),
+                            "signflip_p": cluster_signflip_p(list(per_c.values()))}
+        ok = [k for k, e in eff.items() if e.get("pairs")]
+        for k, ph in zip(ok, holm([eff[k]["signflip_p"] for k in ok])):
+            eff[k]["holm_p"] = ph
+        res["arms"][name] = {"dir": d, "cells": per, "factor_effects": eff}
+    return res
+
+
+def show_cells(res: dict) -> str:
+    lines = []
+    for name, r in res["arms"].items():
+        lines.append(f"== {name}")
+        lines.append(f"   {'cell':22s} {'k/N':>9s} {'unusable':>8s} {'crashed':>7s} {'unplaced':>8s} {'clusters':>8s} {'success':>8s}  "
+                     f"95 % bootstrap   95 % t")
+        for cell, x in r["cells"].items():
+            if x["starts"]:
+                lines.append(f"   {cell:22s} {str(x['successes']) + '/' + str(x['starts']):>9s} {x['unusable_grasps']:8d} {x['crashed_grasps']:7d} "
+                             f"{x['unplaced_starts']:8d} {x['clusters']:8d} {100 * x['success']:7.1f}%  [{100 * x['ci95'][0]:.1f}, {100 * x['ci95'][1]:.1f}]"
+                             f"   [{100 * x['ci95_t'][0]:.1f}, {100 * x['ci95_t'][1]:.1f}]")
+            else:
+                lines.append(f"   {cell:22s} {'0/0':>9s} {x['unusable_grasps']:8d} {x['crashed_grasps']:7d} {x['unplaced_starts']:8d}")
+        lines.append("   factor effects (paired by pair index and start; success with - without the unseen factor; Holm over the contrasts):")
+        for k, e in r["factor_effects"].items():
+            if not e.get("pairs"):
+                lines.append(f"     {k:44s} NO PAIRS ({e['judged_in_both']} judged in both)")
+                continue
+            lines.append(f"     {k:44s} pairs {e['pairs']:4d}/{e['judged_in_both']:4d}  {100 * e['rate_without']:5.1f}% -> {100 * e['rate_with']:5.1f}%  "
+                         f"{100 * e['mean_diff']:+6.1f} points  p {e['signflip_p']:.2e} (Holm {e['holm_p']:.2e}, {e['clusters']} clusters, "
+                         f"same seed {100 * e['same_seed_share']:.0f}%)")
+    return "\n".join(lines)
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     a = sub.add_parser("pbins")
     a.add_argument("dir")
     a.add_argument("--json")
+    cc = sub.add_parser("cells")
+    cc.add_argument("dir")
+    cc.add_argument("--name", default="wm")
+    cc.add_argument("--arm", action="append", default=[])
+    cc.add_argument("--out", required=True)
     c = sub.add_parser("compare")
     c.add_argument("--ref", required=True)
     c.add_argument("--arm", action="append", default=[])
     c.add_argument("--out", required=True)
     args = ap.parse_args()
+    if args.cmd == "cells":
+        arms = {args.name: args.dir, **dict(x.split("=", 1) for x in args.arm)}
+        r = cells(arms)
+        Path(args.out).write_text(json.dumps(r, indent=1))
+        print(show_cells(r))
+        return
     if args.cmd == "pbins":
         r = pbins(args.dir)
         if args.json:

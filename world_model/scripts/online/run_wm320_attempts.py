@@ -15,7 +15,10 @@ Two uses:
       files, unless --record <dir>: then every attempt is also written as a fast-copy trajectory
       (<dir>/traj/<port>/<grasp>/s<i>.npz, kind "test") and listed in <dir>/manifest.json (for the fidelity checks).
 Per grasp: the reference insertion (H*, axis: labels of the collect mode only, and the start placement), then for
-every start the placement, snapshot/restore, one attempt. Per-grasp result file <out>/<port>/<grasp>.json as
+every start the placement, snapshot/restore, one attempt. A grasp file without "axis" (test grasps made by
+scripts/eval/make_combo_grasps.py, 2026-11-19: no demonstrations needed) gets it from this reference insertion, exactly
+as wm/collect/episode._axis_from does at collection: the direction of the FK hand motion over the expert's
+"axial_push" phase (no simulator truth). Per-grasp result file <out>/<port>/<grasp>.json as
 eval_policy320 (with error_kind setup / crash); crashed grasps are retried; a dying worker rebuilds the pool.
 Workers are spread over the GPUs given (--gpus), one GPU per worker (renderer and model).
 
@@ -43,6 +46,7 @@ import eval_policy320 as E  # noqa: E402
 from wm.tdmpc import demo320 as D  # noqa: E402
 
 MAX_POOL_REBUILDS = E.MAX_POOL_REBUILDS
+REFERENCE_TRIES = 3                                         # as wm/collect/episode.REFERENCE_ATTEMPTS
 _S = {"init_error": None, "robot": None, "port": None}
 
 
@@ -115,12 +119,50 @@ def work(job):
         if root is not None:                                   # a retried grasp: no file of an earlier try stays behind
             shutil.rmtree(root / sub / g["port"] / g["grasp"], ignore_errors=True)
         rng = np.random.default_rng(seed)
-        robot.reset(g["episode_seed"], g["pitch_deg"], g["grasp_pos_m"])
-        expert = Expert(robot)
-        if not (expert.to_safe_from_spawn() and expert.run("insert", lambda *x: None, seed_offset=0).get("completed")):
-            s.update(error="reference insertion failed", error_kind="setup")
+        push: list[np.ndarray] = []                            # FK hand after every step of the axial push
+
+        def on_step(phase, action, info):
+            if phase == "axial_push":
+                push.append(robot.hand_pose()[:3, 3].copy())
+        # a grasp of wm_v1 has the episode seed whose reference insertion worked (one try, as before); a test grasp
+        # without "axis" gets collection's retries (wm/collect/episode.py: seed + 7919 a, REFERENCE_TRIES tries)
+        tries = 1 if g.get("axis") is not None else REFERENCE_TRIES
+        done_ref, why = False, "reference insertion failed"
+        for t in range(tries):
+            ep_seed = int(g["episode_seed"]) + 7919 * t
+            for rebuilt in (False, True):                      # an exception: once more with a fresh scene, same seed
+                push.clear()
+                try:
+                    robot.reset(ep_seed, g["pitch_deg"], g["grasp_pos_m"])
+                    expert = Expert(robot)
+                    done_ref = bool(expert.to_safe_from_spawn() and expert.run("insert", on_step, seed_offset=0).get("completed"))
+                    why = "reference insertion failed"
+                    break
+                except Exception as exc:                       # still failing on a fresh scene: unusable, not a crash
+                    done_ref, why = False, f"reference setup failed: {type(exc).__name__}: {exc}"[:300]
+                    if rebuilt:
+                        break
+                    old, _S["robot"], _S["port"] = _S["robot"], None, None
+                    try:
+                        old.env.close()
+                    except Exception:
+                        pass
+                    _S["robot"], _S["port"] = Robot(g["port"]), g["port"]
+                    robot = _S["robot"]
+            if done_ref:
+                break
+        s["episode_seed_used"], s["reference_tries"] = ep_seed, t + 1
+        if not done_ref:
+            s.update(error=why, error_kind="setup")
             return s
-        ex = OnlineTester(robot, robot.hand_pose(), np.asarray(g["axis"]))
+        axis = g.get("axis")
+        if axis is None:                                       # as wm/collect/episode._axis_from
+            if len(push) < 2 or np.linalg.norm(push[-1] - push[0]) < 1e-4:
+                s.update(error="no axial push in the reference insertion", error_kind="setup")
+                return s
+            axis = (push[-1] - push[0]) / np.linalg.norm(push[-1] - push[0])
+            s["axis_measured"] = [float(v) for v in axis]
+        ex = OnlineTester(robot, robot.hand_pose(), np.asarray(axis))
         if not ex.remember_standoff():
             s.update(error="standoff not reachable", error_kind="setup")
             return s
@@ -131,6 +173,8 @@ def work(job):
         for i in range(starts):
             if base is not None and i > 0:
                 robot.base.set_state_dict(base)
+            if "pair_index" in g:                              # paired cells: start i drawn from its own generator, so a
+                rng = np.random.default_rng([seed, i])         # placement redraw at start 0 cannot change start 1
             fails = []
             for _ in range(B.PLACEMENT_ATTEMPTS):
                 start = B.sample_start(rng)
@@ -158,7 +202,7 @@ def work(job):
                         "kind": "online" if a["pool"] else "test", "outcome": "seated_fk" if summ["seated_fk"] else "not_seated", "source": rel,
                         "pin_length_m": float(ex.L), "H_star": ex.H_star.tolist(), "axis": ex.F[:, 0].tolist(),
                         "round": a["round"], "start": i, "start_pose": start, "attempt_seed": int(seed + 1000 * i),
-                        "mode": a["mode"], "model_step": summ["model_step"],
+                        "mode": a["mode"], "model_step": summ["model_step"], "episode_seed_used": s["episode_seed_used"],
                         "stopped": summ["stopped"], "interventions": summ["interventions"], "retries": summ["retries"]}
                 s["entries"].append(write_fast(root / rel, out, meta))
             del out
@@ -209,7 +253,8 @@ def main():
     ap.add_argument("--grasps", required=True)
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--mode", required=True, choices=["act", "wm", "collect", "servo", "random"])
-    ap.add_argument("--split", required=True, choices=["train", "select", "heldout", "test"])
+    ap.add_argument("--split", required=True, choices=["train", "select", "heldout", "test", "any"],
+                    help="any: every grasp of --grasps but the test ports (tests only; for make_combo_grasps.py's cells)")
     ap.add_argument("--final-test", action="store_true")
     ap.add_argument("--out", help="result files (default: <pool>/r<round>/results for collect)")
     ap.add_argument("--pool", help="collect: the online pool")
@@ -242,6 +287,8 @@ def main():
     if args.split == "test" and not args.final_test:
         raise SystemExit("ports A-D are the final test and stay untouched: --split test needs --final-test")
     collect = args.mode == "collect"
+    if args.split == "any" and (collect or args.final_test or args.grasps_n):
+        raise SystemExit("--split any is for tests of generated grasps (make_combo_grasps.py), all of them")
     if collect != (args.split == "train"):
         raise SystemExit("collect runs on the training grasps only, and the training grasps are only collected on")
     if collect and not (args.pool and args.round > 0):
@@ -282,7 +329,11 @@ def main():
             raise SystemExit(f"--inside-mm needs a checkpoint with the offset read-out head; {args.ckpt} has none")
     seed = args.seed + 1_000_003 * args.round if collect else args.seed
     every = [json.loads(Path(f).read_text()) for f in sorted(glob.glob(f"{args.grasps}/*/*/grasp.json"))]
-    every = [g for g in every if g.get("reference_ok") and D.split320(g["port"], g["pitch_deg"], g["grasp_pos_m"], g["grasp"]) == args.split]
+    every = [g for g in every if g.get("reference_ok") and (
+        D.split320(g["port"], g["pitch_deg"], g["grasp_pos_m"], g["grasp"]) == args.split
+        or (args.split == "any" and g["port"] not in D.TEST_PORTS))]
+    if args.split == "any" and (not every or not all("pair_index" in g for g in every)):
+        raise SystemExit("--split any needs make_combo_grasps.py's grasps (with pair_index) only")
     chosen = E.pick(len(every), args.grasps_n)                     # k = index in the whole list: a grasp keeps its seed
     gs = [every[k] for k in chosen]
     path = {g["grasp"]: out / g["port"] / f"{g['grasp']}.json" for g in gs}
@@ -304,7 +355,10 @@ def main():
             todo = [todo[i] for i in np.random.default_rng(seed).permutation(len(todo))]     # (all ports from the start)
         else:
             todo.sort(key=lambda kg: kg[1]["port"])
-        run_pool([(g, str(path[g["grasp"]]), args.starts, seed + 100_003 * k, a) for k, g in todo], args, gpus)
+        # paired cells (make_combo_grasps): the job seed follows the pair index, so every cell (and every arm with the same
+        # --seed) draws the same starts and attempt seeds for grasp i
+        run_pool([(g, str(path[g["grasp"]]), args.starts, seed + 100_003 * (g["pair_index"] if "pair_index" in g else k), a)
+                  for k, g in todo], args, gpus)
     out.mkdir(parents=True, exist_ok=True)
     summary, complete = E.summarise(out, gs, args.starts, {"policy": f"wm320 agent ({args.mode})", "ckpt": args.ckpt, "split": args.split,
                                                           "mode": args.mode, "round": args.round, "starts_per_grasp": args.starts,

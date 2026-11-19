@@ -77,7 +77,7 @@ def test_pbins_and_compare(tmp_path):
     assert (p["arm_wins"], p["ref_wins"]) == (1, 2)
     assert res["arms"]["wm"]["moves_per_attempt"] == 2.0
     g = res["arms"]["arm"]["paired_vs_ref_by_group"]
-    assert g["unseen shape, angle+position seen"]["n"] == 1 and g["unseen angle only"]["n"] == 2
+    assert g["shape"]["n"] == 1 and g["angle"]["n"] == 2
     assert 0.0 < p["mcnemar_p"] <= 1.0
     assert A.show(res)
 
@@ -147,3 +147,55 @@ def test_cluster_signflip_and_same_start():
     assert A.same_start(x, {"start": "s", "hand": [0.3, 0.0, 0.0]})
     assert not A.same_start(x, {"start": "s", "hand": [0.6, 0.0, 0.0]})
     assert A.same_start(x, {"start": "s", "hand": None}) and not A.same_start(x, {"start": "t", "hand": None})
+
+
+def test_groups_and_combo_grasps(tmp_path):
+    import ablation320 as A
+    sys.path.insert(0, str(ROOT / "scripts" / "eval"))
+    import make_combo_grasps as M
+    from wm.tdmpc import demo320 as D
+    assert A.group_of("G01", -30.0, -0.015) == "none"
+    assert A.group_of("G46", -40.0, -0.020) == "shape+angle+position"
+    assert A.group_of("G01", -40.0, -0.020) == "angle+position"
+    assert A.group_of("G55", -30.0, -0.020) == "shape+position"
+    n = 26
+    gs = M.make([f"G{k:02d}" for k in range(0, 40) if f"G{k:02d}" not in ("G46", "G47", "G48")], n, 0)
+    assert len(gs) == 8 * n and len({g["grasp"] for g in gs}) == len(gs)
+    by = {(g["condition"], g["pair_index"]): g for g in gs}
+    for i in range(n):
+        a, b = by[("none", i)], by[("angle", i)]
+        assert a["port"] == b["port"] and a["grasp_pos_m"] == b["grasp_pos_m"] and a["episode_seed"] == b["episode_seed"]
+        assert -42 < b["pitch_deg"] < -38 and not (-42 <= a["pitch_deg"] <= -38)
+        c = by[("shape+position", i)]
+        assert c["pitch_deg"] == a["pitch_deg"] and c["port"] == by[("shape", i)]["port"] and -21 < c["grasp_pos_m"] * 1000 < -19
+    for g in gs:
+        assert A.group_of(g["port"], g["pitch_deg"], g["grasp_pos_m"]) == g["condition"]
+        sp = D.split320(g["port"], g["pitch_deg"], g["grasp_pos_m"], g["grasp"])
+        assert (sp in ("train", "select")) == (g["condition"] == "none") and sp != "test"
+        assert -55 < g["pitch_deg"] < -25 and -28 < g["grasp_pos_m"] * 1000 < -12        # never the outer bands
+        assert g["axis"] is None and g["episode_seed"] >= M.SEED0
+        assert A.cell_of(g["grasp"]) == (M.CELLS.index(g["condition"]), g["pair_index"])
+    assert len({g["port"] for g in gs if g["condition"] == "shape"}) == 13
+    # cells(): two pairs per factor contrast, one start with a different pose left out
+    d = tmp_path / "cells"
+    for g in gs:
+        if g["pair_index"] > 1:
+            continue
+        ok = g["condition"] == "none" or g["pair_index"] == 0
+        f = d / g["port"] / f"{g['grasp']}.json"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps({"grasp": g["grasp"], "port": g["port"], "pitch_deg": g["pitch_deg"], "grasp_pos_m": g["grasp_pos_m"],
+                                 "starts": [{"idx": 0, "start": {"s": g["pair_index"]}, "attempt": {"success": ok}}]}))
+    r = A.cells({"wm": str(d)})["arms"]["wm"]
+    assert r["cells"]["none"]["success"] == 1.0 and r["cells"]["angle"]["success"] == 0.5
+    e = r["factor_effects"]["none -> angle (+angle)"]
+    assert e["pairs"] == 2 and abs(e["mean_diff"] + 0.5) < 1e-12
+    assert A.show_cells(A.cells({"wm": str(d)}))
+
+
+def test_holm_and_t_interval():
+    import ablation320 as A
+    adj = A.holm([0.01, 0.04, 0.03])
+    assert abs(adj[0] - 0.03) < 1e-12 and abs(adj[2] - 0.06) < 1e-12 and abs(adj[1] - 0.06) < 1e-12
+    lo, hi = A.t_ci([1, 0, 1, 1, 0, 1], ["a", "a", "b", "b", "c", "c"])
+    assert 0.0 <= lo < 4 / 6 < hi <= 1.0
