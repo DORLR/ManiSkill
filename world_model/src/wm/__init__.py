@@ -1,6 +1,7 @@
 """World model for plug insertion (see docs/README.md for the record of every run).
 
 Subpackages
+    wm.sim       simulator adapter, task configuration, generated port shapes, pose geometry, port-axis fit
     wm.env       environment access, start/grasp sampling, the demonstration expert
     wm.data      on-disk schema, recorder, store, index/splits, forward kinematics, conditions, datasets
     wm.collect   dataset collection plan and multi-process runner

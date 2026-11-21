@@ -37,10 +37,7 @@ from mani_skill.examples.motionplanning.panda.solutions.wminsertion_v2.scripted 
 
 from .robot import Robot
 from .sampling import Offset
-from .._paths import use_alignment_field
-
-use_alignment_field()
-from paf.geometry import T_to_pose, pose_distance  # noqa: E402
+from ..sim.geometry import T_to_pose, pose_distance
 
 SAFE_GAP_M = 0.012          # Chongyu's transport_tip_gap_m
 PUSH_SPEED_M_S = 0.003      # his insertion speed

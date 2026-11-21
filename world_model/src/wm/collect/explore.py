@@ -66,10 +66,7 @@ from ..data.outcome import diagnosis, inserted
 from ..data.recorder import Recorder
 from ..env.expert import Expert
 from ..env.robot import Robot
-from .._paths import use_alignment_field
-
-use_alignment_field()
-from paf.geometry import interpolate_T, pose_distance  # noqa: E402
+from ..sim.geometry import interpolate_T, pose_distance
 
 DT = 0.05                    # control period (20 Hz)
 BACK_GAP_M = 0.012           # standoff where the offset is applied (free space)

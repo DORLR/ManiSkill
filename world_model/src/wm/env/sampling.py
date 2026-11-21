@@ -2,7 +2,7 @@
 
 Start poses and offsets are written in the expert's socket-goal frame: x along
 the insertion axis (into the board), tip gap = distance from the pin tips to the
-hole face (= 3 mm - t_x of the alignment_field state), y/z lateral.
+hole face (= 3 mm - t_x of the port-frame state), y/z lateral.
 """
 
 from __future__ import annotations
@@ -11,12 +11,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .._paths import use_alignment_field
+from ..sim import config as _C
 
-use_alignment_field()
-from paf import config as _C  # noqa: E402
-
-CONDITIONS = {  # name: (pitch kind, position kind) as in alignment_field/paf/config.py
+CONDITIONS = {  # name: (pitch kind, position kind) as in wm/sim/config.py
     "train": ("train", "train"),
     "pitch_interp": ("interp", "train"),
     "pitch_extrap": ("extrap", "train"),

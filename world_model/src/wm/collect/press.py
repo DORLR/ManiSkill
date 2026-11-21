@@ -40,10 +40,7 @@ from ..data.recorder import Recorder
 from ..env.expert import Expert
 from ..env.robot import Robot
 from .explore import CHUNK, DEPTH_CAP_M, LEAD_MAX_M, PLACEMENT_ATTEMPTS, Explorer, _unit, truth_outcome
-from .._paths import use_alignment_field
-
-use_alignment_field()
-from paf.geometry import pose_distance  # noqa: E402
+from ..sim.geometry import pose_distance
 
 MAX_STEPS = 480               # 24 s, as the other sets
 PHASE = "explore_contact"     # phase label (bookkeeping only)

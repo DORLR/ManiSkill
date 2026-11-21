@@ -7,8 +7,7 @@ The environment code is used unchanged. Two kinds of access are separated:
   joint-position commands, and the port geometry spec (a CAD model a real
   user also has). These are what `Obs` and `Robot` expose.
 * truth-side: simulator object poses and Chongyu's geometry metrics. These
-  live in `paf/truth.py` and may only be imported by evaluation code
-  (enforced by tests/test_no_truth_leak.py).
+  are read only by evaluation code (see world_model/tests/test_no_leak.py).
 
 The scripted expert is used once per grasp to perform "one successful
 insertion", the stand-in for a teleoperated insertion on the real robot. Only
@@ -32,7 +31,7 @@ import importlib  # noqa: E402
 from . import config as _C  # noqa: E402
 
 # The task allows only its native 256x256 wrist camera. We keep its mount and
-# replace only the camera parameters by the D405 default stream (paf.config),
+# replace only the camera parameters by the D405 default stream (wm.sim.config),
 # at runtime, without editing the task's files.
 _envmod = importlib.import_module("mani_skill.envs.tasks.tabletop.wminsertion_v2.env")
 _FOVY = float(2 * np.arctan((_C.CAM_H / 2) / ((_C.CAM_W / 2) / np.tan(np.radians(_C.CAM_HFOV_DEG / 2)))))

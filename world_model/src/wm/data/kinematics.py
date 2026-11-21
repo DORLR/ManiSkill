@@ -1,6 +1,6 @@
 """Forward kinematics of the Panda hand (TCP) for arrays of joint angles.
 
-The same computation as `paf.env_adapter.Robot.hand_pose()` (MPlib's Pinocchio model of the
+The same computation as `wm.sim.env_adapter.Robot.hand_pose()` (MPlib's Pinocchio model of the
 robot, link `panda_hand_tcp`, then the fixed robot base pose), done for many joint vectors at
 once. Used offline to turn the commanded joint targets of every recorded step into commanded
 hand poses (the world model's action condition is an end-effector trajectory, as in Ctrl-World),
@@ -12,10 +12,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-
-from .._paths import use_alignment_field
-
-use_alignment_field()
 
 
 def _pose_to_T(p, q) -> np.ndarray:

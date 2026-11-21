@@ -15,7 +15,7 @@ grasp i only in the factors that differ between the cells):
     x_i  position next to the strip, (-23, -21) u (-19, -17) mm    x*_i  position in the strip (-21, -19)
     s_i  episode seed (SEED0 + 1000 i; scene randomisation)
     cell "shape+angle" grasp i = (O_i, p*_i, x_i, s_i); cell "none" grasp i = (T_i, p_i, x_i, s_i); and so on.
-The seen values are drawn next to the strips (same widths as the strips, inside alignment_field/paf/config.py's
+The seen values are drawn next to the strips (same widths as the strips, inside wm/sim/config.py's
 "train" bands) so that a factor effect compares an unseen value with seen values of about the same difficulty
 (success varies along pitch and position: second review, 2026-11-19); the outer bands (pitch -60..-55 / -25..-20,
 position -30..-28 / -12..-10) are a separate (extrapolation) question and are not drawn. MARGIN keeps values away from every band edge. Grasp names

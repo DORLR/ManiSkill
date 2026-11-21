@@ -41,8 +41,8 @@ world_model/
   docs/                     dated records + results/
 ```
 
-Depends on `alignment_field/` (sibling folder) for the environment adapter and the port-axis fit;
-see `src/wm/_paths.py`.
+The environment adapter, task configuration, port-shape registration and the port-axis fit are in
+`src/wm/sim/` (moved from the retired `alignment_field/` folder).
 
 ## Running (rs2)
 

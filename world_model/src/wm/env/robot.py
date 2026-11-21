@@ -1,6 +1,6 @@
 """Robot access for data collection.
 
-Builds on alignment_field/paf/env_adapter.py: Chongyu's task used unchanged, the
+Builds on wm/sim/env_adapter.py: Chongyu's task used unchanged, the
 wrist camera set to the D405 default stream by a runtime override, generated
 port shapes registered in memory. Differences, all at runtime (no file edited):
 
@@ -23,14 +23,11 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .._paths import use_alignment_field
-
-use_alignment_field()
 
 import gymnasium as gym  # noqa: E402
 import sapien  # noqa: E402
-from paf import config as _C  # noqa: E402
-from paf import env_adapter as _ea  # noqa: E402
+from ..sim import config as _C
+from ..sim import env_adapter as _ea
 
 MAX_EPISODE_STEPS = 1_000_000
 DEPTH_UNIT_M = 1e-4               # stored depth unit: 0.1 mm (D405 default)
@@ -60,14 +57,14 @@ class Frame:
 
 
 class Robot(_ea.Robot):
-    """paf Robot without per-step rendering, with a long episode limit and float depth.
+    """sim.env_adapter Robot without per-step rendering, with a long episode limit and float depth.
 
     Use `frame()` for images; the parent's `observe()` is not available in state mode.
     """
 
     def __init__(self, port_type: str, seed: int = 10043):  # parent init not called on purpose
         self.port_type = port_type
-        if CAM_SCALE != 1:                               # runtime override of the stream, as paf.env_adapter does
+        if CAM_SCALE != 1:                               # runtime override of the stream, as sim.env_adapter does
             _ea._envmod._native_rgb256_config = lambda cfg: {"hand_camera": dict(
                 width=_C.CAM_W * CAM_SCALE, height=_C.CAM_H * CAM_SCALE, fov=_ea._FOVY)}
         self.env = gym.make(_ea.ENV_ID, port_type=port_type, obs_mode="state", seed=seed,

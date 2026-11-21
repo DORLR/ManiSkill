@@ -57,11 +57,8 @@ from ..env import robot as _robot
 from ..env.expert import Expert
 from ..env.robot import Frame, Robot
 from .explore import PLACEMENT_ATTEMPTS, Explorer, offset_pose, truth_outcome
-from .._paths import use_alignment_field
-
-use_alignment_field()
-from paf import env_adapter as _ea  # noqa: E402
-from paf.geometry import pose_distance  # noqa: E402
+from ..sim import env_adapter as _ea
+from ..sim.geometry import pose_distance
 
 EXECUTE = 8                   # control steps per decision (0.4 s), as eval/agent.py
 IMAGE_EVERY = 4               # 5 Hz images

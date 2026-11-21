@@ -46,7 +46,7 @@ def collect_grasp(robot: Robot, spec: GraspSpec, out: Path, cfg: CollectConfig) 
                  "pitch_deg": spec.pitch, "grasp_pos_m": spec.grasp_pos}
     summary = {**base_meta, "seed": spec.seed, "trajectories": [], "bytes": 0}
     try:
-        # 1. reference insertion (retry with a new episode seed, as alignment_field does)
+        # 1. reference insertion (retry with a new episode seed, as sim.env_adapter does)
         failures = []
         for attempt in range(REFERENCE_ATTEMPTS):
             seed = spec.seed + 7919 * attempt
