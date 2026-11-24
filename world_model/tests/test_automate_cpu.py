@@ -47,6 +47,8 @@ it; no simulator runs):
     candidates are not checked (plug rules only); full_clearance = plug + hand_finger_clearance; Expert.waypoint_
     clearance uses the same frame as the guard (h = T_tcp_plug R_G); collect.redraw_waypoints redraws from its stream,
     at most WAYPOINT_DRAWS draws, keeps the last one when none passes
+ 33 move_to stillness (2026-11-24): reported joint speed < 2e-3 rad/s OR the FK hand pose moved < 1 um and
+    < 0.001 deg in one control step (Isaac's stale joint_vel); old rule kept, fingers ignored, tolerance binding
 Needs numpy, scipy, trimesh, PIL (the Isaac Lab environment has them).   python world_model/tests/test_automate_cpu.py
 """
 
@@ -1107,6 +1109,64 @@ def test_hand_finger_command_clearance():
            "waypoint_clearance frame = guard frame; redraw_waypoints from its stream, last draw kept"
 
 
+# ------------------------------------------------------------------------------------------------------------ 33
+def test_move_to_still():
+    """move_to stillness (2026-11-24): still = max|qvel[:7]| < 2e-3 rad/s OR the FK hand pose moved < 1 um and
+    < 0.001 deg over one control step. The new rule only adds passes: the single new passing case is "qvel >= 2e-3
+    and pose frozen" (Isaac's stale joint_vel); a moving pose that reports qvel 0 passed before and still passes; the
+    position tolerance is never excused by stillness."""
+    from wm.sim_automate import robot as R
+
+    def T(dx=0.0, rot_deg=0.0):
+        M = np.eye(4)
+        c, s = np.cos(np.radians(rot_deg)), np.sin(np.radians(rot_deg))
+        M[:2, :2] = [[c, -s], [s, c]]
+        M[0, 3] = dx
+        return M
+
+    def bare(qv):
+        r = R.Robot.__new__(R.Robot)
+        r.get_qvel = lambda: np.asarray(qv, np.float64)
+        return r
+    stale, zero = [0, 0, 0, 0, 0, 2.4e-3, 0, 0, 0], [0.0] * 9
+    assert R.Robot._still(bare(stale), T(), T()) is True                               # frozen pose, stale qvel
+    assert R.Robot._still(bare(zero), T(5e-6), T()) is True                            # the old rule alone
+    assert R.Robot._still(bare(stale), T(2e-6), T()) is False                          # translation limit
+    assert R.Robot._still(bare(stale), T(0.0, 0.002), T()) is False                    # rotation limit
+    assert R.Robot._still(bare([0, 0, 0, 0, 0, 2e-3, 0, 0, 0]), T(1e-6), T()) is False  # both comparisons strict
+    assert R.Robot._still(bare([0] * 7 + [0.5, 0.5]), T(2e-6), T()) is True            # only qvel[:7] counts
+
+    def scripted(poses, qv):
+        """hand_pose() = poses[i], i = control steps commanded so far (the last entry repeats); start pose poses[0]
+        = goal gives one waypoint (2 control steps), so the pose before settling is poses[2]."""
+        r = bare(qv)
+        st = {"i": 0, "calls": 0}
+        r.qpos = lambda: np.zeros(9)
+        r._ik = lambda T_, seed: np.zeros(9)
+        r.hand_pose = lambda: poses[min(st["i"], len(poses) - 1)]
+
+        def cmd(q, n=1):
+            st["i"] += n
+            st["calls"] += 1
+        r._command = cmd
+        return r, st
+    goal = T()
+    # arrives within tolerance at settle step 2, unchanged at step 3 (stale qvel): True after 3 settle steps
+    r, st = scripted([goal, T(5e-4), T(5e-4), T(2e-4), T(5e-5), T(5e-5)], stale)
+    assert R.Robot.move_to(r, goal) is True and st["calls"] == 1 + 3, st
+    # within tolerance but drifting 2 um per step (<= 84 um after 40 steps): never still
+    r, st = scripted([goal] + [T(2e-6 * k) for k in range(1, 100)], stale)
+    assert R.Robot.move_to(r, goal) is False and st["calls"] == 1 + 40, st
+    # frozen 0.2 mm from the goal with qvel 0: stillness never excuses the tolerance
+    r, st = scripted([goal, T(2e-4)], zero)
+    assert R.Robot.move_to(r, goal) is False
+    # frozen at the goal from the start: still on the first settle step
+    r, st = scripted([goal], stale)
+    assert R.Robot.move_to(r, goal) is True and st["calls"] == 2, st
+    return "stale qvel with a frozen pose settles; 2 um / 0.002 deg per step and qvel == 2e-3 do not; old rule kept; " \
+           "fingers ignored; tolerance binding"
+
+
 if __name__ == "__main__":
     out = []
     for name, fn, needs_tmp in (("1 test_grasp_box", test_grasp_box, True), ("2 test_penetration", test_penetration, False),
@@ -1122,6 +1182,7 @@ if __name__ == "__main__":
                                 ("29 test_approved_switches", test_approved_switches, False),
                                 ("30 test_physical_symmetry", test_physical_symmetry, False),
                                 ("31 test_decisions_2026_11_23", test_decisions_2026_11_23, True),
-                                ("32 test_hand_finger_command_clearance", test_hand_finger_command_clearance, False)):
+                                ("32 test_hand_finger_command_clearance", test_hand_finger_command_clearance, False),
+                                ("33 test_move_to_still", test_move_to_still, False)):
         with tempfile.TemporaryDirectory() as tmp:
             print(name, "OK:", fn(Path(tmp)) if needs_tmp else fn(), flush=True)

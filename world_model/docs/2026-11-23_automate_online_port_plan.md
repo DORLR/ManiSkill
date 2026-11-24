@@ -48,7 +48,8 @@ AC = sim_automate/collect.py, CK = sim_automate/checks.py, CF = sim_automate/con
   (BR:177) and `Expert(robot)` (178); BR.place falls back to `expert._planned_move` (MPlib, BR:191).
 - AutoMate offers (already, the starting list missed this): AR is a ManiSkill-shaped facade: `Robot.qpos`,
   `Robot.get_qvel`, `Robot.hand_pose`, `Robot._ik`, `Robot._command`, `Robot.move_to` (returns False when not settled,
-  ManiSkill returned True), `base.get_state_dict/set_state_dict` (`_Base.get_state_dict` / `_Base.set_state_dict`) ->
+  ManiSkill returned True; "still" also when the FK hand pose moved < 1 um / 0.001 deg in one control step, because
+  Isaac's joint_vel can stay stale, 2026-11-24), `base.get_state_dict/set_state_dict` (`_Base.get_state_dict` / `_Base.set_state_dict`) ->
   `Robot.get_state` / `Robot.set_state` -> `AutomateScene.get_state` / `AutomateScene.set_state`,
   `base.agent.robot.get_qvel` (`_ArticulationShim.get_qvel`), `base._planner()` (`_Base._planner`, a `_PlannerShim`)
   with `PinocchioModelShim` (kinematics.py) so `HandFK` works, `Robot._camera()` / `Robot._twin` (a `_TwinShim`) for

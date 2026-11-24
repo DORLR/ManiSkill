@@ -21,7 +21,8 @@ strict), (ii) results that fail only by h > 0 (|h_end| < 0.05 mm, h <= 0, everyt
 compared USD layers were not all read (usd_compared_ok False), and lists the assemblies that have only an error result.
 It also lists every assembly with a part ending at h <= 0.01 mm, with those heights and whether its (ii) / (iii) pass
 (the parts of the inclusion gate; r6-expert-02). In (i) / (iii) the plug is placed by move_to (2 mm waypoints at
-20 mm/s, then settling), which can end up to about 15 um below h = 0 (batch2: 01053 -15.2, 00860 -13.8, 00471 -8.9,
+20 mm/s, then settling), which can end up to about 15 um below h = 0 (measured before the stillness change of
+2026-11-24 in robot.move_to; batch2: 01053 -15.2, 00860 -13.8, 00471 -8.9,
 00016 -3.2 um in (iii), 00755 -2.7 um in (i)). The expert's 3 mm/s push lags its command (the 0.3 mm
 insert throttle) and settles onto h = 0 from above (gravity off): measured h_end 26-104 um, never below, over the 186
 expert_smoke ends (reference, insert and perturbed runs) on 00015 / 00083 / 01102, including 01102 whose plug rests on

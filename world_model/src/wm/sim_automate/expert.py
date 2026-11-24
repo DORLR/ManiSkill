@@ -269,7 +269,8 @@ POSITION_TOL_M = 0.0003
 ORIENTATION_TOL_DEG = 0.2
 LIN_VEL_TOL_M_S = 0.0005
 ANG_VEL_TOL_DEG_S = 0.5
-JOINT_VEL_TOL_RAD_S = 0.02
+JOINT_VEL_TOL_RAD_S = 0.02     # Isaac's joint_vel can stay at a stale non-zero value after the arm stops (measured
+                               # 2.4e-3 rad/s, 2026-11-24, robot.move_to); below this limit, so not binding here
 SETTLE_CONSECUTIVE = 5
 SETTLE_TIMEOUT = 100
 MAX_INSERT_LAG_M = 0.0003

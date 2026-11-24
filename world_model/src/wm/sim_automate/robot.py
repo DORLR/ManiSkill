@@ -15,6 +15,8 @@ Same names, semantics, units and frames as wm.sim.env_adapter.Robot + wm.env.rob
     _command(q7, n)  joint-position targets held for n control steps of 0.05 s (fingers closed)
     _ik(T, seed_q) -> (9,) or None, refusing branch jumps > 0.25 rad;  move_to(T, ...) as the ManiSkill adapter,
                     except that it returns False when the settle tolerance is not reached (ManiSkill: True once IK works)
+                    and that "still" also holds when the FK hand pose moved < STILL_M / STILL_RAD over one control
+                    step (Isaac's joint_vel can stay at a stale non-zero value, 2026-11-24)
     port_spec.pin_length_m (tight-fit depth), port_spec.clearance_m, max_decisions, lateral_frame(), grasp_ranges()
     base.get_state_dict() / base.set_state_dict(); base._planner() (FK / IK only), base.agent.robot.get_qvel(),
     base.agent.robot.pose, base.goal_pose, base.charger.pose, base.control_timestep, base.scene.update_render()
@@ -41,6 +43,10 @@ from .kinematics import Kinematics, PinocchioModelShim, _LinkPose
 from .scene import AutomateScene
 
 R_G = C.R_G                    # goal / charger convention (config.R_G): x axis = insertion direction
+STILL_M = 1e-6                 # move_to stillness by measured pose: < 1 um and < 0.001 deg in one control step (0.05 s);
+                               # about 23 x stricter in translation and 6 x in rotation than 2e-3 rad/s on joint 6
+                               # (axis to TCP about 0.23 m: 2e-3 rad/s ~ 23 um and 0.006 deg per control step)
+STILL_RAD = float(np.radians(0.001))
 
 
 def _trans(v) -> np.ndarray:
@@ -501,9 +507,17 @@ class Robot:
 
     def move_to(self, T_goal: np.ndarray, max_lin: float = 0.002, max_ang: float = np.radians(1.0),
                 settle_steps: int = 40, tol_m: float = 1e-4, tol_rad: float = np.radians(0.05)) -> bool:
-        """Same procedure as wm.sim.env_adapter.Robot.move_to (waypoints of <= 2 mm / 1 deg, 2 control steps each,
-        then settle until within tolerance and joint speed < 2e-3 rad/s). False if IK fails or if the hand is not
-        within tol_m / tol_rad and still after settle_steps (the ManiSkill adapter returned True in that case)."""
+        """Procedure of wm.sim.env_adapter.Robot.move_to with two differences named below (waypoints of <= 2 mm /
+        1 deg, 2 control steps each,
+        then settle until within tolerance and still). False if IK fails or if the hand is not within tol_m / tol_rad
+        and still after settle_steps (the ManiSkill adapter returned True in that case).
+        Still = the reported joint speed max|qvel[:7]| < 2e-3 rad/s (the ManiSkill rule) OR the measured hand pose
+        moved less than STILL_M and STILL_RAD over the last control step. The second test was added on 2026-11-24:
+        in the CPU batch batch_r3_cpu the arm stops (hand pose unchanged to 0.1 um over 30+ control steps) while
+        Isaac's joint_vel keeps reporting a constant, stale 2.4e-3 rad/s on one joint, so the speed rule alone never
+        passed (move_ok 1 / 100, placed 0 / 100, against 98-99 / 100 in the 2026-11-21 batches batch / batch2).
+        The same stale reading (identical 2.40e-3 rad/s, pose frozen) occurs with GPU PhysX (00015, 2026-11-24), so it
+        is not CPU sleeping; what made the 2026-11-21 batches settle is not established."""
         start = self.hand_pose()
         dt, dr = pose_distance(start, T_goal)
         n = max(1, int(np.ceil(max(dt / max_lin, dr / max_ang))))
@@ -517,13 +531,23 @@ class Robot:
             seed_q = sol
         for sol in targets:
             self._command(sol, 2)
+        prev = self.hand_pose()
         for _ in range(settle_steps):
             self._command(targets[-1], 1)
-            dt, dr = pose_distance(self.hand_pose(), T_goal)
-            v = np.abs(self.get_qvel()[:7]).max()
-            if dt < tol_m and dr < tol_rad and v < 2e-3:
+            now = self.hand_pose()
+            dt, dr = pose_distance(now, T_goal)
+            if dt < tol_m and dr < tol_rad and self._still(now, prev):
                 return True
+            prev = now
         return False
+
+    def _still(self, now: np.ndarray, prev: np.ndarray) -> bool:
+        """move_to's stillness test (docstring there): reported joint speed < 2e-3 rad/s, or the hand pose moved less
+        than STILL_M / STILL_RAD between two consecutive control steps."""
+        if np.abs(self.get_qvel()[:7]).max() < 2e-3:
+            return True
+        ds, da = pose_distance(now, prev)
+        return bool(ds < STILL_M and da < STILL_RAD)
 
     # ------------------------------------------------------------------ save / restore
     def get_state(self) -> dict:

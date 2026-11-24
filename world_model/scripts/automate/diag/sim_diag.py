@@ -143,7 +143,8 @@ def open_fingers(r, rec):
 
 def move_traced(r, rec, T_goal, max_lin=0.002, max_ang=np.radians(1.0), settle_steps=40, tol_m=1e-4,
                 tol_rad=np.radians(0.05)) -> bool:
-    """Robot.move_to's procedure (robot.py), with a record after every control step."""
+    """Robot.move_to's procedure (robot.py), with a record after every control step. Unlike move_to it returns True
+    once IK succeeds (a settle failure is not reported), so its move_ok means "IK succeeded"."""
     start = r.hand_pose()
     dt, dr = pose_distance(start, T_goal)
     n = max(1, int(np.ceil(max(dt / max_lin, dr / max_ang))))
@@ -159,12 +160,15 @@ def move_traced(r, rec, T_goal, max_lin=0.002, max_ang=np.radians(1.0), settle_s
         for _ in range(2):
             r._command(sol, 1)
             rec(cmd)
+    prev = r.hand_pose()
     for _ in range(settle_steps):
         r._command(targets[-1], 1)
         rec(T_goal)
-        dt, dr = pose_distance(r.hand_pose(), T_goal)
-        if dt < tol_m and dr < tol_rad and np.abs(r.get_qvel()[:7]).max() < 2e-3:
+        now = r.hand_pose()
+        dt, dr = pose_distance(now, T_goal)
+        if dt < tol_m and dr < tol_rad and r._still(now, prev):      # same stillness test as Robot.move_to
             break
+        prev = now
     return True
 
 

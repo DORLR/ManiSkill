@@ -7,7 +7,8 @@ Per assembly (results in <out>/<id>.json; every reset uses socket pose 0 of seed
   (i)   H* reached: from the reset (plug aligned, lowest point 12 mm above the highest socket point) move_to(H*),
         hold 5 steps. Pass: move_ok AND |depth_left| < 0.5 mm AND max penetration < 0.05 mm (checks.penetration).
         Recorded with checks.truth (height_mm, success, ...) and h_end_le_0.01mm, as (ii) / (iii) (information;
-        r6-expert-02, r7-expert-01: move_to (2 mm waypoints at 20 mm/s, then settling) can end up to ~15 um below h = 0;
+        r6-expert-02, r7-expert-01: move_to (2 mm waypoints at 20 mm/s, then settling) can end up to ~15 um below h = 0,
+        measured before the stillness change of 2026-11-24 (robot.move_to);
         the expert's 3 mm/s push lags its command and settles onto h = 0 from above, measured h_end 26-104 um over
         the 186 expert_smoke ends on 00015 / 00083 / 01102, never below).
   (ii)  aligned straight insertion from g = 10 mm in front of the entrance: move_to(H* - (L + 10 mm) a), then the
@@ -36,8 +37,8 @@ decides L, d_dis, tip_centre, the symmetry and g_top, so (ii) / (iii) of another
 r5-integration-03 / r5-expert-03), shared_asset_sha256 (collect.shared_asset_identity: plug_grasps.json and the finger
 collision meshes franka_mimic_collision/*.obj, {path: sha256}; r9-integration-01), switches (config.switches), physics_device, and usd_identity (sha256 of every USD
 layer the scene loaded; scene.AutomateScene.usd_identity); each part also carries its own unix_time. The inclusion gate
-(collect.py stale_fields) accepts a result only if ranges_sha256, grasp_py_sha256, physics_device, switches, the
-asset hashes and shared_asset_sha256 equal the current ones (lead's resolution 2026-11-23; asset hashes since round 6, 2026-11-23);
+(collect.py stale_fields) accepts a result only if ranges_sha256, grasp_py_sha256, physics_code_sha256,
+physics_device, switches, the asset hashes and shared_asset_sha256 equal the current ones (lead's resolution 2026-11-23; asset hashes since round 6, 2026-11-23);
 physics_code_sha256 lets it ignore collector-only changes.
 Every result also records thread_env (app.thread_env: PXR_WORK_THREAD_LIMIT, OPENBLAS_NUM_THREADS, ...; app.launch
 limits SimulationApp's pools to config.PHYSX_CPU_THREADS) and usd_compared: the sha256 of the layers the collector
