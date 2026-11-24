@@ -258,6 +258,9 @@ def main():
     ck = torch.load(args.ckpt, map_location="cpu", weights_only=False)
     if not ck.get("offset_weight", 0.0) > 0:
         raise SystemExit(f"{args.ckpt} has no offset read-out head")
+    if ck.get("offset_label", WD.OFFSET_ALONG) != WD.OFFSET_ALONG:     # the gap label (AutoMate, decision 6 of 2026-11-23)
+        raise SystemExit(f"{args.ckpt} has offset label {ck.get('offset_label')!r}: this analysis compares the read-out "
+                         "with the along-axis probe labels (ManiSkill checkpoints only)")
     m = load(args.ckpt, dev)
     sources = {"demo": (Path(args.fast), [e for e in D.load_entries(args.fast) if e["split"] == "heldout"])}
     res = {"ckpt": args.ckpt, "step": int(ck.get("step", -1)), "H": WD.H, "sources": {}, "errors": {}}

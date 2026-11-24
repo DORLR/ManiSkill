@@ -2,12 +2,18 @@
 
 Trained once and then kept fixed; any external policy is used with it through a small "policy stand-in" on its
 latent (see stand-in training, separate). Inside:
-  encoder   one picture (RGB + depth, 320 x 320) -> 100 tokens (policy320.PictureTokens, ResNet-18, group norm, from
-            scratch or, with imagenet=True (2026-11-18), from ImageNet weights; trained); a transformer over the tokens of the 4 pictures of an observation (0.4 s apart, exactly the
-            policy's context) and a token of the 7 joints -> latent z (512, TD-MPC2's SimNorm)
+  encoder   one picture (RGB + depth, 320 x 320) -> tokens (policy320.PictureTokens; trained). encoder="resnet18" (the
+            default; every checkpoint before 2026-11-21): 100 tokens of 32, ResNet-18, group norm, from scratch or, with
+            imagenet=True (2026-11-18), from ImageNet weights. For AutoMate (2026-11-21, encoders320.py): "resnet34"
+            (100 tokens) or "segformer_b1" (400 tokens), token_dim set by the run (128 for AutoMate). A transformer over
+            the tokens of the 4 pictures of an observation (0.4 s apart, exactly the policy's context) and a token of
+            the 7 joints -> latent z (512, TD-MPC2's SimNorm); its token positions are learned, one per token of a
+            picture (n_tokens x d)
   heads     TD-MPC2's own layers: dynamics z' = d(z, a); reward r(z, a); Q x5 (z, a); V x5 (z) (two-hot bins); plus
             done(z) = "seated now" and a built-in ACT head z -> the next 16 joint targets (8 executed); optionally
-            (offset_weight > 0) a training-only head z -> the hand's offset from H*, which no decision reads
+            (offset_weight > 0) a read-out head z -> the hand's offset from H* (wmdata320 "offset"; AutoMate: its
+            first component is the pin-tip gap, decision 6 of 2026-11-23), read at test time only by the online
+            agent's in-hole rule and gap logs (online.common320.gap_estimate_mm)
   action    a = the 8 executed joint targets minus the measured joints (56 numbers, asinh-scaled)
 Built-in ACT head: trained by imitation of the successful expert demonstrations (the old policy's samples: every
 picture, independently drawn); its loss also trains the encoder (the expert's aligning motion needs the direction of
@@ -34,19 +40,21 @@ from . import demo320 as D
 from . import use_tdmpc2
 from . import wmdata320 as WD
 from .model import make_cfg
-from .policy320 import OFFSET_SCALE, TOKEN_DIM, TOKENS, PictureTokens, _amp
+from .policy320 import ENCODER_DEFAULTS, OFFSET_SCALE, PictureTokens, _amp
+from .policy320 import TOKEN_DIM, TOKENS  # noqa: F401  (legacy defaults, still importable from here; the model's own: enc.pic)
 
 CHUNK = D.CHUNK
 PHI_MAX = 150.0                        # largest |shaping potential| [mm + deg] of a start (gap <= 18 + pin 20 + lateral 14 + 6 deg x)
 
 
 class Encoder(nn.Module):
-    def __init__(self, stem: str, cfg, d: int = 256, layers: int = 4, heads: int = 8, imagenet: bool = False):
+    def __init__(self, stem: str, cfg, d: int = 256, layers: int = 4, heads: int = 8, imagenet: bool = False, **pic):
+        """pic: the encoder settings of policy320.ENCODER_DEFAULTS (encoder, token_dim, depth_*), for PictureTokens."""
         super().__init__()
         from common import layers as L
-        self.pic = PictureTokens(stem, imagenet=imagenet)
-        self.inp = nn.Linear(TOKEN_DIM, d)
-        self.token_pos = nn.Parameter(torch.randn(TOKENS, d) * 0.02)
+        self.pic = PictureTokens(stem, imagenet=imagenet, **pic)
+        self.inp = nn.Linear(self.pic.token_dim, d)
+        self.token_pos = nn.Parameter(torch.randn(self.pic.n_tokens, d) * 0.02)
         self.frame_pos = nn.Parameter(torch.randn(D.CONTEXT, d) * 0.02)
         self.cls = nn.Parameter(torch.randn(1, 1, d) * 0.02)
         self.joint_in = nn.Sequential(nn.Linear(D.JOINTS, d), nn.SiLU(), nn.Linear(d, d))
@@ -55,11 +63,11 @@ class Encoder(nn.Module):
         self.out = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, cfg.latent_dim), L.SimNorm(cfg))
 
     def tokens(self, rgb: torch.Tensor, depth: torch.Tensor) -> torch.Tensor:
-        """rgb (N, 320, 320, 3) uint8, depth (N, 320, 320) -> (N, 100, 32)."""
+        """rgb (N, 320, 320, 3) uint8, depth (N, 320, 320) -> (N, n_tokens, token_dim) (legacy: (N, 100, 32))."""
         return self.pic(rgb.permute(0, 3, 1, 2), depth)
 
     def fuse(self, tok: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
-        """tok (B, 4, 100, 32) of the pictures [t-1.2 s, ..., t], q (B, 7) -> z (B, latent)."""
+        """tok (B, 4, n_tokens, token_dim) of the pictures [t-1.2 s, ..., t], q (B, 7) -> z (B, latent)."""
         B = tok.shape[0]
         h = self.inp(tok) + self.token_pos[None, None] + self.frame_pos[None, :, None]
         with torch.autocast(q.device.type, enabled=False):
@@ -71,11 +79,18 @@ class Encoder(nn.Module):
 
 
 class WM320(nn.Module):
-    def __init__(self, stem: str, stats: dict, shaping: float = 0.0, imagenet: bool = False, offset_weight: float = 0.0, **cfg_over):
-        """offset_weight > 0 (the user's decision 2026-11-18): a training-only head reads the hand's offset from H*
-        (wmdata320's "probe": along, lateral x, lateral y [mm], tilt [deg]) from the latents the reward head sees (the
-        encoded z and the imagined z of the window); its loss, with this weight, trains the encoder and the dynamics to
-        carry the offset. No decision uses it; validation reports its error."""
+    def __init__(self, stem: str, stats: dict, shaping: float = 0.0, imagenet: bool = False, offset_weight: float = 0.0,
+                 encoder: str = ENCODER_DEFAULTS["encoder"], token_dim: int = ENCODER_DEFAULTS["token_dim"],
+                 depth_max_m: float = ENCODER_DEFAULTS["depth_max_m"], depth_mean_m: float = ENCODER_DEFAULTS["depth_mean_m"],
+                 depth_std_m: float = ENCODER_DEFAULTS["depth_std_m"], depth_invalid: float = ENCODER_DEFAULTS["depth_invalid"],
+                 **cfg_over):
+        """encoder, token_dim, depth_*: the picture encoder (policy320.PictureTokens, policy320.ENCODER_DEFAULTS; the
+        defaults are the legacy ResNet-18).
+        offset_weight > 0 (the user's decision 2026-11-18): a training-only head reads the hand's offset from H*
+        (wmdata320's "offset": along, lateral x, lateral y [mm], tilt [deg]; for AutoMate data the first component is
+        the pin-tip gap g = s - L instead of along, the user's decision 6 of 2026-11-23) from the latents the reward
+        head sees (the encoded z and the imagined z of the window); its loss, with this weight, trains the encoder and
+        the dynamics to carry the offset. Validation reports its error ("along" = the first component)."""
         super().__init__()
         self.offset_weight = float(offset_weight)
         self.ret_max = 20.0 + 10.0 + shaping * PHI_MAX                    # value targets lie within +-ret_max
@@ -85,7 +100,8 @@ class WM320(nn.Module):
         cfg = make_cfg(**cfg_over)
         self.cfg, self.math = cfg, M
         Ld, A, Md = cfg.latent_dim, WD.ACTION_DIM, cfg.mlp_dim
-        self.enc = Encoder(stem, cfg, imagenet=imagenet)
+        self.enc = Encoder(stem, cfg, imagenet=imagenet, encoder=encoder, token_dim=token_dim, depth_max_m=depth_max_m,
+                           depth_mean_m=depth_mean_m, depth_std_m=depth_std_m, depth_invalid=depth_invalid)
         self._dynamics = L.mlp(Ld + A, 2 * [Md], Ld, act=L.SimNorm(cfg))
         self._reward = L.mlp(Ld + A, 2 * [Md], cfg.num_bins)
         self._Qs = L.Ensemble([L.mlp(Ld + A, 2 * [Md], cfg.num_bins, dropout=cfg.dropout) for _ in range(cfg.num_q)])
@@ -158,7 +174,7 @@ class WM320(nn.Module):
     def observe(self, rgb, depth, q):
         """Windows: rgb (B, H+4, 320, 320, 3), depth (B, H+4, ...), q (B, H+1, 7) -> z (B, H+1, L)."""
         B, S = depth.shape[:2]
-        tok = self.enc.tokens(rgb.flatten(0, 1), depth.flatten(0, 1)).view(B, S, TOKENS, TOKEN_DIM)
+        tok = self.enc.tokens(rgb.flatten(0, 1), depth.flatten(0, 1)).view(B, S, self.enc.pic.n_tokens, self.enc.pic.token_dim)
         return torch.stack([self.enc.fuse(tok[:, j:j + D.CONTEXT], q[:, j]) for j in range(S - D.CONTEXT + 1)], 1)
 
     # ---- training
@@ -205,12 +221,13 @@ class WM320(nn.Module):
               + (F.binary_cross_entropy_with_logits(dimg, W["done"][:, 1:], reduction="none") * W["obs_valid"][:, 1:]).sum()) / (B * (2 * WD.H + 1))
         bc = zs.sum() * 0
         if Bc is not None:
-            tok = self.enc.tokens(Bc["rgb"].flatten(0, 1), Bc["depth"].flatten(0, 1)).view(*Bc["depth"].shape[:2], TOKENS, TOKEN_DIM)
+            tok = self.enc.tokens(Bc["rgb"].flatten(0, 1), Bc["depth"].flatten(0, 1)).view(*Bc["depth"].shape[:2], self.enc.pic.n_tokens,
+                                                                                            self.enc.pic.token_dim)
             zb = self.enc.fuse(tok, Bc["q"])
             bc = (self._act(zb) - (Bc["a"] - self.a_mean) / self.a_std).abs().mean()
         ol, oinfo = zs.sum() * 0, {}
         if self._offset is not None:                                          # the encoded z (t = 0) and the imagined ones
-            tgt = W["probe"].transpose(0, 1) / self.off_scale                 # (H+1, B, 4)
+            tgt = W["offset"].transpose(0, 1) / self.off_scale                # (H+1, B, 4); ManiSkill: = W["probe"]
             pr = self._offset(zs)
             per = F.smooth_l1_loss(pr, tgt, reduction="none").mean(-1)       # (H+1, B)
             ol = sum((per[t] * ov[t]).sum() / B * cfg.rho ** t for t in range(WD.H + 1)) / (WD.H + 1)
@@ -232,11 +249,18 @@ class WM320(nn.Module):
         return total, info
 
 
+def encoder_settings(ck: dict) -> dict:
+    """The encoder settings of a checkpoint (policy320.ENCODER_DEFAULTS keys); a checkpoint without them (all before
+    2026-11-21) gets the legacy ResNet-18's."""
+    return {k: ck.get(k, v) for k, v in ENCODER_DEFAULTS.items()}
+
+
 def load(ckpt: str, device="cuda") -> "WM320":
     ck = torch.load(ckpt, map_location="cpu", weights_only=False)
     if ck.get("labels") != WD.LABELS:
         raise ValueError(f"{ckpt} was trained with labels {ck.get('labels')}, this code has {WD.LABELS}")
-    m = WM320(ck["stem"], ck["stats"], ck.get("shaping", 0.0), imagenet=ck.get("imagenet", False), offset_weight=ck.get("offset_weight", 0.0), **ck["cfg"])
+    m = WM320(ck["stem"], ck["stats"], ck.get("shaping", 0.0), imagenet=ck.get("imagenet", False), offset_weight=ck.get("offset_weight", 0.0),
+              **encoder_settings(ck), **ck["cfg"])
     m.load_state_dict(ck["state"])
     return m.to(device).eval()
 
@@ -325,4 +349,4 @@ def end_items(entries: list[dict], kinds=("contact",)) -> np.ndarray:
                      if e["kind"] in kinds and e["steps"] >= WD.EXECUTE], np.int64).reshape(-1, 2)
 
 
-__all__ = ["WM320", "Encoder", "WindowData", "window_items", "stats_for", "face_items", "end_items", "auc", "load"]
+__all__ = ["WM320", "Encoder", "WindowData", "window_items", "stats_for", "face_items", "end_items", "auc", "load", "encoder_settings"]

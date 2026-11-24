@@ -380,9 +380,14 @@ def main():
             raise SystemExit(f"--inside-mm needs a checkpoint with the offset read-out head; {args.ckpt} has none")
     seed = args.seed + 1_000_003 * args.round if collect else args.seed
     every = [json.loads(Path(f).read_text()) for f in sorted(glob.glob(f"{args.grasps}/*/*/grasp.json"))]
+    am = [g.get("grasp") for g in every if D.is_automate(g)]
+    if am:                                                     # attempt320 scores with ManiSkill's truth and labels
+        raise SystemExit(f"{len(am)} AutoMate grasps (e.g. {am[:3]}): the online attempts are not ported to AutoMate "
+                         "(port plan: docs/2026-11-23_automate_online_port_plan.md); ManiSkill grasps only")
+    D.check_automate_conditions(every)                         # AutoMate grasps need a decided split (ManiSkill: no-op)
     every = [g for g in every if g.get("reference_ok") and (
-        D.split320(g["port"], g["pitch_deg"], g["grasp_pos_m"], g["grasp"]) == args.split
-        or (args.split == "any" and g["port"] not in D.TEST_PORTS))]
+        D.split_of_entry(g) == args.split
+        or (args.split == "any" and g["port"] not in D.TEST_PORTS and D.split_of_entry(g) != "test"))]
     if args.split == "any" and (not every or not all("pair_index" in g for g in every)):
         raise SystemExit("--split any needs make_combo_grasps.py's grasps (with pair_index) only")
     chosen = E.pick(len(every), args.grasps_n)                     # k = index in the whole list: a grasp keeps its seed

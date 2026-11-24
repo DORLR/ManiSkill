@@ -4,16 +4,63 @@ imitation stream of the built-in ACT head (the successful expert trajectories, e
 
 One optimiser step = --accum micro-batches of --wm-batch windows (4 decisions each) and --bc-batch imitation samples
 (all three required: on one 24 GB A5000 the standard stem fits 16 / 32 / 8, the stem without max-pool 4 / 8 / 32;
-group norm, so accumulating gives the same gradient, except that the 2 of 5 target heads are drawn per micro-batch).
+group norm, so accumulating gives the same gradient, except that the 2 of 5 target heads are drawn per micro-batch;
+with --encoder segformer_b1 too: its decoder's batch norm uses fixed statistics, wm/tdmpc/encoders320.py, BATCH NORM).
+Picture encoder (2026-11-21): --encoder resnet18 (the legacy ResNet-18; old checkpoints have no encoder key and mean
+it), resnet34 or segformer_b1 (wm/tdmpc/encoders320.py; these need --imagenet and start from their pretrained
+weights). Without --encoder: resnet18 for ManiSkill data; AutoMate data (manifest entries with simulator "automate")
+refuse a missing --encoder and refuse resnet18 (dropped for AutoMate; its depth input saturates at 0.3 m).
+--token-dim: 32 for resnet18 when omitted; required for resnet34 / segformer_b1 (agreed: 128). Depth normalisation of
+the new encoders: the json of scripts/automate/depth_stats.py (--depth-stats, default <data>/depth_stats.json; its
+training-split hash, demo320.train_files_sha256, must match this run's training split), or (ManiSkill data only) all
+of --depth-max-m, --depth-mean-m, --depth-std-m, which must agree with a statistics file if one exists (its hash is
+then checked too); AutoMate data refuses the flags and needs the file. --depth-invalid defaults to (0 - mean) / std
+and must lie below the smallest valid z (policy320.check_depth_settings); the placeholders are refused. The new
+encoders need $HF_HOME and $TORCH_HOME set, outside the account's home directory (a shared account); the Hub is set
+offline (HF_HUB_OFFLINE=1); every weight file must already be cached (segformer_b1: encoders320.SEGFORMER_B1_FILES at
+the pinned revision, download once with `python -m wm.tdmpc.encoders320 --download`; resnet34: torchvision's
+IMAGENET1K_V1 file), checked before anything is written. A checkpoint with other encoder settings is not resumed.
+The start record and every checkpoint hold `provenance`: torch / transformers / huggingface_hub / torchvision /
+scikit-learn / joblib / threadpoolctl versions and the imported scikit-learn's file, the md5 of
+the model and data code, the git commit if any, the depth statistics file with its sha256, the file of the imported
+wm package (always this tree's ROOT/src: the script puts it first on sys.path and refuses wm modules from anywhere
+else) and the fast copy's split identity (manifest "split": demo320.split_identity, sha256 of the collection's
+split_automate_v1.json; None for ManiSkill data). AutoMate data needs that identity in the manifest, and a depth
+statistics file must carry the same one. scikit-learn (wm320.auc, the validation AUCs) is checked before the model is
+built, so that a missing package does not end a run at its first validation (step 500).
+Splits (demo320.split_of_entry): ManiSkill data by split320; AutoMate data by each grasp's stored condition, refused
+while it is "unassigned"; AutoMate data also needs at least MIN_SELECT_GRASPS selection grasps and a non-empty
+held-out set.
+Completeness (AutoMate): the fast copy's manifest "completeness" (scripts/data/cache_wm_v1_fast.py, from
+wm.data.index.build_automate) must exist and say partial = false (when it was indexed the collection had ended, every
+planned grasp of an assembly that is not skipped had its grasp.json, and the missing grasps of skipped assemblies were
+accepted with --accept-skipped); a missing record or partial = true is refused unless --allow-partial. The record and the switch are stored in provenance ("completeness", "allow_partial"),
+with the manifest's "code" (the md5 of the converter that wrote the fast copy, and of earlier converters whose files a
+resumed copy may keep; scripts/data/cache_wm_v1_fast.py) as "fast_copy_code" (recorded, not checked).
+Offset label (AutoMate, the user's decision 6 of 2026-11-23): the offset read-out head's first component is trained
+on the pin-tip gap g = s - L (wmdata320 "offset", OFFSET_GAP); the checkpoint holds "offset_label": "gap_mm" (top
+level and in provenance), which the online agent requires on AutoMate (online.common320.check_offset_label); a
+checkpoint of another label is not resumed. ManiSkill checkpoints get no key (= "along_mm", unchanged).
+AutoMate: the in-hole rule of the agent reads the offset head's first output (gap_mm); a checkpoint trained with
+--offset-weight 0 has no offset head.
 The pictures' depth enters the stem in float32, but cuDNN's default TF32 rounds it to ~0.1 mm below 0.2 m and
 ~0.2 mm beyond (as in the stand-alone policy). last.pt is written every --save-every steps; the random generators
 are saved with it.
 Adam, lr 3e-4 with the encoder at --enc-lr-scale (TD-MPC2's 0.3), gradient clip 20, target Q rate 0.01, one target
 update per step; random shift --shift-px per window / sample (required: stated, not a silent default).
-Validation (select split decides nothing yet; held-out logged): losses on fixed windows; the done head's AUC on
+Validation (select split decides nothing yet; held-out logged; AutoMate also logs heldout_shape and heldout_grasp,
+the two stored conditions inside "heldout", separately): losses on fixed windows; the done head's AUC on
 observations with the pins in the hole or at the face (FK depth > 0); V just before the pins reach the face of a
-contact push against how it ended; the built-in head's action error on held imitation samples. Fixed random numbers, restored afterwards.
-Resume and DONE.json as train_policy320.py.
+contact push against how it ended (wm320.face_items; "face_items_kept" = [contact pushes in this AUC, contact pushes
+in the split], AutoMate runs only); the built-in head's action error on held imitation samples. Fixed random
+numbers, restored afterwards.
+AutoMate: the face is the tight-fit entrance (s = L); contact pushes that stop more than 0.5 mm above it (on the
+socket top or the lead-in, assemblies with g_top > 0.5 mm) are not in this AUC.
+Resume and DONE.json as train_policy320.py; an AutoMate checkpoint whose provenance split differs from the fast
+copy's is not resumed.
+GPU memory: with QX_GPU_GB in the environment (the scope's declared GPU memory, exported by qx_run) the process caps
+itself at QX_GPU_GB - 1 GB (the CUDA context lies outside the allocator cap; cap_gpu_memory); AutoMate data on CUDA
+refuses to start without it; ManiSkill runs without it are unchanged.
 Online rounds (--online <pool>, scripts/online/run_wm320_attempts.py --mode collect): every --refresh-every steps the
 complete rounds of the pool (r<R>/DONE written) and the finished grasps of a round still being collected are read
 (2026-11-18); once the pool holds --online-min trajectories, --online-frac of every micro-batch's windows come from it (the rest from the fast copy; its
@@ -21,7 +68,9 @@ loader has --workers-wm // 2 extra workers per process), and the online attempts
 4 deg of H*: labels, never the simulator's truth) join the ACT head's imitation set: only the pictures of their last
 try (after the last back-off) whose next 16 targets lie in decisions where the proposal or the model's correction was
 executed (no exploration shift or random candidate; the final hold counts as part of the last decision) -- the world
-model's corrections are distilled into the head. Online trajectories are training grasps only (checked).
+model's corrections are distilled into the head. Online trajectories are training grasps only (checked); an AutoMate
+pool entry must also carry split_sha256 equal to the fast copy's split identity (sha256), and every pool entry must
+come from the fast copy's simulator (no ManiSkill pool for an AutoMate run, and the reverse), else the run is refused.
 Several GPUs: start with torchrun (PyTorch's DistributedDataParallel, NCCL): every process draws its own windows and
 samples, gradients are averaged over the processes; --accum is per process, so one optimiser step holds
 processes x --accum micro-batches (processes x accum = the single-GPU accum keeps the single-GPU recipe). Only
@@ -39,6 +88,7 @@ import json
 import math
 import os
 import random
+import sys
 import time
 from collections import defaultdict
 from contextlib import nullcontext
@@ -50,14 +100,140 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from wm.tdmpc import demo320 as D
-from wm.tdmpc import wmdata320 as WD
-from wm.tdmpc.policy320 import PolicyData, collate_cat, policy_loader, shift
-from wm.tdmpc.wm320 import WM320, WindowData, auc, face_items, stats_for, window_items
-from wm.training.common import Logger, cycle, seed_all
+ROOT = Path(__file__).resolve().parents[2]                       # world_model/
+sys.path.insert(0, str(ROOT / "src"))                            # this tree's wm package, before any other
+import wm  # noqa: E402
+from wm.tdmpc import demo320 as D  # noqa: E402
+from wm.tdmpc import wmdata320 as WD  # noqa: E402
+from wm.tdmpc.policy320 import (ENCODER_DEFAULTS, ENCODERS, PolicyData, check_depth_settings, collate_cat,  # noqa: E402
+                                 default_depth_invalid, policy_loader, shift)
+from wm.tdmpc.wm320 import WM320, WindowData, auc, encoder_settings, face_items, stats_for, window_items  # noqa: E402
+from wm.training.common import Logger, cycle, seed_all  # noqa: E402
 
 
 RS = 1_000_003                         # seed stride between processes (no (process, step) pair repeats)
+MIN_SELECT_GRASPS = D.MIN_SELECT_GRASPS   # AutoMate: checkpoints are not chosen on fewer selection grasps (one source)
+AUTOMATE_HELDOUT_CONDITIONS = ("heldout_shape", "heldout_grasp")   # logged separately inside "heldout" (AutoMate)
+PROVENANCE_FILES = ("src/wm/tdmpc/policy320.py", "src/wm/tdmpc/encoders320.py", "src/wm/tdmpc/wm320.py",
+                    "src/wm/tdmpc/wmdata320.py", "src/wm/tdmpc/demo320.py", "scripts/train/train_wm320.py")
+
+
+def foreign_wm_modules() -> list[str]:
+    """Loaded wm.* modules whose file lies outside this code tree (as scripts/automate/collect_expert.py)."""
+    bad = []
+    for name, mod in list(sys.modules.items()):
+        f = getattr(mod, "__file__", None)
+        if (name == "wm" or name.startswith("wm.")) and f and not Path(f).resolve().is_relative_to(ROOT.resolve()):
+            bad.append(f"{name} ({f})")
+    return bad
+
+
+def entries_or_exit(load, *a):
+    """demo320.load_entries / online_entries with an undecided AutoMate split turned into SystemExit."""
+    try:
+        return load(*a)
+    except D.SplitUndecided as exc:
+        raise SystemExit(f"{exc} (demo320.split_of_entry)")
+
+
+def provenance(depth_stats_file: Path | None, split: dict | None = None) -> dict:
+    """What a run was built from: library versions, md5 of the model / data code, git commit, depth statistics, the
+    imported wm package's file and the fast copy's split identity (demo320.split_identity)."""
+    import hashlib
+    import subprocess
+    vers = {"torch": torch.__version__}
+    for name in ("transformers", "huggingface_hub", "torchvision", "sklearn", "joblib", "threadpoolctl"):
+        try:
+            vers[name] = getattr(__import__(name), "__version__", None)
+        except ImportError:
+            vers[name] = None
+    try:                                     # which scikit-learn copy the validation AUCs use (environment or extra site)
+        import sklearn
+        f = getattr(sklearn, "__file__", None)
+        sklearn_file = str(Path(f).resolve()) if f else None
+    except ImportError:
+        sklearn_file = None
+    try:
+        commit = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True,
+                                timeout=10).stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        commit = None
+    md5 = {f: hashlib.md5((ROOT / f).read_bytes()).hexdigest() for f in PROVENANCE_FILES}
+    ds = None
+    if depth_stats_file is not None:
+        ds = {"path": str(depth_stats_file.resolve()), "sha256": hashlib.sha256(depth_stats_file.read_bytes()).hexdigest()}
+    return {"versions": vers, "git_commit": commit, "md5": md5, "depth_stats": ds,
+            "wm_file": str(Path(wm.__file__).resolve()), "split": split, "sklearn_file": sklearn_file}
+
+
+def automate_provenance(manifest: dict, allow_partial: bool) -> dict:
+    """The AutoMate fields added to provenance (module docstring, completeness): the manifest's completeness record,
+    the --allow-partial switch, the converter's code record (manifest "code", None for an older fast copy) and the
+    offset head's label (wmdata320 OFFSET_GAP: the pin-tip gap, the user's decision 6 of 2026-11-23)."""
+    return {"completeness": manifest.get("completeness"), "allow_partial": bool(allow_partial),
+            "fast_copy_code": manifest.get("code"), "offset_label": WD.OFFSET_GAP}
+
+
+GPU_CONTEXT_GB = 1.0                   # the CUDA context, outside the allocator cap
+
+
+def cap_gpu_memory(dev: torch.device, automate: bool, ddp: bool) -> float | None:
+    """The GPU memory the launcher declared for this job's scope (caps.sh / qx_run exports QX_GPU_GB) becomes the
+    process's own cap: torch.cuda.set_per_process_memory_fraction((QX_GPU_GB - GPU_CONTEXT_GB) * 1e9 / total), so a
+    job never allocates beyond its declaration (the watcher only reacts after GPU 1 is over budget). AutoMate data on
+    CUDA refuses to run without QX_GPU_GB; ManiSkill runs without it are unchanged (no cap). QX_GPU_GB is one GPU's
+    budget: refused with several processes (torchrun). -> the cap in GB, or None."""
+    v = os.environ.get("QX_GPU_GB")
+    if dev.type != "cuda":
+        return None
+    if not v:
+        if automate:
+            raise SystemExit("AutoMate data on CUDA: QX_GPU_GB (the declared GPU memory of the job, exported by qx_run) "
+                             "is not set; start it through the capped launcher (scripts/automate/train_automate.sh)")
+        return None
+    if ddp:
+        raise SystemExit("QX_GPU_GB is the budget of one GPU: not for a torchrun run of several processes")
+    try:
+        gb = float(v)
+    except ValueError:
+        raise SystemExit(f"QX_GPU_GB={v!r} is not a number")
+    cap = gb - GPU_CONTEXT_GB
+    if not cap > 0:
+        raise SystemExit(f"QX_GPU_GB={v}: nothing left after {GPU_CONTEXT_GB} GB for the CUDA context")
+    total = torch.cuda.get_device_properties(dev).total_memory
+    torch.cuda.set_per_process_memory_fraction(min(1.0, cap * 1e9 / total), dev)
+    return cap
+
+
+def check_encoder_env(encoder: str) -> None:
+    """The new encoders read pretrained weights from local caches only: $HF_HOME / $TORCH_HOME set, outside the
+    account's home directory, the Hub offline, and every weight file present. SystemExit otherwise."""
+    import pwd
+    home = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+    for var in ("HF_HOME", "TORCH_HOME"):
+        v = os.environ.get(var)
+        if not v:
+            raise SystemExit(f"--encoder {encoder}: set ${var} (the weights are read from a local cache, never the account's home)")
+        if Path(v).resolve().is_relative_to(home):
+            raise SystemExit(f"--encoder {encoder}: ${var}={v} lies in the account's home {home}: use our own storage")
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    if encoder == "segformer_b1":
+        from wm.tdmpc import encoders320 as E
+        try:
+            from huggingface_hub import try_to_load_from_cache
+        except ImportError as exc:
+            raise SystemExit(f"--encoder segformer_b1 needs huggingface_hub ({exc})")
+        missing = [f for f in E.SEGFORMER_B1_FILES
+                   if not isinstance(try_to_load_from_cache(E.SEGFORMER_B1, f, revision=E.SEGFORMER_B1_REVISION), str)]
+        if missing:
+            raise SystemExit(f"{E.SEGFORMER_B1} at {E.SEGFORMER_B1_REVISION}: {missing} not in the local cache "
+                             f"($HF_HOME={os.environ['HF_HOME']}): python -m wm.tdmpc.encoders320 --download")
+    if encoder == "resnet34":
+        from torchvision.models import ResNet34_Weights
+        f = Path(torch.hub.get_dir()) / "checkpoints" / Path(ResNet34_Weights.IMAGENET1K_V1.url).name
+        if not f.exists():
+            raise SystemExit(f"--encoder resnet34: {f} is missing: python -c 'import torchvision; "
+                             "torchvision.models.resnet34(weights=\"IMAGENET1K_V1\")' with $TORCH_HOME set")
 
 
 def save(obj, path: Path):
@@ -87,10 +263,15 @@ def _finished_grasps(r: Path) -> list[dict]:
     return out
 
 
-def online_entries(pool) -> tuple[list[dict], list[str]]:
+def online_entries(pool, split_sha: str | None = None) -> tuple[list[dict], list[str]]:
     """Trajectories of the online pool (absolute paths), with split and bc: the complete rounds (DONE + manifest) and,
     of a round still being collected, its finished grasps (2026-11-18, the user's decision: the learner uses a round
-    while it is collected; those entries carry partial=True). Returns them and the names of the complete rounds."""
+    while it is collected; those entries carry partial=True). Returns them and the names of the complete rounds.
+    An AutoMate entry must carry split_sha256 equal to split_sha, the sha256 of the fast copy's split file (manifest
+    "split"): its stored condition means "train" only under the split it was collected with, so a pool of another
+    collection's split is refused (port plan item 10). split_sha is None exactly for a ManiSkill fast copy (only an
+    AutoMate copy's manifest has "split"), so an entry whose simulator differs from the fast copy's is refused: a
+    ManiSkill pool given to an AutoMate run, or the reverse (r7-data-01)."""
     out, rounds = [], []
     for r in sorted(Path(pool).glob("r*"), key=lambda p: int(p.name[1:]) if p.name[1:].isdigit() else -1):
         if not r.name[1:].isdigit():
@@ -101,7 +282,14 @@ def online_entries(pool) -> tuple[list[dict], list[str]]:
         else:
             ents, partial = _finished_grasps(r), True
         for e in ents:
-            sp = D.split320(e["port"], e["pitch_deg"], e["grasp_pos_m"], e["grasp"])
+            if (split_sha is not None) != D.is_automate(e):          # the pool's simulator must be the fast copy's
+                raise SystemExit(f"online trajectory {e['path']} is {'AutoMate' if D.is_automate(e) else 'ManiSkill'}, the "
+                                 f"fast copy is {'AutoMate' if split_sha is not None else 'ManiSkill'}: the pool must come "
+                                 "from the fast copy's simulator")
+            sp = entries_or_exit(D.split_of_entry, e)
+            if D.is_automate(e) and (split_sha is None or e.get("split_sha256") != split_sha):
+                raise SystemExit(f"online trajectory {e['path']} carries the split {e.get('split_sha256')}, the fast copy "
+                                 f"{split_sha}: the pool must come from the fast copy's collection and split")
             if sp != "train":
                 raise SystemExit(f"online trajectory {e['path']} is of split {sp}: the pool must hold training grasps only")
             if e["steps"] >= WD.EXECUTE and (not partial or (Path(pool) / e["path"]).exists()):
@@ -167,7 +355,8 @@ def validate(model, sets, args, dev):
         err = []
         for b in bl:
             b = to(b, dev)
-            tok = model.enc.tokens(b["rgb"].flatten(0, 1), b["depth"].flatten(0, 1)).view(*b["depth"].shape[:2], 100, 32)
+            tok = model.enc.tokens(b["rgb"].flatten(0, 1), b["depth"].flatten(0, 1)).view(*b["depth"].shape[:2], model.enc.pic.n_tokens,
+                                                                                          model.enc.pic.token_dim)
             pred = model.act_chunk(model.enc.fuse(tok, b["q"])).flatten(1)
             err.append(float((pred - b["a"]).abs().mean()) * 1000)
         rec = {k: float(np.mean(v)) for k, v in num.items()}
@@ -191,7 +380,16 @@ def main():
     ap.add_argument("--data", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--stem", required=True, choices=["standard", "nopool"])
-    ap.add_argument("--imagenet", action="store_true", help="the ResNet starts from ImageNet weights (policy320.PictureTokens.init_imagenet)")
+    ap.add_argument("--imagenet", action="store_true", help="the ResNet starts from ImageNet weights (policy320.PictureTokens.init_pretrained)")
+    ap.add_argument("--encoder", default=None, choices=list(ENCODERS),
+                    help="picture encoder (policy320.PictureTokens); omitted: resnet18 for ManiSkill data, refused for AutoMate data")
+    ap.add_argument("--token-dim", type=int, default=None, help="numbers per picture token (omitted: 32 for resnet18; required otherwise)")
+    ap.add_argument("--depth-stats", help="resnet34 / segformer_b1: json of scripts/automate/depth_stats.py (default <data>/depth_stats.json)")
+    ap.add_argument("--depth-max-m", type=float, help="resnet34 / segformer_b1: depth clipped to [0, this] m (encoders320.depth_z)")
+    ap.add_argument("--depth-mean-m", type=float, help="resnet34 / segformer_b1: the data's fixed depth mean [m]")
+    ap.add_argument("--depth-std-m", type=float, help="resnet34 / segformer_b1: the data's fixed depth standard deviation [m]")
+    ap.add_argument("--depth-invalid", type=float, default=None,
+                    help="resnet34 / segformer_b1: value of invalid pixels (depth 0) after normalisation (default (0 - mean) / std)")
     ap.add_argument("--offset-weight", type=float, default=0.0, help="> 0: the training-only offset read-out head on z (wm320.WM320)")
     ap.add_argument("--shift-px", type=int, required=True)
     ap.add_argument("--shaping", type=float, required=True)
@@ -213,17 +411,87 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--resume", action="store_true")
+    ap.add_argument("--allow-partial", action="store_true",
+                    help="AutoMate: train on a fast copy of a running or unfinished collection (recorded in provenance)")
     ap.add_argument("--online", help="online pool; its complete rounds are mixed in")
     ap.add_argument("--online-frac", type=float, default=0.5, help="share of every micro-batch's windows from the online pool")
     ap.add_argument("--refresh-every", type=int, default=250, help="steps between reads of the online pool")
     ap.add_argument("--online-min", type=int, default=100, help="online trajectories needed before they are mixed in")
     ap.add_argument("--online-reload", type=int, default=150, help="new online trajectories that make a read rebuild the loaders")
     args = ap.parse_args()
+    foreign = foreign_wm_modules()
+    if foreign:
+        raise SystemExit(f"wm modules from outside {ROOT}: {foreign[:3]} (unset PYTHONPATH or run this tree's copy)")
     import resource                        # 2026-11-18: the loaders, rebuilt as an online round streams in, pass tensors
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)          # by file descriptor; a soft limit of 1024 ran out
     resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))          # ("received 0 items of ancdata") at step 15,000
     if args.offset_weight < 0:
         raise SystemExit("--offset-weight must be >= 0")
+    encoder_given = args.encoder is not None
+    encoder = args.encoder or ENCODER_DEFAULTS["encoder"]
+    ents = [e for e in entries_or_exit(D.load_entries, args.data) if e["split"] != "test" and e["steps"] >= WD.EXECUTE]
+    by = {s: [e for e in ents if e["split"] == s] for s in ("train", "select", "heldout")}
+    automate = any(D.is_automate(e) for e in ents)
+    manifest = json.loads((Path(args.data) / "manifest.json").read_text())
+    split_id = manifest.get("split")
+    if automate:                                                     # AutoMate: no silent legacy encoder
+        if not all(D.is_automate(e) for e in ents):
+            raise SystemExit("the fast copy mixes AutoMate and ManiSkill trajectories")
+        for c in AUTOMATE_HELDOUT_CONDITIONS:                         # logged separately, same windows as in "heldout"
+            by[c] = [e for e in by["heldout"] if D.automate_condition(e) == c]
+        if not encoder_given:
+            raise SystemExit("AutoMate data: state --encoder (resnet34 or segformer_b1) and --token-dim explicitly")
+        if encoder == "resnet18":
+            raise SystemExit("AutoMate data: --encoder resnet18 was dropped for AutoMate (its depth input saturates at 0.3 m)")
+    depth_flags = {"depth_max_m": args.depth_max_m, "depth_mean_m": args.depth_mean_m, "depth_std_m": args.depth_std_m}
+    depth_stats, depth_stats_file = None, None
+    if encoder == "resnet18":
+        if any(v is not None for v in depth_flags.values()) or args.depth_invalid is not None or args.depth_stats:
+            raise SystemExit("--depth-* settings are for --encoder resnet34 / segformer_b1; the legacy ResNet-18 has its own depth input")
+        depth_flags = {k: ENCODER_DEFAULTS[k] for k in (*depth_flags, "depth_invalid")}
+        token_dim = ENCODER_DEFAULTS["token_dim"] if args.token_dim is None else args.token_dim
+    else:
+        if not args.imagenet:
+            raise SystemExit(f"--encoder {encoder} starts from pretrained weights with ImageNet's RGB normalisation: add --imagenet")
+        if args.stem != "standard":
+            raise SystemExit(f"--encoder {encoder} is built with --stem standard only")
+        if args.token_dim is None:
+            raise SystemExit(f"--encoder {encoder} needs --token-dim (the agreed value for AutoMate is 128)")
+        token_dim = args.token_dim
+        given = [v is not None for v in depth_flags.values()]
+        stats_file = Path(args.depth_stats) if args.depth_stats else Path(args.data) / "depth_stats.json"
+        if automate and any(given):
+            raise SystemExit("AutoMate data: the depth normalisation comes from the statistics file only (its training-split "
+                             "hash is checked): drop --depth-max-m, --depth-mean-m and --depth-std-m, run scripts/automate/depth_stats.py")
+        if any(given) and not all(given):
+            raise SystemExit("--depth-max-m, --depth-mean-m and --depth-std-m go together (or use --depth-stats)")
+        if not any(given):
+            if not stats_file.exists():
+                raise SystemExit(f"--encoder {encoder} needs the depth statistics: {stats_file} (scripts/automate/depth_stats.py) "
+                                 "or --depth-max-m, --depth-mean-m and --depth-std-m (the data's fixed values)")
+            depth_stats, depth_stats_file = json.loads(stats_file.read_text()), stats_file
+            depth_flags = {k: float(depth_stats[k]) for k in depth_flags}
+            if args.depth_invalid is not None and args.depth_invalid != depth_stats["depth_invalid"]:
+                raise SystemExit(f"--depth-invalid {args.depth_invalid} differs from {stats_file}: {depth_stats['depth_invalid']}")
+            depth_flags["depth_invalid"] = float(depth_stats["depth_invalid"])
+        else:
+            if not (args.depth_max_m > 0 and args.depth_std_m > 0):
+                raise SystemExit("--depth-max-m and --depth-std-m must be > 0")
+            if stats_file.exists():                                   # flags next to a statistics file must agree with it
+                st = json.loads(stats_file.read_text())
+                diff = [k for k in depth_flags if abs(float(st[k]) - depth_flags[k]) > 1e-9]
+                if diff:
+                    raise SystemExit(f"--{diff[0].replace('_', '-')} differs from {stats_file}: drop the flags or recompute the file")
+                depth_stats, depth_stats_file = st, stats_file           # its training-split hash is checked below
+            depth_flags["depth_invalid"] = (default_depth_invalid(args.depth_mean_m, args.depth_std_m)
+                                            if args.depth_invalid is None else args.depth_invalid)
+        why = check_depth_settings(*(depth_flags[k] for k in ("depth_max_m", "depth_mean_m", "depth_std_m", "depth_invalid")))
+        if why:
+            raise SystemExit(f"--encoder {encoder}: {why}")
+        check_encoder_env(encoder)
+    if token_dim < 1:
+        raise SystemExit("--token-dim must be >= 1")
+    enc_set = {"encoder": encoder, "token_dim": token_dim, **depth_flags}
     ddp = int(os.environ.get("WORLD_SIZE", "1")) > 1
     if ddp:
         local = int(os.environ["LOCAL_RANK"])
@@ -237,6 +505,7 @@ def main():
     else:
         rank, world, dev = 0, 1, torch.device(args.device)
         seed_all(args.seed)
+    gpu_cap_gb = cap_gpu_memory(dev, automate, ddp)                  # before the first allocation on the GPU
     main_rank = rank == 0
     run = Path(args.out)
     resume = args.resume and (run / "last.pt").exists()
@@ -246,17 +515,53 @@ def main():
         dist.barrier()                                              # every process decided before process 0 writes anything
     if refuse:
         raise SystemExit(refuse)
+    if depth_stats is not None and depth_stats.get("train_files_sha256") != D.train_files_sha256(by["train"], args.data):
+        raise SystemExit("the depth statistics were computed on another training split than this run's: run depth_stats.py again")
+    if depth_stats is not None and depth_stats.get("split") != split_id:
+        raise SystemExit(f"the depth statistics carry the split {depth_stats.get('split')}, the fast copy {split_id}: "
+                         "run depth_stats.py again")
+    if automate and not (split_id or {}).get("sha256"):
+        raise SystemExit("AutoMate data: the fast copy's manifest has no split identity (written by "
+                         "scripts/data/cache_wm_v1_fast.py from the collection's plan.json): convert it again")
+    if automate:                                                     # checkpoint selection and held-out validation exist
+        n_sel = len({e["grasp"] for e in by["select"]})
+        if n_sel < MIN_SELECT_GRASPS or not by["heldout"]:
+            raise SystemExit(f"AutoMate data: {n_sel} selection grasps (at least {MIN_SELECT_GRASPS}) and "
+                             f"{len(by['heldout'])} held-out trajectories (at least 1): the split rule must provide both")
+    if automate:                                                     # the collection was complete when indexed
+        comp = manifest.get("completeness")
+        why = ("its manifest has no completeness record (convert it again after scripts/data/build_index.py --automate)"
+               if not isinstance(comp, dict) else
+               f"it was indexed from a running or unfinished collection (completeness partial: {comp.get('problems')})"
+               if comp.get("partial") is not False else None)
+        if why and not args.allow_partial:
+            raise SystemExit(f"AutoMate fast copy {args.data}: {why}; --allow-partial trains on it anyway (recorded)")
+    prov = provenance(depth_stats_file, split_id)
+    if automate:
+        prov.update(automate_provenance(manifest, args.allow_partial))
     if main_rank:
         run.mkdir(parents=True, exist_ok=True)
-    ents = [e for e in D.load_entries(args.data) if e["split"] != "test" and e["steps"] >= WD.EXECUTE]
-    by = {s: [e for e in ents if e["split"] == s] for s in ("train", "select", "heldout")}
     ck = torch.load(run / "last.pt", map_location="cpu", weights_only=False) if resume else None
+    if ck and automate and (ck.get("provenance") or {}).get("split") != split_id:
+        raise SystemExit(f"{run}/last.pt was trained on the split {(ck.get('provenance') or {}).get('split')}, the fast copy "
+                         f"carries {split_id}: start a new run")
     if ck and ck.get("labels") != WD.LABELS:                       # a changed design is trained from scratch, never resumed
         raise SystemExit(f"{run}/last.pt was trained with labels {ck.get('labels')}, this code has {WD.LABELS}: start a new run")
     if ck and ck.get("imagenet", False) != args.imagenet:
         raise SystemExit(f"{run}/last.pt has imagenet={ck.get('imagenet', False)}, --imagenet is {args.imagenet}: start a new run")
     if ck and ck.get("offset_weight", 0.0) != args.offset_weight:
         raise SystemExit(f"{run}/last.pt has offset_weight={ck.get('offset_weight', 0.0)}, --offset-weight is {args.offset_weight}: start a new run")
+    for k, v in (encoder_settings(ck) if ck else {}).items():       # an old checkpoint: the legacy ResNet-18's settings
+        if v != enc_set[k]:
+            raise SystemExit(f"{run}/last.pt has {k}={v}, --{k.replace('_', '-')} is {enc_set[k]}: start a new run")
+    offset_label = WD.OFFSET_GAP if automate else WD.OFFSET_ALONG     # the offset head's target (wmdata320, decision 6)
+    if ck and ck.get("offset_label", WD.OFFSET_ALONG) != offset_label:
+        raise SystemExit(f"{run}/last.pt has offset_label={ck.get('offset_label', WD.OFFSET_ALONG)}, this data's is "
+                         f"{offset_label}: start a new run")
+    try:                                                              # wm320.auc at the first validation: refuse now,
+        import sklearn.metrics  # noqa: F401                          # not at step 500
+    except ImportError as exc:
+        raise SystemExit(f"scikit-learn is missing ({exc}): the validation AUCs (wm320.auc) need it")
     if ck:
         stats = ck["stats"]
     else:
@@ -265,21 +570,23 @@ def main():
             dist.broadcast_object_list(box, src=0)
         stats = box[0]
     rng = np.random.default_rng(1)
-    sets = {}
-    for name in ("select", "heldout") if main_rank else ():
+    sets, face_kept = {}, {}
+    for name in ("select", "heldout", *(AUTOMATE_HELDOUT_CONDITIONS if automate else ())) if main_rank else ():
         if not by[name]:
             continue
         wi = window_items(by[name])
         wi = wi[np.sort(rng.choice(len(wi), min(args.eval_windows, len(wi)), replace=False))]
         fi = face_items(by[name], args.data, args.shaping, args.gamma)
+        if automate:                                                # coverage of the face AUC (AutoMate only)
+            face_kept[name] = [int(len(fi)), int(sum(e["kind"] == "contact" for e in by[name]))]
         bce = [e for e in by[name] if e["bc"]]
         bi = D.policy_items(bce)
         bi = bi[np.sort(rng.choice(len(bi), min(1024, len(bi)), replace=False))]
         mk = lambda items: [{k: v.clone() for k, v in b.items()} for b in loader(WindowData(args.data, by[name], items, stats, args.shaping, args.gamma), 16, 4, 0, False)]  # noqa: E731
         sets[name] = (mk(wi), mk(fi) if len(fi) else [], [], [{k: v.clone() for k, v in b.items()} for b in policy_loader(args.data, bce, 32, 4, shuffle=False, items=bi)])
     torch.manual_seed(args.seed)
-    model = WM320(args.stem, stats, args.shaping, imagenet=args.imagenet, offset_weight=args.offset_weight, gamma=args.gamma)
-    copied = None if ck else model.enc.pic.init_imagenet() if args.imagenet else 0   # identical on every process
+    model = WM320(args.stem, stats, args.shaping, imagenet=args.imagenet, offset_weight=args.offset_weight, **enc_set, gamma=args.gamma)
+    copied = None if ck else model.enc.pic.init_pretrained() if args.imagenet else 0   # identical on every process
     model = model.to(dev)
     net = DDP(model, device_ids=[dev.index], broadcast_buffers=False) if ddp else model     # broadcasts process 0's weights
     enc = list(model.enc.parameters())
@@ -295,7 +602,9 @@ def main():
                 torch.cuda.set_rng_state(ck["rng_cuda"][0], dev)
     if ddp:          # the model was built identically everywhere (same seed); from here each process draws its own
         torch.manual_seed(args.seed + RS * rank + step)     # shifts, noise and dropout (a resumed run: a fresh stream from the step on)
-    info0 = {"format": "wm320-1", "labels": WD.LABELS, "stem": args.stem, "imagenet": args.imagenet, "offset_weight": args.offset_weight, "shaping": args.shaping, "cfg": {"gamma": args.gamma}, "stats": stats}
+    info0 = {"format": "wm320-1", "labels": WD.LABELS, "stem": args.stem, "imagenet": args.imagenet, "offset_weight": args.offset_weight, **enc_set,
+             "shaping": args.shaping, "cfg": {"gamma": args.gamma}, "stats": stats, "provenance": prov,
+             **({"offset_label": offset_label} if automate else {})}   # ManiSkill checkpoints unchanged (no key = along_mm)
 
     def checkpoint(full: bool):
         c = {**info0, "state": model.state_dict(), "step": step, "skipped": skipped, "args": vars(args)}
@@ -310,7 +619,9 @@ def main():
         windows=int(len(window_items(by["train"]))), imitation_samples=int(sum(e["n_images"] for e in by["train"] if e["bc"])),
         validation={k: [len(v[0]) * 16, len(v[1]) * 16, len(v[2]) * 16, len(v[3]) * 32] for k, v in sets.items()},
         params_m=sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6, imagenet=args.imagenet, imagenet_tensors_copied=copied,
-        args=vars(args))
+        tokens_per_picture=model.enc.pic.n_tokens, **enc_set, provenance=prov,
+        select_grasps=len({e["grasp"] for e in by["select"]}), heldout_grasps=len({e["grasp"] for e in by["heldout"]}),
+        **({"gpu_cap_GB": gpu_cap_gb} if gpu_cap_gb is not None else {}), args=vars(args))
     wo = int(round(args.online_frac * args.wm_batch)) if args.online else 0
     if args.online and (args.refresh_every < 1 or args.online_min < 1 or args.online_reload < 1):
         raise SystemExit("--refresh-every, --online-min and --online-reload must be at least 1")
@@ -338,7 +649,7 @@ def main():
             online_partial_trajectories=sum(bool(e.get("partial")) for e in onl), online_windows_per_micro_batch=wo if mix else 0)
 
     if args.online:
-        onl, rounds_in = online_entries(args.online)
+        onl, rounds_in = online_entries(args.online, (split_id or {}).get("sha256"))
         mix = mixes(onl)
     wtrain, btrain = make_loaders()
     data_record()
@@ -350,7 +661,7 @@ def main():
         opt.zero_grad(set_to_none=True)
         finite = True
         if args.online and step % args.refresh_every == 0:
-            new, names = online_entries(args.online)
+            new, names = online_entries(args.online, (split_id or {}).get("sha256"))
             if names != rounds_in or len(new) - len(onl) >= args.online_reload or mixes(new) != mix:
                 del wtrain, btrain                                     # the old loaders' workers end with them
                 onl, rounds_in = new, names
@@ -399,6 +710,8 @@ def main():
             save(checkpoint(True), run / "last.pt")
         if main_rank and (step in early or step % args.eval_every == 0 or step == args.steps):
             rec = validate(model, sets, args, dev)
+            for name, kept in face_kept.items():                    # contact pushes in auc_V_before_face_contact / all
+                rec[name]["face_items_kept"] = kept
             log(event="val", step=step, **rec)
             t0 = time.time()
     log(event=event, step=step)

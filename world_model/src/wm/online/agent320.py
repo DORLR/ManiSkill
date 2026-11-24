@@ -11,7 +11,9 @@ Per decision (0.4 s):
             ended yet (product of 1 - done) -- a seated state ends the sum, as a terminal state does in training
   done      the done head's probability that the plug is seated now
   value     the value heads' estimates V at the current latent (their mean is what the back-off decision compares)
-The probe head of the model (a read-out for the training-time check of imagined hand positions) is not used here.
+  gap       the pin-tip gap from the offset read-out head (gap_mm; attempt320's in-hole rule): for a checkpoint with
+            offset label "gap_mm" (AutoMate, the user's decision 6 of 2026-11-23) the read-out itself, without the pin
+            length; "along_mm" (ManiSkill) minus the pin length, as before (common320.gap_estimate_mm)
 Nothing here reads H*, the insertion axis or the simulator's truth.
 """
 
@@ -22,7 +24,7 @@ import torch
 
 from ..tdmpc import demo320 as D
 from ..tdmpc import wmdata320 as WD
-from ..tdmpc.wm320 import WM320
+from ..tdmpc.wm320 import WM320, encoder_settings
 
 
 class WMAgent:
@@ -32,11 +34,18 @@ class WMAgent:
         if ck.get("labels") != WD.LABELS:
             raise ValueError(f"{ckpt} was trained with labels {ck.get('labels')}, this code has {WD.LABELS}")
         self.m = WM320(ck["stem"], ck["stats"], ck.get("shaping", 0.0), imagenet=ck.get("imagenet", False),
-                       offset_weight=ck.get("offset_weight", 0.0), **ck["cfg"])
+                       offset_weight=ck.get("offset_weight", 0.0), **encoder_settings(ck), **ck["cfg"])
         self.m.load_state_dict(ck["state"])
         self.m.to(self.device).eval()
         self.horizon, self.gamma, self.step = horizon, float(self.m.cfg.gamma), int(ck.get("step", -1))
         self.shaping = float(ck.get("shaping", 0.0))                           # the reward's shaping weight (for true returns)
+        # the offset head's first component (wmdata320 OFFSET_LABELS): "along_mm" for every checkpoint without the key
+        self.offset_label = ck.get("offset_label", WD.OFFSET_ALONG)
+        if self.offset_label not in WD.OFFSET_LABELS:
+            raise ValueError(f"{ckpt} has offset label {self.offset_label!r}, this code knows {WD.OFFSET_LABELS}")
+        if (ck.get("provenance") or {}).get("split") is not None and self.offset_label != WD.OFFSET_GAP:
+            raise ValueError(f"{ckpt} was trained on AutoMate data with offset label {self.offset_label!r}: its gap would "
+                             "need the pin length at test time (decision 6 of 2026-11-23); train a new one")
         del ck
 
     @torch.no_grad()
@@ -44,8 +53,10 @@ class WMAgent:
         """rgb (4, 320, 320, 3) uint8 (already through the JPEG codec), depth (4, 320, 320) uint16 [0.1 mm], q (7,) -> z (1, L)."""
         r = torch.from_numpy(np.ascontiguousarray(rgb)).to(self.device)
         d = torch.from_numpy(np.minimum(depth, 32767).astype(np.int16)).to(self.device)
-        tok = self.m.enc.tokens(r, d)[None]                                   # (1, 4, 100, 32)
-        return self.m.enc.fuse(tok, torch.from_numpy(np.asarray(q, np.float32)[:D.JOINTS])[None].to(self.device))
+        tok = self.m.enc.tokens(r, d)[None]                                   # (1, 4, n_tokens, token_dim)
+        q = np.asarray(q, np.float32)[:D.JOINTS]                              # the arm's 7 joints only (qpos[7:9]: fingers)
+        assert q.shape[-1] == D.JOINTS == 7
+        return self.m.enc.fuse(tok, torch.from_numpy(q)[None].to(self.device))
 
     @torch.no_grad()
     def propose(self, z: torch.Tensor) -> np.ndarray:
@@ -59,19 +70,27 @@ class WMAgent:
     @torch.no_grad()
     def offset_mm(self, z: torch.Tensor) -> np.ndarray | None:
         """The offset read-out head on z: the hand's estimated offset from H* (along the insertion axis, lateral x,
-        lateral y [mm], tilt [deg]; wmdata320.decision_labels' "probe" frame), (4,). None without the head."""
+        lateral y [mm], tilt [deg]; wmdata320.decision_labels' "probe" frame; with offset label "gap_mm" the first
+        component is the pin-tip gap instead, wmdata320 "offset"), (4,). None without the head."""
         if self.m._offset is None:
             return None
         return (self.m._offset(z) * self.m.off_scale)[0].double().cpu().numpy()
 
     @torch.no_grad()
-    def gap_mm(self, z: torch.Tensor, pin_length_mm: float) -> float | None:
+    def gap_mm(self, z: torch.Tensor, pin_length_mm: float | None = None) -> float | None:
         """Estimated distance of the pin tips in front of the board face [mm] (negative: that deep in the hole), from the
         offset read-out head on z (z comes from the pictures and joints only; no H* at test time). None without the head.
         2026-11-18, the user's decision: used only to tell the phase (in the hole or not), never to score or move
-        (the ablation modes "servo" of attempt320 move by the read-out on purpose)."""
+        (the ablation modes "servo" of attempt320 move by the read-out on purpose).
+        Offset label "gap_mm" (AutoMate, decision 6 of 2026-11-23): g = o[0], no pin length (giving one is refused);
+        "along_mm": g = -o[0] - pin_length_mm, as before (common320.gap_estimate_mm)."""
+        from .common320 import gap_estimate_mm
+        if self.offset_label == WD.OFFSET_GAP and pin_length_mm is not None:
+            raise ValueError("this checkpoint reads the pin-tip gap directly: no pin length at test time")
+        if self.offset_label == WD.OFFSET_ALONG and pin_length_mm is None:
+            raise ValueError("this checkpoint's offset head reads the depth along the axis: its gap needs the pin length")
         o = self.offset_mm(z)
-        return None if o is None else float(-o[0] - pin_length_mm)
+        return None if o is None else gap_estimate_mm(o, self.offset_label, lambda: pin_length_mm)
 
     @torch.no_grad()
     def values(self, z: torch.Tensor) -> np.ndarray:

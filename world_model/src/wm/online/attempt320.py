@@ -45,6 +45,10 @@ candidates were offered, and the pick (0 proposal, i a corrected copy, -1 the se
 (back-off and re-position decisions are not agent decisions and are not in it); for reporting only, also the FK
 lateral offset from H* (`fk_lat` [mm], label frame) and the executed move of a non-proposal pick (`move_mm`: along,
 x, y in the label frame of the true axis).
+Gap g_t (the in-hole rule, the probe's and the ablation "random"'s bins, the logs): from the offset read-out o_t by
+common320.gap_estimate_mm. AutoMate (the user's decision 6 of 2026-11-23): the checkpoint's offset head was trained on
+the gap itself (offset label "gap_mm", wmdata320), g_t = o_t[0], with no pin length L, H* or simulator truth; an
+AutoMate attempt with a checkpoint of any other label is refused. ManiSkill: g_t = -o_t[0] - L, unchanged.
 
 Per decision of "wm"/"collect" (every 0.4 s):
   1. observation: the context pictures of the recorder (pictures 2d-6, 2d-4, 2d-2, 2d of the attempt, 0.4 s apart,
@@ -100,7 +104,8 @@ from ..collect.explore import truth_outcome
 from ..tdmpc import demo320 as D
 from ..tdmpc import wmdata320 as WD
 from ..tdmpc.demo320 import is_success
-from .common320 import RANDOM_EDGES_MM, gap_bin, jpeg, offset, servo_move, unjpeg
+from .common320 import (RANDOM_EDGES_MM, check_offset_label, gap_bin, gap_estimate_mm, jpeg, offset, servo_move,
+                        simulator_of_robot, unjpeg)
 
 EXECUTE = WD.EXECUTE
 LEFT_M = 0.06                                  # as the policies' closed-loop test ("free" stops)
@@ -138,7 +143,8 @@ class OnlineTester(Brancher):
                 random_reposition: float = 0.5, inside_mm: float | None = None, servo_axis: str = "true",
                 random_p: tuple | list | None = None, probe_max: int = 0, probe_gap_mm: float = 6.0) -> tuple[dict, dict]:
         """-> (summary, recording). `inside_mm` (2026-11-18, the user's decision; None = off): once the estimated pin-tip
-        depth g_t = agent.gap_mm(z_t, L) < -inside_mm, the try is in the hole and only the proposal is executed
+        depth g_t < -inside_mm (common320.gap_estimate_mm: AutoMate g_t = o[0] of a "gap_mm" checkpoint, no pin length,
+        the user's decision 6 of 2026-11-23; ManiSkill g_t = -o[0] - L as agent.gap_mm), the try is in the hole and only the proposal is executed
         (no correction, no random candidate, no exploration push) until a back-off starts a new try. The decision and g_t at entry are logged (`inside_at`, `inside_gap_mm`). The recording is FullRecorder.end() plus `rgb_jpeg_list` (the stored JPEG bytes)
         and `dec_kind` (one KINDS value per executed decision)."""
         import torch
@@ -154,6 +160,7 @@ class OnlineTester(Brancher):
             raise ValueError(f"mode random needs random_p: {len(RANDOM_EDGES_MM) + 1} probabilities in [0, 1], got {random_p!r}")
         if probe_max and mode != "wm":
             raise ValueError("the counterfactual probe runs with mode wm only")
+        check_offset_label(agent.offset_label, simulator_of_robot(self.robot))   # AutoMate: the gap label only (decision 6)
         r, rng = self.robot, np.random.default_rng(seed)
         torch.manual_seed(seed)
         np.random.seed(seed % (2 ** 32))
@@ -271,7 +278,7 @@ class OnlineTester(Brancher):
                 log["v_mean"].append(round(vm, 3))
                 done_run = done_run + 1 if p > DONE_P else 0
                 o = agent.offset_mm(z)                          # read-out (None without the head); g_t as agent.gap_mm
-                g = None if o is None else float(-o[0] - self.L * 1000.0)
+                g = None if o is None else gap_estimate_mm(o, agent.offset_label, lambda: self.L * 1000.0)  # AutoMate: no L
                 if o is None and mode in ("servo", "random"):
                     raise ValueError(f"mode {mode} needs the offset read-out head")
                 fk = WD.decision_labels(meta_l, r.hand_pose()[None].astype(np.float64), np.array([0]))["probe"][0]

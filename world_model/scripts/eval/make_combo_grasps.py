@@ -23,6 +23,8 @@ position -30..-28 / -12..-10) are a separate (extrapolation) question and are no
 (in-distribution control, never trained on: the learner only reads wm_v1's grasps and online rounds on them).
 
     python world_model/scripts/eval/make_combo_grasps.py --grasps $Q/data/wm_v1 --out $Q/data/test_combos_2026-11-19 --n 65
+A --grasps folder holding any AutoMate grasp (grasp.json simulator "automate") is refused before anything is written:
+the cells are ManiSkill's (ports, OOD_VAL_SHAPES, pitch / position strips), not ported to AutoMate.
 """
 
 from __future__ import annotations
@@ -94,8 +96,12 @@ def main():
     if out.exists() and any(out.iterdir()):
         raise SystemExit(f"{out} is not empty")
     every = [json.loads(Path(f).read_text()) for f in glob.glob(f"{args.grasps}/*/*/grasp.json")]
+    am = sorted(g.get("grasp") for g in every if D.is_automate(g))
+    if am:                                                     # refused before anything is written (as eval_policy320)
+        raise SystemExit(f"{len(am)} AutoMate grasps (e.g. {am[:3]}): not ported (docs/2026-11-23_automate_online_port_plan.md); "
+                         "ManiSkill grasps only")
     train_ports = sorted({g["port"] for g in every if g.get("reference_ok")
-                          and D.split320(g["port"], g["pitch_deg"], g["grasp_pos_m"], g["grasp"]) == "train"})
+                          and D.split_of_entry(g) == "train"})
     train_ports = [p for p in train_ports if p not in OOD_VAL_SHAPES and p not in TEST_PORTS]
     gs = make(train_ports, args.n, args.seed)
     for g in gs:

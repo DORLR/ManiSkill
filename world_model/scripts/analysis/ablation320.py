@@ -27,6 +27,8 @@ Arms are result directories of run_wm320_attempts.py on the same split, grasps, 
       (non-proposal agent decisions; `interventions` for files without per_decision); each arm's settings from its
       summary and the keys that differ from the reference. Result files of crashed grasps (with "error") are skipped,
       as summarise does. A text table goes to stdout.
+  A result file of an AutoMate grasp (an assembly-id port or an AutoMate-only condition) is refused (refuse_automate):
+  the groups and clusters below are ManiSkill's.
 
 Held-out groups (demo320.split320's numbers): the combination of unseen factors, shape (OOD_VAL_SHAPES), angle (grasp
 pitch in (-42, -38) deg) and position (grasp position in (-21, -19) mm), e.g. "shape", "angle+position",
@@ -57,6 +59,17 @@ def group_of(port: str, pitch_deg: float, pos_m: float) -> str:
     return "+".join(n for n, v in unseen if v) or "none"
 
 
+AUTOMATE_CONDITIONS = ("heldout_shape", "heldout_grasp")     # conditions only AutoMate grasps carry
+
+
+def refuse_automate(j: dict, f) -> None:
+    """A result file of an AutoMate grasp (assembly-id port such as "00015", or an AutoMate-only condition): SystemExit.
+    The groups and clusters here are ManiSkill's (split320's bands, OOD_VAL_SHAPES); AutoMate is not ported."""
+    if str(j.get("port", "")).isdigit() or j.get("condition") in AUTOMATE_CONDITIONS:
+        raise SystemExit(f"{f}: an AutoMate result (port {j.get('port')!r}, condition {j.get('condition')!r}): this analysis "
+                         "is ManiSkill's only (port plan: docs/2026-11-23_automate_online_port_plan.md)")
+
+
 def load_arm(d: str) -> dict:
     """(grasp, start index) -> {success, start (canonical json), group, moves, per_decision}; judged attempts only."""
     out = {}
@@ -66,6 +79,7 @@ def load_arm(d: str) -> dict:
         return {}
     for f in files:
         j = json.loads(Path(f).read_text())
+        refuse_automate(j, f)
         if j.get("error") or "starts" not in j or "grasp" not in j or "pitch_deg" not in j:
             continue                                           # crashed grasps count nowhere (as eval_policy320.summarise)
         grp = group_of(j["port"], j["pitch_deg"], j["grasp_pos_m"])
@@ -252,6 +266,7 @@ def load_cells(d: str) -> tuple[dict, dict]:
     out, counts = {}, {}
     for f in sorted(glob.glob(f"{d}/*/*.json")):
         j = json.loads(Path(f).read_text())
+        refuse_automate(j, f)
         ci = cell_of(j.get("grasp", ""))
         if ci is None:
             continue

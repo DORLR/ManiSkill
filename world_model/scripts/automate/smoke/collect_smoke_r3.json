@@ -1,0 +1,9 @@
+{
+ "name": "smoke_collect_r3",
+ "device": "cpu",
+ "split": "automate_v1",
+ "grasps_per_assembly": 4,
+ "collect_subset": ["00015", "00117", "00133", "00444", "00470", "00537", "00755", "00863", "01053"],
+ "expected_grasps": 36,
+ "m1b_dirs": ["/mnt/storage3/qingxin/automate/m1b/batch_r3_cpu"]
+}

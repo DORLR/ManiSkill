@@ -36,7 +36,9 @@ from wm.tdmpc import wmdata320 as WD
 
 def train_grasps(root: str) -> list[dict]:
     gs = [json.loads(Path(f).read_text()) for f in sorted(glob.glob(f"{root}/*/*/grasp.json"))]
-    return [g for g in gs if g.get("reference_ok") and D.split320(g["port"], g["pitch_deg"], g["grasp_pos_m"], g["grasp"]) == "train"]
+    if any(D.is_automate(g) for g in gs):                 # the state environment is ManiSkill's (SAPIEN)
+        raise SystemExit("AutoMate grasps: the PPO state baseline runs in the ManiSkill simulator only")
+    return [g for g in gs if g.get("reference_ok") and D.split_of_entry(g) == "train"]
 
 
 def action_scale(data: str, n: int = 600, seed: int = 0) -> dict:

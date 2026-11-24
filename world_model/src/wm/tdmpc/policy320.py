@@ -38,11 +38,24 @@ import torch.nn.functional as F
 import torchvision
 
 from ..models.policy import ACTION_DIM, CHUNK, LatentFMPolicy
+from ..sim import config as _SIM
 from . import demo320 as D
+from . import encoders320 as E
 from . import wmdata320 as WD
 from .demo320 import CONTEXT, POLICY_KINDS, STRIDE_IMG  # noqa: F401  (re-exported: joint320.py imports them from here)
 
-TOKENS, TOKEN_DIM = 100, 32
+TOKENS, TOKEN_DIM = 100, 32                      # the legacy ResNet-18's tokens per picture and their size: defaults only;
+                                                 # the model's own are PictureTokens.n_tokens / .token_dim
+ENCODERS = ("resnet18", "resnet34", "segformer_b1")   # "resnet18": the legacy encoder (default); see encoders320.py
+# Depth normalisation of the new encoders (encoders320.depth_z): these are PLACEHOLDERS (no normalisation: metres,
+# clipped at the int16 ceiling of the 0.1 mm depth store, invalid -> 0). They are what an old checkpoint (legacy
+# ResNet-18, which keeps its own depth input: 0.1 mm x 1e-3, clipped to [0, 3], and ignores them) stores; the new
+# encoders refuse them (check_depth_settings) and take the data's statistics (scripts/automate/depth_stats.py).
+DEPTH_MAX_M, DEPTH_MEAN_M, DEPTH_STD_M, DEPTH_INVALID = 3.2767, 0.0, 1.0, 0.0
+DEPTH_MIN_VALID_M = _SIM.DEPTH_MIN_MM / 1000.0   # the D405's minimum range: nearer surfaces are stored as 0 (invalid)
+# The encoder settings a checkpoint stores (wm320: top-level keys) with the values an old checkpoint (without them) means.
+ENCODER_DEFAULTS = {"encoder": "resnet18", "token_dim": TOKEN_DIM, "depth_max_m": DEPTH_MAX_M, "depth_mean_m": DEPTH_MEAN_M,
+                    "depth_std_m": DEPTH_STD_M, "depth_invalid": DEPTH_INVALID}
 OFFSET_SCALE = (10.0, 10.0, 10.0, 5.0)           # [mm, mm, mm, deg] -> offsets of about 1 for the read-out loss
 IMAGENET_MEAN, IMAGENET_STD = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
 
@@ -52,32 +65,115 @@ def _amp(x: torch.Tensor, on: bool = True):
     return torch.autocast("cuda", dtype=torch.bfloat16, enabled=on and x.is_cuda)
 
 
-class PictureTokens(nn.Module):
-    """One picture (RGB + depth, 320 x 320) -> 100 tokens of 32 numbers. As FrameNet of wm/tdmpc/model.py up to its map."""
+def default_depth_invalid(depth_mean_m: float, depth_std_m: float) -> float:
+    """The new encoders' default value of an invalid pixel: (0 - mean) / std, the z of 0 m (an invalid pixel is one
+    nearer than the D405's minimum range); the legacy encoder sends invalid pixels to 0 m likewise."""
+    return (0.0 - depth_mean_m) / depth_std_m
 
-    def __init__(self, stem: str = "standard", amp: bool = True, imagenet: bool = False):
+
+def check_depth_settings(depth_max_m, depth_mean_m, depth_std_m, depth_invalid) -> str | None:
+    """Why these depth settings are unusable for resnet34 / segformer_b1, or None: all given, D_max > 0, std > 0,
+    D_max <= DEPTH_MAX_M (3.2767 m: the readers clip the stored depth at the int16 ceiling 32767 x 0.1 mm before the
+    encoder, demo320.policy_sample and wm320.WindowData, so depth beyond it never reaches the model, and statistics
+    clipped at a larger D_max would not describe its input), not the placeholders, and the invalid value below the
+    smallest valid z, (DEPTH_MIN_VALID_M - mean) / std."""
+    if None in (depth_max_m, depth_mean_m, depth_std_m, depth_invalid):
+        return "depth_max_m, depth_mean_m, depth_std_m and depth_invalid are needed (scripts/automate/depth_stats.py)"
+    if not (depth_max_m > 0 and depth_std_m > 0):
+        return f"depth_max_m and depth_std_m must be > 0, got {depth_max_m}, {depth_std_m}"
+    if depth_max_m > DEPTH_MAX_M:
+        return (f"depth_max_m {depth_max_m} is above the int16 ceiling of the 0.1 mm depth input ({DEPTH_MAX_M} m): "
+                "the readers clip there, so the model never sees depth beyond it")
+    if (depth_max_m, depth_mean_m, depth_std_m) == (DEPTH_MAX_M, DEPTH_MEAN_M, DEPTH_STD_M):
+        return "the placeholder depth statistics (3.2767 / 0 / 1: raw metres) are not the data's statistics"
+    z_min = (DEPTH_MIN_VALID_M - depth_mean_m) / depth_std_m
+    if not depth_invalid < z_min:
+        return (f"depth_invalid {depth_invalid} must be below the smallest valid z (D405 minimum range "
+                f"{DEPTH_MIN_VALID_M} m: {z_min:.4f}); the default is (0 - mean) / std = "
+                f"{default_depth_invalid(depth_mean_m, depth_std_m):.4f}")
+    return None
+
+
+class PictureTokens(nn.Module):
+    """One picture (RGB + depth, 320 x 320) -> n_tokens tokens of token_dim numbers.
+
+    encoder "resnet18" (default, the legacy encoder; with token_dim 32 the same model as git 6b37757: same random
+        numbers, keys, tensors and outputs, checked by tests/test_encoders_automate.py): 100 tokens.
+        As FrameNet of wm/tdmpc/model.py up to its map.
+    encoder "resnet34": the same construction with torchvision's ResNet-34 (encoders320.py); always from ImageNet
+        (imagenet=True required), depth slice of the first layer zero, depth input encoders320.depth_z; 100 tokens.
+    encoder "segformer_b1": the pretrained SegFormer-B1 (encoders320.py; imagenet=True required: ImageNet's RGB
+        normalisation, which is the checkpoint's own), its decoder's fused 80 x 80 x 256 map, reduced by
+        encoders320.LocalRefine to 20 x 20 = 400 tokens; depth input encoders320.depth_z.
+    The new encoders take only the standard stem (stem="standard"; it names the ResNet entry with max-pool and has no
+    other meaning for the SegFormer) and only 320 x 320 pictures (checked in forward; their token count is that of a
+    320 x 320 picture). depth_max_m, depth_mean_m, depth_std_m, depth_invalid: encoders320.depth_z, required for the
+    new encoders (the placeholders are refused, check_depth_settings); depth_invalid None = (0 - mean) / std. Unused
+    by "resnet18", which stores the placeholders."""
+
+    def __init__(self, stem: str = "standard", amp: bool = True, imagenet: bool = False, encoder: str = "resnet18",
+                 token_dim: int = TOKEN_DIM, depth_max_m: float | None = None, depth_mean_m: float | None = None,
+                 depth_std_m: float | None = None, depth_invalid: float | None = None):
         super().__init__()
         assert stem in ("standard", "nopool")
+        if encoder not in ENCODERS:
+            raise ValueError(f"encoder {encoder!r} is not one of {ENCODERS}")
+        if encoder != "resnet18":
+            if stem != "standard":
+                raise ValueError(f"encoder {encoder} is built with the standard stem only, got stem={stem!r}")
+            if not imagenet:
+                raise ValueError(f"encoder {encoder} starts from pretrained weights with ImageNet's RGB normalisation: imagenet=True")
+            if depth_invalid is None and depth_mean_m is not None and depth_std_m:
+                depth_invalid = default_depth_invalid(depth_mean_m, depth_std_m)
+            why = check_depth_settings(depth_max_m, depth_mean_m, depth_std_m, depth_invalid)
+            if why:
+                raise ValueError(f"encoder {encoder}: {why}")
+        else:
+            depth_max_m = DEPTH_MAX_M if depth_max_m is None else depth_max_m
+            depth_mean_m = DEPTH_MEAN_M if depth_mean_m is None else depth_mean_m
+            depth_std_m = DEPTH_STD_M if depth_std_m is None else depth_std_m
+            depth_invalid = DEPTH_INVALID if depth_invalid is None else depth_invalid
+        self.encoder, self.token_dim = encoder, int(token_dim)
+        self.depth_max_m, self.depth_mean_m = float(depth_max_m), float(depth_mean_m)
+        self.depth_std_m, self.depth_invalid = float(depth_std_m), float(depth_invalid)
         self.imagenet = imagenet                                          # RGB normalisation of the ImageNet weights
         self.register_buffer("rgb_mean", torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1), persistent=False)   # not in the
         self.register_buffer("rgb_std", torch.tensor(IMAGENET_STD).view(1, 3, 1, 1), persistent=False)     # checkpoint
-        net = torchvision.models.resnet18(weights=None, norm_layer=lambda c: nn.GroupNorm(8, c))
-        self.stem = nn.Sequential(nn.Conv2d(4, 64, 7, 2, 3, bias=False), nn.GroupNorm(8, 64), nn.ReLU())
-        self.trunk = nn.Sequential(*([net.maxpool] if stem == "standard" else []), net.layer1, net.layer2, net.layer3, net.layer4)
-        self.squeeze = nn.Conv2d(512, TOKEN_DIM, 1)
-        self.pool = nn.Identity() if stem == "standard" else nn.AvgPool2d(2)
+        if encoder == "segformer_b1":
+            assert (E.SEGFORMER_B1_MEAN, E.SEGFORMER_B1_STD) == (IMAGENET_MEAN, IMAGENET_STD)
+            self.seg = E.segformer_b1()
+            self.refine = E.LocalRefine(E.FUSED_CH, 4, self.token_dim)
+            self.n_tokens = (320 // E.FUSED_STRIDE // 4) ** 2                    # 20 x 20
+        else:
+            resnet = {"resnet18": torchvision.models.resnet18, "resnet34": torchvision.models.resnet34}[encoder]
+            net = resnet(weights=None, norm_layer=lambda c: nn.GroupNorm(8, c))
+            self.stem = nn.Sequential(nn.Conv2d(4, 64, 7, 2, 3, bias=False), nn.GroupNorm(8, 64), nn.ReLU())
+            self.trunk = nn.Sequential(*([net.maxpool] if stem == "standard" else []), net.layer1, net.layer2, net.layer3, net.layer4)
+            self.squeeze = nn.Conv2d(512, self.token_dim, 1)
+            self.pool = nn.Identity() if stem == "standard" else nn.AvgPool2d(2)
+            self.n_tokens = TOKENS                                               # 10 x 10
         self.amp = amp
 
-    def init_imagenet(self) -> int:
-        """Start from torchvision's ImageNet ResNet-18 (IMAGENET1K_V1): every convolution of the trunk copied, the
-        first layer's RGB weights copied and its depth weights set to their mean; group norms keep their fresh
-        values. For a new training only (a checkpoint carries its own weights). Returns the number of tensors copied."""
+    def init_pretrained(self) -> int:
+        """Start from the encoder's pretrained weights. For a new training only (a checkpoint carries its own weights).
+        Returns the number of tensors copied.
+          resnet18: torchvision's ImageNet ResNet-18 (IMAGENET1K_V1): every convolution of the trunk copied, the first
+                    layer's RGB weights copied and its depth weights set to their mean; group norms keep their fresh
+                    values (needs imagenet=True).
+          resnet34: the same with ResNet-34 (IMAGENET1K_V1), except that the first layer's depth weights are zero.
+          segformer_b1: encoders320.init_segformer_b1 (every tensor but the ADE20K classifier; depth slice zero)."""
         if not self.imagenet:
             raise ValueError("built without imagenet=True: its RGB normalisation would not match the ImageNet weights")
-        src = torchvision.models.resnet18(weights=torchvision.models.ResNet18_Weights.IMAGENET1K_V1)
+        if self.encoder == "segformer_b1":
+            return E.init_segformer_b1(self.seg)
+        if self.encoder == "resnet18":
+            src = torchvision.models.resnet18(weights=torchvision.models.ResNet18_Weights.IMAGENET1K_V1)
+        else:
+            src = torchvision.models.resnet34(weights=torchvision.models.ResNet34_Weights.IMAGENET1K_V1)
         with torch.no_grad():
             w = src.conv1.weight
-            self.stem[0].weight.copy_(torch.cat([w, w.mean(1, keepdim=True)], 1))
+            depth_w = w.mean(1, keepdim=True) if self.encoder == "resnet18" else torch.zeros_like(w[:, :1])
+            self.stem[0].weight.copy_(torch.cat([w, depth_w], 1))
         layers = [m for m in self.trunk if isinstance(m, nn.Sequential)]
         assert len(layers) == 4
         n = 1
@@ -91,13 +187,29 @@ class PictureTokens(nn.Module):
             n += len(sd)
         return n
 
+    def init_imagenet(self) -> int:
+        """The legacy name of init_pretrained (train_policy320.py, tests)."""
+        return self.init_pretrained()
+
     def forward(self, rgb: torch.Tensor, depth: torch.Tensor) -> torch.Tensor:
-        """rgb (N, 3, 320, 320) uint8, depth (N, 320, 320) in 0.1 mm -> (N, 100, 32)."""
+        """rgb (N, 3, 320, 320) uint8, depth (N, 320, 320) in 0.1 mm -> (N, n_tokens, token_dim)."""
+        if self.encoder != "resnet18" and (tuple(rgb.shape[-2:]) != (320, 320) or tuple(depth.shape[-2:]) != (320, 320)):
+            raise ValueError(f"PictureTokens ({self.encoder}) expects 320 x 320 pictures, got {tuple(rgb.shape[-2:])} / "
+                             f"{tuple(depth.shape[-2:])}; n_tokens = {self.n_tokens} holds for 320 x 320 only "
+                             "(WM_CAM_SCALE must be 1 for recorded data)")
         if self.imagenet:
             c = (rgb.float() / 255.0 - self.rgb_mean) / self.rgb_std
         else:
             c = rgb.float() / 255.0 - 0.5
-        x = torch.cat([c, (depth.float() * 1e-3).clamp(0, 3).unsqueeze(1)], 1)
+        if self.encoder == "resnet18":
+            d = (depth.float() * 1e-3).clamp(0, 3)
+        else:
+            d = E.depth_z(depth, self.depth_max_m, self.depth_mean_m, self.depth_std_m, self.depth_invalid)
+        x = torch.cat([c, d.unsqueeze(1)], 1)
+        if self.encoder == "segformer_b1":
+            with _amp(x, self.amp):                    # the first patch embedding runs in float32 (encoders320.Float32Conv2d)
+                x = self.refine(E.segformer_fused(self.seg, x))
+            return x.float()
         x = self.stem(x.contiguous(memory_format=torch.channels_last))     # float32: 0.1 mm of depth must survive
         with _amp(x, self.amp):
             x = self.pool(self.squeeze(self.trunk(x)))
@@ -109,15 +221,16 @@ class ResnetFMPolicy(nn.Module):
                  offset: bool = False):
         super().__init__()
         self.enc = PictureTokens(stem, imagenet=imagenet)
-        self.head = LatentFMPolicy(latent_ch=TOKEN_DIM, context=CONTEXT, d=d, layers=layers, heads=heads, hidden=hidden, n_tokens=TOKENS)
+        self.head = LatentFMPolicy(latent_ch=self.enc.token_dim, context=CONTEXT, d=d, layers=layers, heads=heads, hidden=hidden,
+                                   n_tokens=self.enc.n_tokens)
         self.off = None
         if offset:
             with torch.random.fork_rng(devices=[]):         # the other parts start from the same weights as without it
-                self.off = nn.Sequential(nn.Linear(TOKENS * TOKEN_DIM, 256), nn.SiLU(), nn.Linear(256, 4))
+                self.off = nn.Sequential(nn.Linear(self.enc.n_tokens * self.enc.token_dim, 256), nn.SiLU(), nn.Linear(256, 4))
         self.register_buffer("off_scale", torch.tensor(OFFSET_SCALE), persistent=False)
 
     def tokens(self, rgb: torch.Tensor, depth: torch.Tensor) -> torch.Tensor:
-        """rgb (B, 4, 320, 320, 3) uint8, depth (B, 4, 320, 320) -> (B, 4, 100, 32)."""
+        """rgb (B, 4, 320, 320, 3) uint8, depth (B, 4, 320, 320) -> (B, 4, 100, 32) (the legacy encoder's tokens)."""
         B, C = depth.shape[:2]
         t = self.enc(rgb.flatten(0, 1).permute(0, 3, 1, 2), depth.flatten(0, 1))
         return t.view(B, C, *t.shape[1:])
@@ -264,7 +377,8 @@ class Policy320Agent:
             self.context.extend([t] * CONTEXT)
         else:
             self.context.append(t)
-        q = np.asarray(f.qpos[:ACTION_DIM], np.float32)
+        q = np.asarray(f.qpos[:ACTION_DIM], np.float32)        # the arm's 7 joints only (qpos[7:9]: fingers, never an input)
+        assert q.shape[-1] == ACTION_DIM == 7
         z = torch.stack(list(self.context))[None]
         with _amp(z):
             a = self.model.head.sample(z, torch.from_numpy(q)[None].to(self.device), steps=self.flow_steps, n=n_samples)[0].float()

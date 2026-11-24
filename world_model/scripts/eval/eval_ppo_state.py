@@ -148,7 +148,11 @@ def main():
         raise SystemExit("ports A-D are the final test and stay untouched: --split test needs --final-test")
     out = Path(args.out)
     every = [json.loads(Path(f).read_text()) for f in sorted(glob.glob(f"{args.grasps}/*/*/grasp.json"))]
-    every = [g for g in every if g.get("reference_ok") and D.split320(g["port"], g["pitch_deg"], g["grasp_pos_m"], g["grasp"]) == args.split]
+    am = [g.get("grasp") for g in every if D.is_automate(g)]
+    if am:                                                     # refused before any worker starts (as run_wm320_attempts)
+        raise SystemExit(f"{len(am)} AutoMate grasps (e.g. {am[:3]}): this evaluation is not ported to AutoMate "
+                         "(port plan: docs/2026-11-23_automate_online_port_plan.md); ManiSkill grasps only")
+    every = [g for g in every if g.get("reference_ok") and D.split_of_entry(g) == args.split]
     chosen = E.pick(len(every), args.grasps_n)                     # k = index in the whole list: a grasp keeps its seed
     gs = [every[k] for k in chosen]
     path = {g["grasp"]: out / g["port"] / f"{g['grasp']}.json" for g in gs}

@@ -1,0 +1,86 @@
+<?xml version="1.0" ?>
+<!-- Kinematics-only Franka Panda for Pinocchio FK/IK of the AutoMate scene (wm.sim_automate.kinematics).
+     Joint origins, axes and limits copied from Isaac Sim 5.1's franka_description panda_arm_hand.urdf
+     (isaacsim.asset.importer.urdf/data/urdf/robots/franka_description/robots/panda_arm_hand.urdf); inertias and
+     geometry left out (not needed for kinematics). Added fixed frames:
+       panda_hand_tcp            panda_hand + (0, 0, 0.1034)  (ManiSkill panda_v3.urdf; our hand_pose())
+       panda_fingertip_centered  panda_hand + (0, 0, 0.112071) (body of AutoMate's franka_mimic.usd; offset read from the
+                                                               simulator, checked by scripts/automate/smoke_env.py fk)
+     Fingers: prismatic along hand y (left) and -y (right), 0..0.04 m. -->
+<robot name="panda">
+  <link name="panda_link0"/>
+  <link name="panda_link1"/>
+  <joint name="panda_joint1" type="revolute">
+    <origin rpy="0 0 0" xyz="0 0 0.333"/>
+    <parent link="panda_link0"/><child link="panda_link1"/><axis xyz="0 0 1"/>
+    <limit effort="87" lower="-2.8973" upper="2.8973" velocity="2.1750"/>
+  </joint>
+  <link name="panda_link2"/>
+  <joint name="panda_joint2" type="revolute">
+    <origin rpy="-1.57079632679 0 0" xyz="0 0 0"/>
+    <parent link="panda_link1"/><child link="panda_link2"/><axis xyz="0 0 1"/>
+    <limit effort="87" lower="-1.7628" upper="1.7628" velocity="2.1750"/>
+  </joint>
+  <link name="panda_link3"/>
+  <joint name="panda_joint3" type="revolute">
+    <origin rpy="1.57079632679 0 0" xyz="0 -0.316 0"/>
+    <parent link="panda_link2"/><child link="panda_link3"/><axis xyz="0 0 1"/>
+    <limit effort="87" lower="-2.8973" upper="2.8973" velocity="2.1750"/>
+  </joint>
+  <link name="panda_link4"/>
+  <joint name="panda_joint4" type="revolute">
+    <origin rpy="1.57079632679 0 0" xyz="0.0825 0 0"/>
+    <parent link="panda_link3"/><child link="panda_link4"/><axis xyz="0 0 1"/>
+    <limit effort="87" lower="-3.0718" upper="-0.0698" velocity="2.1750"/>
+  </joint>
+  <link name="panda_link5"/>
+  <joint name="panda_joint5" type="revolute">
+    <origin rpy="-1.57079632679 0 0" xyz="-0.0825 0.384 0"/>
+    <parent link="panda_link4"/><child link="panda_link5"/><axis xyz="0 0 1"/>
+    <limit effort="12" lower="-2.8973" upper="2.8973" velocity="2.6100"/>
+  </joint>
+  <link name="panda_link6"/>
+  <joint name="panda_joint6" type="revolute">
+    <origin rpy="1.57079632679 0 0" xyz="0 0 0"/>
+    <parent link="panda_link5"/><child link="panda_link6"/><axis xyz="0 0 1"/>
+    <limit effort="12" lower="-0.0175" upper="3.7525" velocity="2.6100"/>
+  </joint>
+  <link name="panda_link7"/>
+  <joint name="panda_joint7" type="revolute">
+    <origin rpy="1.57079632679 0 0" xyz="0.088 0 0"/>
+    <parent link="panda_link6"/><child link="panda_link7"/><axis xyz="0 0 1"/>
+    <limit effort="12" lower="-2.8973" upper="2.8973" velocity="2.6100"/>
+  </joint>
+  <link name="panda_link8"/>
+  <joint name="panda_joint8" type="fixed">
+    <origin rpy="0 0 0" xyz="0 0 0.107"/>
+    <parent link="panda_link7"/><child link="panda_link8"/>
+  </joint>
+  <link name="panda_hand"/>
+  <joint name="panda_hand_joint" type="fixed">
+    <origin rpy="0 0 -0.785398163397" xyz="0 0 0"/>
+    <parent link="panda_link8"/><child link="panda_hand"/>
+  </joint>
+  <link name="panda_leftfinger"/>
+  <joint name="panda_finger_joint1" type="prismatic">
+    <origin rpy="0 0 0" xyz="0 0 0.0584"/>
+    <parent link="panda_hand"/><child link="panda_leftfinger"/><axis xyz="0 1 0"/>
+    <limit effort="20" lower="0.0" upper="0.04" velocity="0.2"/>
+  </joint>
+  <link name="panda_rightfinger"/>
+  <joint name="panda_finger_joint2" type="prismatic">
+    <origin rpy="0 0 0" xyz="0 0 0.0584"/>
+    <parent link="panda_hand"/><child link="panda_rightfinger"/><axis xyz="0 -1 0"/>
+    <limit effort="20" lower="0.0" upper="0.04" velocity="0.2"/>
+  </joint>
+  <link name="panda_hand_tcp"/>
+  <joint name="panda_hand_tcp_joint" type="fixed">
+    <origin rpy="0 0 0" xyz="0 0 0.1034"/>
+    <parent link="panda_hand"/><child link="panda_hand_tcp"/>
+  </joint>
+  <link name="panda_fingertip_centered"/>
+  <joint name="panda_fingertip_centered_joint" type="fixed">
+    <origin rpy="0 0 0" xyz="0 0 0.112071"/>
+    <parent link="panda_hand"/><child link="panda_fingertip_centered"/>
+  </joint>
+</robot>

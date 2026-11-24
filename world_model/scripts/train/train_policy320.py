@@ -92,6 +92,9 @@ def main():
     run.mkdir(parents=True, exist_ok=True)
     seed_all(args.seed)
     ents = [e for e in D.load_entries(args.data) if e["bc"]]
+    if any(D.is_automate(e) for e in ents):        # AutoMate: the policy is the world model's built-in ACT head (train_wm320)
+        raise SystemExit("AutoMate data: this stand-alone policy trains the legacy ResNet-18, which was dropped for AutoMate; "
+                         "use scripts/train/train_wm320.py")
     sets = {s: [e for e in ents if e["split"] == s] for s in ("train", "select", "heldout")}
     if not sets["train"] or not sets["select"]:
         raise SystemExit("no trajectories in the training or the selection split")

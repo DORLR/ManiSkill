@@ -4,14 +4,30 @@ numpy + PIL + the standard library only (no torch, no OpenCV), so that all of it
 Fast copy ("wm-fast-1"), written once by scripts/data/cache_wm_v1_fast.py: one uncompressed .npz per trajectory with
 the stored JPEG pictures byte for byte, every depth picture as a lossless 16-bit PNG, the joints, hand poses, joint
 targets and the meta. Why: the policy is trained on independent samples (as the old policy was), one file read per
-sample; the original files inflate the whole depth array (18-40 MB) at every read. The simulator's truth (`eval_rel`)
-is not copied, so nothing that trains from the fast copy can read it; trajectories of the test ports A-D are not
-copied at all.
+sample; the original files inflate the whole depth array (18-40 MB) at every read. The simulator's truth arrays
+(`eval_rel`, `eval_tip`) are not copied; trajectories of the test ports A-D are not copied at all. The meta of an
+AutoMate trajectory (meta simulator = "automate") keeps only the keys of FAST_META_AUTOMATE (2026-11-22): its raw meta
+also holds simulator truth (eval_socket_pose, truth, peak forces, stages, start_error_mm, depth_left_mm, the seeds and
+rng that regenerate the socket pose), none of which reaches the fast copy; entry_of refuses an AutoMate fast copy
+whose meta holds any other key (a copy written before the allow-list). ManiSkill meta is copied whole, as before.
+An AutoMate trajectory of condition "test" is never converted (convert raises; the final-test assemblies stay out).
+
+Imitation set (`bc` of load_entries; lead resolution r3, option A, 2026-11-22): a trajectory of a POLICY_KINDS kind
+with outcome "inserted". AutoMate: outcome "inserted" is AutoMate's episode success S_any (sim_automate.collect,
+the reported success number), so bc also needs expert_completed (the expert passed Chongyu's final_verify), as
+ManiSkill's "inserted" always did:
+    bc = kind in POLICY_KINDS  AND  outcome == "inserted"  AND  (ManiSkill  OR  expert_completed)
+AutoMate's success itself travels separately as automate_success_any (fast meta, manifest entry), for reports only.
 
 Split (decided 2026-11-17): held out = grasps with pitch in (-42, -38) deg or position in (-21, -19) mm, and the 13
 held-out shapes; ports A-D = final test; of the remaining grasps one in twenty (crc32 of the grasp's name, the rule
 of the previous model's "dev" split) is the SELECTION split: not trained on, used to choose checkpoints, so that
 nothing is chosen on the held-out set.
+AutoMate data (entries / grasps with simulator "automate", 2026-11-22): split320's bands and ports mean nothing there.
+Its split is the grasp's stored `condition` (written at collection by sim_automate.collect.SPLIT_RULES), mapped by
+AUTOMATE_SPLIT_OF_CONDITION; "unassigned", a missing or an unknown condition is refused (SplitUndecided). Every
+consumer takes the split from split_of_entry (load_entries, the online pool, the online / evaluation scripts, the
+depth statistics, checkpoint selection); automate_condition is the one place a later split rule plugs in.
 """
 
 from __future__ import annotations
@@ -32,6 +48,8 @@ CHUNK = 16                           # joint targets per policy output (0.8 s at
 CONTEXT, STRIDE_IMG = 4, 2           # the policy's pictures: 4, every second stored picture (0.4 s apart)
 POLICY_KINDS = ("reference", "insert", "perturbed")       # successful expert trajectories, as the old policy
 SELECT_ONE_IN = 20
+MIN_SELECT_GRASPS = 20               # AutoMate: checkpoints are not chosen on fewer selection grasps (train_wm320.py
+                                     # refuses such data; the collector's plan counts against it before collecting)
 FORMAT = "wm-fast-1"
 SUCCESS = {"depth_left_mm": 1.25, "angle_deg": 4.0, "lateral_mm": 2.0}      # the one success criterion (truth, at the end)
 
@@ -49,6 +67,48 @@ def split320(port: str, pitch_deg: float, pos_m: float, grasp: str) -> str:
     return "select" if zlib.crc32(grasp.encode()) % SELECT_ONE_IN == 0 else "train"
 
 
+# ---------------------------------------------------------------- AutoMate's split (from the stored condition)
+AUTOMATE_SPLIT_OF_CONDITION = {"train": "train", "select": "select", "heldout": "heldout", "heldout_grasp": "heldout",
+                               "heldout_shape": "heldout", "test": "test"}
+UNDECIDED = "unassigned"
+
+
+class SplitUndecided(ValueError):
+    """An AutoMate grasp without a decided split. A ValueError (not SystemExit), so that a collection-time check that
+    catches Exception still writes its report; the training-side scripts turn it into SystemExit."""
+
+
+def is_automate(e: dict) -> bool:
+    return e.get("simulator") == "automate"
+
+
+def automate_condition(e: dict) -> str | None:
+    """The condition of an AutoMate entry or grasp.json: the stored per-grasp `condition` (collect.SPLIT_RULES at
+    collection time). The one plug point for a split rule decided after collection (e.g. a versioned split file keyed
+    by grasp name): it must be applied here, so that every consumer sees it; train_files_sha256 hashes this value
+    for AutoMate entries, so a new rule changes it. No such rule exists yet; the stored value is returned unchanged."""
+    return e.get("condition")
+
+
+def split_of_entry(e: dict, allow_undecided: bool = False) -> str:
+    """The split of a manifest entry or grasp.json. ManiSkill (no simulator key): split320, unchanged. AutoMate: the
+    stored condition through AUTOMATE_SPLIT_OF_CONDITION; "unassigned" or a missing condition raises SplitUndecided
+    (allow_undecided: returns "unassigned" instead, for collection-time reports only); an unknown condition always
+    raises."""
+    if not is_automate(e):
+        return split320(e["port"], e["pitch_deg"], e["grasp_pos_m"], e["grasp"])
+    c = automate_condition(e)
+    if c in AUTOMATE_SPLIT_OF_CONDITION:
+        return AUTOMATE_SPLIT_OF_CONDITION[c]
+    if c in (None, UNDECIDED):
+        if allow_undecided:
+            return UNDECIDED
+        raise SplitUndecided(f"AutoMate grasp {e.get('grasp')} has no decided split (condition {c!r}): the train / "
+                             "held-out split of AutoMate is not decided yet")
+    raise SplitUndecided(f"AutoMate grasp {e.get('grasp')} has the unknown condition {c!r} "
+                         f"(known: {sorted(AUTOMATE_SPLIT_OF_CONDITION)})")
+
+
 def group320(port: str, pitch_deg: float, pos_m: float, grasp: str) -> str:
     """Reporting group of a grasp: unseen_shape, interior_strip, test_port, select, train_outer, train_band."""
     s, x = split320(port, pitch_deg, pos_m, grasp), pos_m * 1000
@@ -59,6 +119,14 @@ def group320(port: str, pitch_deg: float, pos_m: float, grasp: str) -> str:
     if s == "select":
         return "select"
     return "train_outer" if pitch_deg < -55 or pitch_deg > -25 or x < -28 or x > -12 else "train_band"
+
+
+def group_of_entry(e: dict) -> str:
+    """group320 of a grasp.json / entry; AutoMate has no reporting groups yet (they follow its split rule: held-out
+    shape, the band of each grasp variable), so it is refused rather than reported as ManiSkill's groups."""
+    if is_automate(e):
+        raise ValueError(f"AutoMate grasp {e.get('grasp')}: no reporting groups for AutoMate yet (group320 is ManiSkill's)")
+    return group320(e["port"], e["pitch_deg"], e["grasp_pos_m"], e["grasp"])
 
 
 # ---------------------------------------------------------------- pictures
@@ -86,9 +154,11 @@ def jpeg_roundtrip(rgb: np.ndarray) -> np.ndarray:
 
 
 # ---------------------------------------------------------------- conversion
-def convert(src: str | Path, dst: str | Path, pin_length_m: float, rel: str) -> dict | None:
+def convert(src: str | Path, dst: str | Path, pin_length_m: float, rel: str, allow_test: bool = False) -> dict | None:
     """One trajectory of wm_v1 -> its fast copy; returns the manifest entry, None if it has no pictures.
-    Every depth picture is decoded again and compared with the source before the file is written."""
+    Every depth picture is decoded again and compared with the source before the file is written. An AutoMate
+    trajectory of condition "test" raises ValueError (allow_test: only for the collection-time data check, whose
+    copy is a scratch folder, scripts/automate/check_expert_data.py)."""
     with np.load(src) as z:
         meta = json.loads(str(z["meta"]))
         if "img_step" not in z.files or len(z["img_step"]) == 0:
@@ -103,6 +173,10 @@ def convert(src: str | Path, dst: str | Path, pin_length_m: float, rel: str) -> 
         if not np.array_equal(decode_depth(blob, off, i), d):
             raise ValueError(f"{src}: depth picture {i} does not survive the PNG round trip")
     meta.update(pin_length_m=float(pin_length_m), format=FORMAT, source=rel)
+    if is_automate(meta):
+        if automate_condition(meta) == "test" and not allow_test:
+            raise ValueError(f"{src}: AutoMate trajectory of condition 'test' (a final-test assembly): never copied")
+        meta = fast_meta(meta)
     dst = Path(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
     tmp = dst.with_name(dst.name + ".tmp.npz")
@@ -111,17 +185,121 @@ def convert(src: str | Path, dst: str | Path, pin_length_m: float, rel: str) -> 
     return entry_of(meta, rel, len(img))
 
 
+# keys an AutoMate fast-copy meta may hold (no simulator truth: no eval_*, truth, peak, stages, start_error_mm,
+# depth_left_mm, placement_failures, tip_centre_m, disassembly_dist_m, and no episode_seed / seed_offset / rng, which
+# regenerate the socket pose). expert_completed and automate_success_any are scalar outcomes (module docstring,
+# imitation set). No tilt_definition: the labels use the full angle only (wmdata320, decision 9 of 2026-11-22).
+FAST_META_AUTOMATE = ("grasp", "port", "condition", "kind", "outcome", "expert_completed", "automate_success_any", "steps",
+                      "idx", "H_star", "axis", "pin_length_m", "pitch_deg", "grasp_pos_m", "spin_deg", "u", "simulator",
+                      "symmetry_n", "switches", "start", "schema", "rgb_codec", "format", "source", "assembly_id",
+                      "config_sha", "plan_sha")
+AUTOMATE_ENTRY_KEYS = ("expert_completed", "automate_success_any")    # AutoMate's extra manifest-entry keys
+
+
+def fast_meta(meta: dict) -> dict:
+    """An AutoMate trajectory's meta reduced to FAST_META_AUTOMATE."""
+    return {k: meta[k] for k in FAST_META_AUTOMATE if k in meta}
+
+
 def entry_of(meta: dict, rel: str, n_images: int) -> dict:
+    """Manifest entry. "simulator", expert_completed and automate_success_any only when the meta has them (AutoMate
+    data): ManiSkill entries are unchanged. An AutoMate meta with a key outside FAST_META_AUTOMATE is refused
+    (simulator truth in the fast copy)."""
+    am = {}
+    if is_automate(meta):
+        extra = sorted(set(meta) - set(FAST_META_AUTOMATE))
+        if extra:
+            raise ValueError(f"{rel}: AutoMate fast-copy meta holds keys outside the allow-list {extra}: delete the file "
+                             "and convert it again")
+        am = {k: meta[k] for k in AUTOMATE_ENTRY_KEYS if k in meta}
     return {"path": rel, "n_images": int(n_images), "steps": int(meta["steps"]),
-            **{k: meta[k] for k in ("port", "grasp", "condition", "kind", "outcome", "pitch_deg", "grasp_pos_m", "pin_length_m")}}
+            **{k: meta[k] for k in ("port", "grasp", "condition", "kind", "outcome", "pitch_deg", "grasp_pos_m", "pin_length_m")},
+            **({"simulator": meta["simulator"]} if "simulator" in meta else {}), **am}
 
 
-def load_entries(root: str | Path) -> list[dict]:
-    """The fast copy's trajectories with their split and `bc` (the policy imitates it: a successful expert trajectory)."""
+def is_bc(e: dict) -> bool:
+    """The policy imitates the trajectory (module docstring, imitation set). An AutoMate entry of a policy kind with
+    outcome "inserted" but without expert_completed (a fast copy written before 2026-11-23) raises ValueError."""
+    if e["kind"] not in POLICY_KINDS or e.get("outcome") != "inserted":
+        return False
+    if not is_automate(e):
+        return True
+    if "expert_completed" not in e:
+        raise ValueError(f"{e.get('path')}: AutoMate entry without expert_completed (a fast copy written before the "
+                         "imitation rule of 2026-11-23): delete the fast copy and convert it again")
+    return bool(e["expert_completed"])
+
+
+def split_identity(collection: str | Path) -> dict | None:
+    """The split an AutoMate collection was made with: its plan.json's split name and file, the file's sha256 and the
+    plan_sha. None when the folder has no plan.json (ManiSkill data). SystemExit when plan.json names a split file
+    that is missing, or whose content is not the plan's (the file must equal plan.json's split "document" plus its
+    plan_sha, as collect.freeze writes it: a hand-edited or stale file is never hashed and carried). Carried by the
+    fast copy's manifest ("split"), depth_stats.json, train_files_sha256 and the checkpoint provenance, so that a
+    model is never evaluated against another collection's test list."""
+    import hashlib
+    plan_f = Path(collection) / "plan.json"
+    if not plan_f.exists():
+        return None
+    plan = json.loads(plan_f.read_text())
+    sp = plan.get("split") or {}
+    out = {"name": sp.get("name"), "file": sp.get("file"), "sha256": None, "plan_sha": plan.get("plan_sha")}
+    if sp.get("file"):
+        f = Path(collection) / sp["file"]
+        if not f.exists():
+            raise SystemExit(f"{plan_f} names the split file {sp['file']}, which is missing")
+        raw = f.read_bytes()
+        try:
+            doc = json.loads(raw)
+        except ValueError as exc:
+            raise SystemExit(f"{f}: not json ({exc})")
+        want = {**(sp.get("document") or {}), "plan_sha": plan.get("plan_sha")}
+        if not isinstance(doc, dict) or doc != want:
+            diff = sorted(k for k in set(want) | set(doc if isinstance(doc, dict) else {})
+                          if not isinstance(doc, dict) or doc.get(k) != want.get(k))
+            raise SystemExit(f"{f} differs from {plan_f} (split document and plan_sha) in {diff[:6]}: the split file must "
+                             "be the one collect.freeze wrote for this plan")
+        out["sha256"] = hashlib.sha256(raw).hexdigest()
+    return out
+
+
+def train_files_sha256(entries: list[dict], root: str | Path) -> str:
+    """Identifies the training split and its files behind depth statistics (depth_stats.py, train_wm320.py): sha256
+    of the manifest's source and, per entry sorted by path, (path, n_images, steps, condition, file size in bytes);
+    the condition of an AutoMate entry is automate_condition(e) (a later split rule changes the hash). A manifest
+    with a split identity (AutoMate, split_identity) also folds it in; ManiSkill manifests have none, so their hash is
+    the one of before. A re-collection or rewrite at the same paths, a changed condition or split file changes it."""
+    import hashlib
+    man = json.loads((Path(root) / "manifest.json").read_text())
+    rows = sorted([e["path"], int(e["n_images"]), int(e["steps"]), automate_condition(e) if is_automate(e) else e.get("condition"),
+                   os.stat(Path(root) / e["path"]).st_size] for e in entries)
+    doc = {"source": man.get("source"), "entries": rows}
+    if man.get("split") is not None:
+        doc["split"] = man["split"]
+    return hashlib.sha256(json.dumps(doc).encode()).hexdigest()
+
+
+def check_automate_conditions(grasps: list[dict]) -> None:
+    """SystemExit unless every AutoMate grasp (simulator "automate") has a decided, known split (split_of_entry).
+    Grasps without a simulator key (ManiSkill) are not looked at."""
+    bad = []
+    for g in grasps:
+        if is_automate(g):
+            try:
+                split_of_entry(g)
+            except SplitUndecided as exc:
+                bad.append(str(exc))
+    if bad:
+        raise SystemExit(f"{len(bad)} AutoMate grasps have no usable split, e.g. {bad[:3]}")
+
+
+def load_entries(root: str | Path, allow_undecided: bool = False) -> list[dict]:
+    """The fast copy's trajectories with their split (split_of_entry) and `bc` (is_bc: the policy imitates it, a
+    successful expert trajectory; module docstring). An AutoMate entry without a decided split raises SplitUndecided
+    (a ValueError); allow_undecided (collection-time reports only) gives it the split "unassigned" instead."""
     out = []
     for e in json.loads((Path(root) / "manifest.json").read_text())["entries"]:
-        out.append({**e, "split": split320(e["port"], e["pitch_deg"], e["grasp_pos_m"], e["grasp"]),
-                    "bc": e["kind"] in POLICY_KINDS and e.get("outcome") == "inserted"})
+        out.append({**e, "split": split_of_entry(e, allow_undecided), "bc": is_bc(e)})
     return out
 
 
@@ -156,8 +334,10 @@ def policy_sample(path: str | Path, j: int) -> dict:
     rgb = {i: decode_rgb(jb, jo, i) for i in set(idx)}
     dep = {i: np.minimum(decode_depth(pb, po, i), 32767).astype(np.int16) for i in set(idx)}
     s0 = int(img[j])
+    q = qpos[s0, :JOINTS].astype(np.float32)          # the arm's 7 joints only: qpos[7:9] (fingers) is an exact
+    assert q.shape == (JOINTS,)                        # function of the true AutoMate grasp, never a model input
     return {"rgb": np.stack([rgb[i] for i in idx]), "depth": np.stack([dep[i] for i in idx]),
-            "q": qpos[s0, :JOINTS].astype(np.float32), "a": policy_chunk(qpos, act, s0)}
+            "q": q, "a": policy_chunk(qpos, act, s0)}
 
 
 def action_stats(root: str | Path, entries: list[dict], n: int = 20000, seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
