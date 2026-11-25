@@ -34,11 +34,14 @@ repeat the single-GPU stream).
     python world_model/scripts/train/train_wm320.py --data $Q/data/wm_v1_fast --out <run> --stem standard --shift-px 4 --shaping 0.3
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import math
 import os
 import random
+import signal
 import time
 from collections import defaultdict
 from contextlib import nullcontext
@@ -58,6 +61,47 @@ from wm.training.common import Logger, cycle, seed_all
 
 
 RS = 1_000_003                         # seed stride between processes (no (process, step) pair repeats)
+
+
+class GracefulStopper:
+    """Catch SIGTERM / SIGUSR1 (e.g., Slurm walltime warning / preemption) and request a clean stop after the current step."""
+
+    def __init__(self, signals=(signal.SIGTERM, signal.SIGUSR1)):
+        self.requested = False
+        self.signum: int | None = None
+        self._prev: dict[int, object] = {}
+        self._signals = tuple(signals)
+
+    def _handler(self, signum, _frame):
+        self.requested = True
+        self.signum = int(signum)
+
+    def install(self) -> "GracefulStopper":
+        for sig in self._signals:
+            try:
+                self._prev[sig] = signal.getsignal(sig)
+                signal.signal(sig, self._handler)
+            except (OSError, ValueError):
+                pass
+        return self
+
+    def restore(self) -> None:
+        for sig, prev in self._prev.items():
+            try:
+                signal.signal(sig, prev)
+            except (OSError, ValueError):
+                pass
+        self._prev.clear()
+
+    @property
+    def reason(self) -> str | None:
+        if not self.requested:
+            return None
+        try:
+            name = signal.Signals(self.signum).name
+        except Exception:
+            name = str(self.signum)
+        return f"signal_{name}"
 
 
 def save(obj, path: Path):
@@ -87,7 +131,7 @@ def _finished_grasps(r: Path) -> list[dict]:
     return out
 
 
-def online_entries(pool) -> tuple[list[dict], list[str]]:
+def online_entries(pool, split_mode: str = "split320") -> tuple[list[dict], list[str]]:
     """Trajectories of the online pool (absolute paths), with split and bc: the complete rounds (DONE + manifest) and,
     of a round still being collected, its finished grasps (2026-11-18, the user's decision: the learner uses a round
     while it is collected; those entries carry partial=True). Returns them and the names of the complete rounds."""
@@ -101,9 +145,9 @@ def online_entries(pool) -> tuple[list[dict], list[str]]:
         else:
             ents, partial = _finished_grasps(r), True
         for e in ents:
-            sp = D.split320(e["port"], e["pitch_deg"], e["grasp_pos_m"], e["grasp"])
+            sp = D._call_split(e["port"], e["pitch_deg"], e["grasp_pos_m"], e["grasp"], split_mode)
             if sp != "train":
-                raise SystemExit(f"online trajectory {e['path']} is of split {sp}: the pool must hold training grasps only")
+                raise SystemExit(f"online trajectory {e['path']} is of split {sp} (split_mode={split_mode}): the pool must hold training grasps only")
             if e["steps"] >= WD.EXECUTE and (not partial or (Path(pool) / e["path"]).exists()):
                 out.append({**e, "path": str(Path(pool) / e["path"]), "split": sp, "bc": e.get("outcome") == "seated_fk", "partial": partial})
     return out, rounds
@@ -192,10 +236,16 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--stem", required=True, choices=["standard", "nopool"])
     ap.add_argument("--imagenet", action="store_true", help="the ResNet starts from ImageNet weights (policy320.PictureTokens.init_imagenet)")
-    ap.add_argument("--offset-weight", type=float, default=0.0, help="> 0: the training-only offset read-out head on z (wm320.WM320)")
-    ap.add_argument("--shift-px", type=int, required=True)
+    ap.add_argument("--offset-weight", type=float, default=0.0, help="> 0: offset read-out head on z (wm320.WM320)")
+    ap.add_argument("--offset-mode", choices=list(WD.OFFSET_MODES), default="gap",
+                    help="dim 0 target of _offset head: 'gap' = zero-privilege pin-tip gap (-along - L) [recommended default]; 'along' = legacy")
+    ap.add_argument("--split-mode", choices=list(D.SPLIT_MODES), default="split320",
+                    help="split320 = Changhao's default split; strict_extrap = also hold out outer extrap grasp bands")
+    ap.add_argument("--shift-px", type=int, default=0, help="random pixel shift per window/sample (0 = recommended clean setting)")
     ap.add_argument("--shaping", type=float, required=True)
     ap.add_argument("--steps", type=int, default=100000)
+    ap.add_argument("--max-steps-this-job", "--stop-after-steps", dest="max_steps_this_job", type=int, default=None,
+                    help="optional step cap for this job (Slurm segmented runs): save last.pt and exit 0 cleanly (no DONE.json) before --steps")
     ap.add_argument("--wm-batch", type=int, required=True)
     ap.add_argument("--bc-batch", type=int, required=True)
     ap.add_argument("--accum", type=int, required=True)
@@ -224,6 +274,8 @@ def main():
     resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))          # ("received 0 items of ancdata") at step 15,000
     if args.offset_weight < 0:
         raise SystemExit("--offset-weight must be >= 0")
+    if args.max_steps_this_job is not None and args.max_steps_this_job < 1:
+        raise SystemExit("--max-steps-this-job must be >= 1")
     ddp = int(os.environ.get("WORLD_SIZE", "1")) > 1
     if ddp:
         local = int(os.environ["LOCAL_RANK"])
@@ -248,7 +300,7 @@ def main():
         raise SystemExit(refuse)
     if main_rank:
         run.mkdir(parents=True, exist_ok=True)
-    ents = [e for e in D.load_entries(args.data) if e["split"] != "test" and e["steps"] >= WD.EXECUTE]
+    ents = [e for e in D.load_entries(args.data, split_mode=args.split_mode) if e["split"] != "test" and e["steps"] >= WD.EXECUTE]
     by = {s: [e for e in ents if e["split"] == s] for s in ("train", "select", "heldout")}
     ck = torch.load(run / "last.pt", map_location="cpu", weights_only=False) if resume else None
     if ck and ck.get("labels") != WD.LABELS:                       # a changed design is trained from scratch, never resumed
@@ -257,6 +309,10 @@ def main():
         raise SystemExit(f"{run}/last.pt has imagenet={ck.get('imagenet', False)}, --imagenet is {args.imagenet}: start a new run")
     if ck and ck.get("offset_weight", 0.0) != args.offset_weight:
         raise SystemExit(f"{run}/last.pt has offset_weight={ck.get('offset_weight', 0.0)}, --offset-weight is {args.offset_weight}: start a new run")
+    if ck and (args.offset_weight > 0 or ck.get("offset_weight", 0.0) > 0) and ck.get("offset_mode", "along") != args.offset_mode:
+        raise SystemExit(f"{run}/last.pt has offset_mode={ck.get('offset_mode', 'along')}, --offset-mode is {args.offset_mode}: start a new run")
+    if ck and ck.get("split_mode", "split320") != args.split_mode:
+        raise SystemExit(f"{run}/last.pt has split_mode={ck.get('split_mode', 'split320')}, --split-mode is {args.split_mode}: start a new run")
     if ck:
         stats = ck["stats"]
     else:
@@ -275,10 +331,10 @@ def main():
         bce = [e for e in by[name] if e["bc"]]
         bi = D.policy_items(bce)
         bi = bi[np.sort(rng.choice(len(bi), min(1024, len(bi)), replace=False))]
-        mk = lambda items: [{k: v.clone() for k, v in b.items()} for b in loader(WindowData(args.data, by[name], items, stats, args.shaping, args.gamma), 16, 4, 0, False)]  # noqa: E731
+        mk = lambda items: [{k: v.clone() for k, v in b.items()} for b in loader(WindowData(args.data, by[name], items, stats, args.shaping, args.gamma, offset_mode=args.offset_mode), 16, 4, 0, False)]  # noqa: E731
         sets[name] = (mk(wi), mk(fi) if len(fi) else [], [], [{k: v.clone() for k, v in b.items()} for b in policy_loader(args.data, bce, 32, 4, shuffle=False, items=bi)])
     torch.manual_seed(args.seed)
-    model = WM320(args.stem, stats, args.shaping, imagenet=args.imagenet, offset_weight=args.offset_weight, gamma=args.gamma)
+    model = WM320(args.stem, stats, args.shaping, imagenet=args.imagenet, offset_weight=args.offset_weight, offset_mode=args.offset_mode, gamma=args.gamma)
     copied = None if ck else model.enc.pic.init_imagenet() if args.imagenet else 0   # identical on every process
     model = model.to(dev)
     net = DDP(model, device_ids=[dev.index], broadcast_buffers=False) if ddp else model     # broadcasts process 0's weights
@@ -295,7 +351,8 @@ def main():
                 torch.cuda.set_rng_state(ck["rng_cuda"][0], dev)
     if ddp:          # the model was built identically everywhere (same seed); from here each process draws its own
         torch.manual_seed(args.seed + RS * rank + step)     # shifts, noise and dropout (a resumed run: a fresh stream from the step on)
-    info0 = {"format": "wm320-1", "labels": WD.LABELS, "stem": args.stem, "imagenet": args.imagenet, "offset_weight": args.offset_weight, "shaping": args.shaping, "cfg": {"gamma": args.gamma}, "stats": stats}
+    info0 = {"format": "wm320-1", "labels": WD.LABELS, "stem": args.stem, "imagenet": args.imagenet, "offset_weight": args.offset_weight,
+             "offset_mode": args.offset_mode, "split_mode": args.split_mode, "shaping": args.shaping, "cfg": {"gamma": args.gamma}, "stats": stats}
 
     def checkpoint(full: bool):
         c = {**info0, "state": model.state_dict(), "step": step, "skipped": skipped, "args": vars(args)}
@@ -322,10 +379,10 @@ def main():
         """Windows: the fast copy alone, or wm_batch - wo from it and wo from the online pool; imitation: the
         successful demonstrations and the online attempts that ended seated (FK)."""
         sd = args.seed + RS * rank + step
-        ws = WindowData(args.data, by["train"], window_items(by["train"]), stats, args.shaping, args.gamma)
+        ws = WindowData(args.data, by["train"], window_items(by["train"]), stats, args.shaping, args.gamma, offset_mode=args.offset_mode)
         wl = [cycle(loader(ws, args.wm_batch - (wo if mix else 0), args.workers_wm, sd))]
         if mix:                                                # (fewer windows than wo: a drop_last loader would never yield)
-            wl.append(cycle(loader(WindowData(args.data, onl, window_items(onl), stats, args.shaping, args.gamma), wo,
+            wl.append(cycle(loader(WindowData(args.data, onl, window_items(onl), stats, args.shaping, args.gamma, offset_mode=args.offset_mode), wo,
                                    args.workers_wm // 2, sd + 3)))
         bce = [e for e in by["train"] if e["bc"]] + ([e for e in onl if e["bc"]] if mix else [])     # online data only once mixed in
         return wl, cycle(loader(PolicyData(args.data, bce, bc_items(bce)), args.bc_batch, args.workers_bc, sd + 1))
@@ -338,73 +395,105 @@ def main():
             online_partial_trajectories=sum(bool(e.get("partial")) for e in onl), online_windows_per_micro_batch=wo if mix else 0)
 
     if args.online:
-        onl, rounds_in = online_entries(args.online)
+        onl, rounds_in = online_entries(args.online, split_mode=args.split_mode)
         mix = mixes(onl)
     wtrain, btrain = make_loaders()
     data_record()
     params = [p for p in model.parameters() if p.requires_grad]
-    acc, t0, event = defaultdict(list), time.time(), "done"
+    acc, t0, event, steps_this_job = defaultdict(list), time.time(), "done", 0
     early = {500, 1000, 2500}
-    while step < args.steps:
-        step += 1
-        opt.zero_grad(set_to_none=True)
-        finite = True
-        if args.online and step % args.refresh_every == 0:
-            new, names = online_entries(args.online)
-            if names != rounds_in or len(new) - len(onl) >= args.online_reload or mixes(new) != mix:
-                del wtrain, btrain                                     # the old loaders' workers end with them
-                onl, rounds_in = new, names
-                mix = mixes(onl)
-                wtrain, btrain = make_loaders()
-                data_record()
-        for i in range(args.accum):
-            W = to(next(wtrain[0]), dev) if len(wtrain) == 1 else cat(to(next(wtrain[0]), dev), to(next(wtrain[1]), dev))
-            Bc = to(next(btrain), dev)
-            W["rgb"], W["depth"] = shift(W["rgb"], W["depth"], args.shift_px)
-            Bc["rgb"], Bc["depth"] = shift(Bc["rgb"], Bc["depth"], args.shift_px)
-            with net.no_sync() if ddp and i < args.accum - 1 else nullcontext():   # gradients averaged once, at the last micro-batch
-                loss, info = net(W, Bc, step, args.td_warmup, args.bc_weight)
-                (loss / args.accum).backward()
-            finite &= math.isfinite(info["total"])
-            for k, v in info.items():
-                acc[k].append(v)
-        gn = float(torch.nn.utils.clip_grad_norm_(params, 20.0))
-        if ddp:                                                      # every process takes the same decision
-            flag = torch.tensor([float(finite)], device=dev)
-            dist.all_reduce(flag, op=dist.ReduceOp.MIN)
-            finite = bool(flag.item() > 0)
-        if finite and math.isfinite(gn):
-            opt.step()
-            model.update_target()
-        else:
-            skipped += 1
-            log(event="skipped_nonfinite_step", step=step, skipped=skipped)
-            if skipped >= 50:
-                event = "stop_nonfinite"
+    stopper = GracefulStopper().install()
+    try:
+        while step < args.steps:
+            sig_stop = stopper.requested
+            if ddp:
+                sflag = torch.tensor([1.0 if sig_stop else 0.0], device=dev)
+                dist.all_reduce(sflag, op=dist.ReduceOp.MAX)
+                sig_stop = bool(sflag.item() > 0)
+            if sig_stop:
+                if main_rank and (step > 0 or ck is not None):
+                    save(checkpoint(True), run / "last.pt")
+                event = stopper.reason or "signal_stop"
                 break
-        acc["grad_norm"].append(gn)
-        if step % 250 == 0:
-            keys = sorted(acc)
-            means = torch.tensor([float(np.mean(acc[k])) for k in keys], dtype=torch.float64, device=dev)
-            gpu = torch.tensor([torch.cuda.max_memory_allocated(dev) / 1e9 if dev.type == "cuda" else 0.0], dtype=torch.float64, device=dev)
-            if ddp:                                                  # every process: the same keys, the same steps
-                dist.all_reduce(means)
-                means /= world
-                dist.all_reduce(gpu, op=dist.ReduceOp.MAX)
-            log(step=step, it_per_s=250 / (time.time() - t0), gpu_GB=float(gpu[0]), **{k: float(v) for k, v in zip(keys, means.tolist())})
-            acc, t0 = defaultdict(list), time.time()
-        if main_rank and step % args.keep_every == 0:
-            save(checkpoint(False), run / f"step{step}.pt")
-        if main_rank and step % args.save_every == 0:
-            save(checkpoint(True), run / "last.pt")
-        if main_rank and (step in early or step % args.eval_every == 0 or step == args.steps):
-            rec = validate(model, sets, args, dev)
-            log(event="val", step=step, **rec)
-            t0 = time.time()
-    log(event=event, step=step)
+            step += 1
+            opt.zero_grad(set_to_none=True)
+            finite = True
+            if args.online and step % args.refresh_every == 0:
+                new, names = online_entries(args.online, split_mode=args.split_mode)
+                if names != rounds_in or len(new) - len(onl) >= args.online_reload or mixes(new) != mix:
+                    del wtrain, btrain                                     # the old loaders' workers end with them
+                    onl, rounds_in = new, names
+                    mix = mixes(onl)
+                    wtrain, btrain = make_loaders()
+                    data_record()
+            for i in range(args.accum):
+                W = to(next(wtrain[0]), dev) if len(wtrain) == 1 else cat(to(next(wtrain[0]), dev), to(next(wtrain[1]), dev))
+                Bc = to(next(btrain), dev)
+                W["rgb"], W["depth"] = shift(W["rgb"], W["depth"], args.shift_px)
+                Bc["rgb"], Bc["depth"] = shift(Bc["rgb"], Bc["depth"], args.shift_px)
+                with net.no_sync() if ddp and i < args.accum - 1 else nullcontext():   # gradients averaged once, at the last micro-batch
+                    loss, info = net(W, Bc, step, args.td_warmup, args.bc_weight)
+                    (loss / args.accum).backward()
+                finite &= math.isfinite(info["total"])
+                for k, v in info.items():
+                    acc[k].append(v)
+            gn = float(torch.nn.utils.clip_grad_norm_(params, 20.0))
+            if ddp:                                                      # every process takes the same decision
+                flag = torch.tensor([float(finite)], device=dev)
+                dist.all_reduce(flag, op=dist.ReduceOp.MIN)
+                finite = bool(flag.item() > 0)
+            if finite and math.isfinite(gn):
+                opt.step()
+                model.update_target()
+            else:
+                skipped += 1
+                log(event="skipped_nonfinite_step", step=step, skipped=skipped)
+                if skipped >= 50:
+                    event = "stop_nonfinite"
+                    break
+            steps_this_job += 1
+            acc["grad_norm"].append(gn)
+            if step % 250 == 0:
+                keys = sorted(acc)
+                means = torch.tensor([float(np.mean(acc[k])) for k in keys], dtype=torch.float64, device=dev)
+                gpu = torch.tensor([torch.cuda.max_memory_allocated(dev) / 1e9 if dev.type == "cuda" else 0.0], dtype=torch.float64, device=dev)
+                if ddp:                                                  # every process: the same keys, the same steps
+                    dist.all_reduce(means)
+                    means /= world
+                    dist.all_reduce(gpu, op=dist.ReduceOp.MAX)
+                log(step=step, it_per_s=250 / (time.time() - t0), gpu_GB=float(gpu[0]), **{k: float(v) for k, v in zip(keys, means.tolist())})
+                acc, t0 = defaultdict(list), time.time()
+            sig_stop = stopper.requested
+            if ddp:
+                sflag = torch.tensor([1.0 if sig_stop else 0.0], device=dev)
+                dist.all_reduce(sflag, op=dist.ReduceOp.MAX)
+                sig_stop = bool(sflag.item() > 0)
+            if sig_stop:
+                if main_rank:
+                    save(checkpoint(True), run / "last.pt")
+                event = stopper.reason or "signal_stop"
+                break
+            if main_rank and step % args.keep_every == 0:
+                save(checkpoint(False), run / f"step{step}.pt")
+            if main_rank and step % args.save_every == 0:
+                save(checkpoint(True), run / "last.pt")
+            if main_rank and (step in early or step % args.eval_every == 0 or step == args.steps):
+                rec = validate(model, sets, args, dev)
+                log(event="val", step=step, **rec)
+                t0 = time.time()
+            if args.max_steps_this_job is not None and steps_this_job >= args.max_steps_this_job and step < args.steps:
+                if main_rank and step % args.save_every != 0:
+                    save(checkpoint(True), run / "last.pt")
+                event = "segment_done"
+                break
+    finally:
+        stopper.restore()
+    log(event=event, step=step, steps_this_job=steps_this_job)
     if ddp:
         dist.barrier()
         dist.destroy_process_group()
+    if event == "segment_done" or event.startswith("signal_"):
+        return
     if event != "done":
         raise SystemExit(1)
     if main_rank:

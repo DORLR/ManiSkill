@@ -26,6 +26,8 @@ Workers are spread over the GPUs given (--gpus), one GPU per worker (renderer an
         --split train --pool $Q/data/online320 --round 1 --starts 3 --workers 6 --gpus 3,4,5,6,7,2
 """
 
+from __future__ import annotations
+
 import argparse
 import glob
 import json
@@ -35,6 +37,7 @@ import shutil
 import sys
 import time
 import traceback
+from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
@@ -298,13 +301,54 @@ def run_pool(jobs: list, args, gpus: list[int]) -> None:
         left = [j for j in left if id(j) not in ran]
 
 
+def _matches_split(g: dict, split: str, split_mode: str) -> bool:
+    if split == "any":
+        return g["port"] not in D.TEST_PORTS
+    if split == "extrap":
+        return D.group320(g["port"], g["pitch_deg"], g["grasp_pos_m"], g["grasp"], split_mode=split_mode) == "extrap_outer"
+    return D._call_split(g["port"], g["pitch_deg"], g["grasp_pos_m"], g["grasp"], split_mode) == split
+
+
+def _summarise(out: Path, gs: list[dict], starts: int, extra: dict, split_mode: str) -> tuple[dict, bool]:
+    """Same summary schema as eval_policy320.summarise, using split_mode-aware group320 when split_mode != 'split320'."""
+    if split_mode == "split320":
+        return E.summarise(out, gs, starts, extra)
+    rows, count = [], Counter()
+    for g in gs:
+        f = out / g["port"] / f"{g['grasp']}.json"
+        state = E.grasp_state(f)
+        count[state] += 1
+        if state != "done":
+            continue
+        grp = D.group320(g["port"], g["pitch_deg"], g["grasp_pos_m"], g["grasp"], split_mode=split_mode)
+        for st in json.loads(f.read_text())["starts"]:
+            if "attempt" in st:
+                rows.append((grp, g["port"] if grp == "unseen_shape" else g["grasp"], bool(st["attempt"]["success"]), st["attempt"]["stopped"], g["grasp"]))
+            else:
+                count["placement_failed_starts"] += 1
+    groups = {}
+    for name in ["all"] + sorted({r[0] for r in rows}):
+        sel = [r for r in rows if name == "all" or r[0] == name]
+        groups[name] = {**E.cluster_rate([r[2] for r in sel], [r[1] for r in sel]), "grasps": len({r[4] for r in sel}),
+                        "ended": dict(Counter(f"{r[3]}/{'success' if r[2] else 'failure'}" for r in sel))}
+    complete = count["crash"] == 0 and count["missing"] == 0
+    summary = {"criterion": "depth left < 1.25 mm and tilt < 4 deg and lateral < 2 mm (simulator truth at the end)", "complete": complete,
+               "planned_grasps": len(gs), "planned_starts": len(gs) * starts, "judged_starts": len(rows),
+               "placement_failed_starts": count["placement_failed_starts"], "unusable_grasps": count["setup"],
+               "crashed_grasps": count["crash"] + count["missing"], "groups": groups, **extra}
+    return summary, complete
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--grasps", required=True)
     ap.add_argument("--ckpt", required=True)
-    ap.add_argument("--mode", required=True, choices=["act", "wm", "collect", "servo", "random"])
-    ap.add_argument("--split", required=True, choices=["train", "select", "heldout", "test", "any"],
-                    help="any: every grasp of --grasps but the test ports (tests only; for make_combo_grasps.py's cells)")
+    ap.add_argument("--mode", required=True, choices=["act", "act_done", "wm", "collect", "servo", "random"])
+    ap.add_argument("--split", required=True, choices=["train", "select", "heldout", "extrap", "test", "any"],
+                    help="any: every grasp of --grasps but the test ports (tests only; for make_combo_grasps.py's cells); "
+                         "extrap: extrap_outer grasps only (requires --split-mode strict_extrap)")
+    ap.add_argument("--split-mode", choices=list(D.SPLIT_MODES), default="split320",
+                    help="split320 = Changhao's default split; strict_extrap = also hold out outer extrap grasp bands")
     ap.add_argument("--final-test", action="store_true")
     ap.add_argument("--out", help="result files (default: <pool>/r<round>/results for collect)")
     ap.add_argument("--pool", help="collect: the online pool")
@@ -338,6 +382,8 @@ def main():
     if args.split == "test" and not args.final_test:
         raise SystemExit("ports A-D are the final test and stay untouched: --split test needs --final-test")
     collect = args.mode == "collect"
+    if args.split == "extrap" and (collect or args.split_mode != "strict_extrap"):
+        raise SystemExit("--split extrap is for non-collect evaluation with --split-mode strict_extrap")
     if args.split == "any" and (collect or args.final_test or args.grasps_n):
         raise SystemExit("--split any is for tests of generated grasps (make_combo_grasps.py), all of them")
     if collect != (args.split == "train"):
@@ -346,6 +392,8 @@ def main():
         raise SystemExit("collect needs --pool and --round >= 1")
     if collect and args.record:
         raise SystemExit("--record is for tests; collect writes its trajectories to the pool")
+    if args.mode == "act_done" and args.inside_mm is not None:
+        raise SystemExit("--mode act_done has no candidate corrections and does not accept --inside-mm")
     if args.mode in ("servo", "random") and args.inside_mm is None:
         raise SystemExit(f"--mode {args.mode} is an ablation of the in-hole agent: it needs --inside-mm")
     random_p = None
@@ -372,17 +420,21 @@ def main():
     if out is None:
         raise SystemExit("--out is needed for a test")
     gpus = [int(x) for x in args.gpus.split(",")]
+    import torch
+    ck_meta = torch.load(args.ckpt, map_location="cpu", weights_only=False)
+    ck_offset_mode = str(ck_meta.get("offset_mode", "along"))
+    ck_split_mode = str(ck_meta.get("split_mode", "split320"))
+    if collect and ck_split_mode == "strict_extrap" and args.split_mode != "strict_extrap":
+        raise SystemExit(f"{args.ckpt} was trained with split_mode=strict_extrap: pass --split-mode strict_extrap to --mode collect")
     if args.inside_mm is not None:                             # the rule reads the offset head; without it, it would be silently off
-        import torch
         if args.inside_mm <= 0:
             raise SystemExit("--inside-mm must be > 0 (a depth inside the hole)")
-        if not torch.load(args.ckpt, map_location="cpu", weights_only=False).get("offset_weight", 0.0) > 0:
+        if not ck_meta.get("offset_weight", 0.0) > 0:
             raise SystemExit(f"--inside-mm needs a checkpoint with the offset read-out head; {args.ckpt} has none")
+    del ck_meta
     seed = args.seed + 1_000_003 * args.round if collect else args.seed
     every = [json.loads(Path(f).read_text()) for f in sorted(glob.glob(f"{args.grasps}/*/*/grasp.json"))]
-    every = [g for g in every if g.get("reference_ok") and (
-        D.split320(g["port"], g["pitch_deg"], g["grasp_pos_m"], g["grasp"]) == args.split
-        or (args.split == "any" and g["port"] not in D.TEST_PORTS))]
+    every = [g for g in every if g.get("reference_ok") and _matches_split(g, args.split, args.split_mode)]
     if args.split == "any" and (not every or not all("pair_index" in g for g in every)):
         raise SystemExit("--split any needs make_combo_grasps.py's grasps (with pair_index) only")
     chosen = E.pick(len(every), args.grasps_n)                     # k = index in the whole list: a grasp keeps its seed
@@ -414,7 +466,8 @@ def main():
         run_pool([(g, str(path[g["grasp"]]), args.starts, seed + 100_003 * (g["pair_index"] if "pair_index" in g else k), a)
                   for k, g in todo], args, gpus)
     out.mkdir(parents=True, exist_ok=True)
-    summary, complete = E.summarise(out, gs, args.starts, {"policy": f"wm320 agent ({args.mode})", "ckpt": args.ckpt, "split": args.split,
+    summary, complete = _summarise(out, gs, args.starts, {"policy": f"wm320 agent ({args.mode})", "ckpt": args.ckpt, "split": args.split,
+                                                          "split_mode": args.split_mode, "offset_mode": ck_offset_mode,
                                                           "mode": args.mode, "round": args.round, "starts_per_grasp": args.starts,
                                                           "margin": args.margin, "horizon": args.horizon, "candidates": args.candidates,
                                                           "radius_mm": args.radius_mm, "max_retries": args.max_retries,
@@ -423,7 +476,7 @@ def main():
                                                           "servo_axis": args.servo_axis if args.mode == "servo" else None,
                                                           "random_p": random_p, "record": a["record"],
                                                           "probe_max": args.probe_max, "probe_gap_mm": args.probe_gap_mm,
-                                                          "seed": args.seed, "grasps_n": args.grasps_n})
+                                                          "seed": args.seed, "grasps_n": args.grasps_n}, args.split_mode)
     rows = [json.loads(path[g["grasp"]].read_text()) for g in gs if E.grasp_state(path[g["grasp"]]) == "done"]
     att = [st["attempt"] for r in rows for st in r.get("starts", []) if "attempt" in st]
     summary["attempts"] = len(att)
@@ -436,10 +489,12 @@ def main():
         entries = [e for r in rows for e in r.get("entries", [])]
         Path(a["record"]).mkdir(parents=True, exist_ok=True)
         (Path(a["record"]) / "manifest.json").write_text(json.dumps({"format": D.FORMAT, "ckpt": args.ckpt, "split": args.split,
+                                                                     "split_mode": args.split_mode, "offset_mode": ck_offset_mode,
                                                                      "mode": args.mode, "entries": entries}))
     if collect:
         entries = [e for r in rows for e in r.get("entries", [])]
-        (rdir / "manifest.json").write_text(json.dumps({"format": D.FORMAT, "round": args.round, "ckpt": args.ckpt, "entries": entries}))
+        (rdir / "manifest.json").write_text(json.dumps({"format": D.FORMAT, "round": args.round, "ckpt": args.ckpt,
+                                                        "split_mode": args.split_mode, "offset_mode": ck_offset_mode, "entries": entries}))
         crashed = summary["crashed_grasps"] / max(1, summary["planned_grasps"])
         if entries and (complete or crashed <= args.max_crashed_frac):
             (rdir / "DONE").write_text(json.dumps({"entries": len(entries), "complete": complete, "crashed_grasps": summary["crashed_grasps"]}))

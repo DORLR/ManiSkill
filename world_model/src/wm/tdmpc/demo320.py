@@ -33,6 +33,7 @@ CONTEXT, STRIDE_IMG = 4, 2           # the policy's pictures: 4, every second st
 POLICY_KINDS = ("reference", "insert", "perturbed")       # successful expert trajectories, as the old policy
 SELECT_ONE_IN = 20
 FORMAT = "wm-fast-1"
+SPLIT_MODES = ("split320", "strict_extrap")
 SUCCESS = {"depth_left_mm": 1.25, "angle_deg": 4.0, "lateral_mm": 2.0}      # the one success criterion (truth, at the end)
 
 
@@ -41,24 +42,49 @@ def is_success(truth: dict) -> bool:
     return all(float(truth[k]) < v for k, v in SUCCESS.items())
 
 
-def split320(port: str, pitch_deg: float, pos_m: float, grasp: str) -> str:
+def is_interior_strip(pitch_deg: float, pos_m: float) -> bool:
+    """Interior interpolation strips held out in both split320 and strict_extrap."""
+    x = pos_m * 1000.0
+    return -42.0 < pitch_deg < -38.0 or -21.0 < x < -19.0
+
+
+def is_extrap_band(pitch_deg: float, pos_m: float) -> bool:
+    """Outer extrapolation bands (pitch <= -55 or >= -25 deg, pos <= -28 or >= -12 mm)."""
+    x = pos_m * 1000.0
+    return pitch_deg <= -55.0 or pitch_deg >= -25.0 or x <= -28.0 or x >= -12.0
+
+
+def split320(port: str, pitch_deg: float, pos_m: float, grasp: str, split_mode: str = "split320") -> str:
+    if split_mode not in SPLIT_MODES:
+        raise ValueError(f"unknown split_mode {split_mode!r}; expected one of {SPLIT_MODES}")
     if port in TEST_PORTS:
         return "test"
-    if port in OOD_VAL_SHAPES or -42.0 < pitch_deg < -38.0 or -21.0 < pos_m * 1000 < -19.0:
+    if port in OOD_VAL_SHAPES or is_interior_strip(pitch_deg, pos_m):
+        return "heldout"
+    if split_mode == "strict_extrap" and is_extrap_band(pitch_deg, pos_m):
         return "heldout"
     return "select" if zlib.crc32(grasp.encode()) % SELECT_ONE_IN == 0 else "train"
 
 
-def group320(port: str, pitch_deg: float, pos_m: float, grasp: str) -> str:
-    """Reporting group of a grasp: unseen_shape, interior_strip, test_port, select, train_outer, train_band."""
-    s, x = split320(port, pitch_deg, pos_m, grasp), pos_m * 1000
+def _call_split(port: str, pitch_deg: float, pos_m: float, grasp: str, split_mode: str = "split320") -> str:
+    """Call split320 preserving 4-arg backwards compatibility when split_mode == 'split320' (tests may monkeypatch split320)."""
+    if split_mode == "split320":
+        return split320(port, pitch_deg, pos_m, grasp)
+    return split320(port, pitch_deg, pos_m, grasp, split_mode=split_mode)
+
+
+def group320(port: str, pitch_deg: float, pos_m: float, grasp: str, split_mode: str = "split320") -> str:
+    """Reporting group of a grasp: unseen_shape, interior_strip, extrap_outer (strict_extrap), test_port, select, train_outer, train_band."""
+    s = _call_split(port, pitch_deg, pos_m, grasp, split_mode)
     if s == "test":
         return "test_port"
     if s == "heldout":
-        return "unseen_shape" if port in OOD_VAL_SHAPES else "interior_strip"
+        if port in OOD_VAL_SHAPES:
+            return "unseen_shape"
+        return "interior_strip" if is_interior_strip(pitch_deg, pos_m) else "extrap_outer"
     if s == "select":
         return "select"
-    return "train_outer" if pitch_deg < -55 or pitch_deg > -25 or x < -28 or x > -12 else "train_band"
+    return "train_outer" if is_extrap_band(pitch_deg, pos_m) else "train_band"
 
 
 # ---------------------------------------------------------------- pictures
@@ -116,11 +142,13 @@ def entry_of(meta: dict, rel: str, n_images: int) -> dict:
             **{k: meta[k] for k in ("port", "grasp", "condition", "kind", "outcome", "pitch_deg", "grasp_pos_m", "pin_length_m")}}
 
 
-def load_entries(root: str | Path) -> list[dict]:
+def load_entries(root: str | Path, split_mode: str = "split320") -> list[dict]:
     """The fast copy's trajectories with their split and `bc` (the policy imitates it: a successful expert trajectory)."""
+    if split_mode not in SPLIT_MODES:
+        raise ValueError(f"unknown split_mode {split_mode!r}; expected one of {SPLIT_MODES}")
     out = []
     for e in json.loads((Path(root) / "manifest.json").read_text())["entries"]:
-        out.append({**e, "split": split320(e["port"], e["pitch_deg"], e["grasp_pos_m"], e["grasp"]),
+        out.append({**e, "split": _call_split(e["port"], e["pitch_deg"], e["grasp_pos_m"], e["grasp"], split_mode),
                     "bc": e["kind"] in POLICY_KINDS and e.get("outcome") == "inserted"})
     return out
 

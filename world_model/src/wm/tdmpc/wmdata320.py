@@ -35,6 +35,7 @@ from . import demo320 as D
 EXECUTE, H = 8, 4                      # control steps per decision; decisions per training window
 SEATED_M, SEATED_DEG, BONUS = 1.5e-3, 4.0, 10.0
 LABELS = "wm320-labels-3"              # 3: only a seated end is terminal; a jam is cut (no fixed continuation)
+OFFSET_MODES = ("along", "gap")        # dim 0 of probe: "along" = hand along axis (legacy); "gap" = pin-tip gap (-along - L, zero-privilege)
 
 ACTION_DIM = EXECUTE * D.JOINTS
 
@@ -46,8 +47,16 @@ def _basis(axis: np.ndarray) -> np.ndarray:
     return np.stack([a, u, np.cross(a, u)])
 
 
-def decision_labels(meta: dict, hand: np.ndarray, steps: np.ndarray) -> dict:
-    """Labels at the given control steps (hand: (T+1, 4, 4) recorded FK hand poses)."""
+def decision_labels(meta: dict, hand: np.ndarray, steps: np.ndarray, offset_mode: str = "along") -> dict:
+    """Labels at the given control steps (hand: (T+1, 4, 4) recorded FK hand poses).
+
+    offset_mode:
+      - 'along' (legacy): probe[:, 0] = along_mm (hand offset from H* along insertion axis, <= 0 before H*).
+      - 'gap' (zero-privilege): probe[:, 0] = gap_mm = -along_mm - L_mm (pin-tip distance in front of board face,
+        positive in front of board, negative inside hole; computed using training metadata pin_length_m only).
+    """
+    if offset_mode not in OFFSET_MODES:
+        raise ValueError(f"unknown offset_mode {offset_mode!r}; expected one of {OFFSET_MODES}")
     Hs, L = np.asarray(meta["H_star"], np.float64), float(meta["pin_length_m"])
     B = _basis(np.asarray(meta["axis"], np.float64))
     e = hand[steps, :3, 3] - Hs[:3, 3]
@@ -56,19 +65,23 @@ def decision_labels(meta: dict, hand: np.ndarray, steps: np.ndarray) -> dict:
     ang = np.degrees(np.arccos(np.clip((np.trace(R, axis1=1, axis2=2) - 1) / 2, -1, 1)))
     dist = np.linalg.norm(e, axis=1)
     lat = np.hypot(lx, ly)
+    along_mm = along * 1000.0
+    gap_mm = -along_mm - L * 1000.0
+    dim0 = gap_mm if offset_mode == "gap" else along_mm
     return {"depth": np.clip(L - dist, 0, L), "seated": (dist < SEATED_M) & (ang < SEATED_DEG),
             "phi": -(np.abs(along) * 1000 + lat * 1000 + ang),
-            "probe": np.stack([along * 1000, lx * 1000, ly * 1000, ang], 1).astype(np.float32)}
+            "along_mm": along_mm.astype(np.float32), "gap_mm": gap_mm.astype(np.float32),
+            "probe": np.stack([dim0, lx * 1000, ly * 1000, ang], 1).astype(np.float32)}
 
 
-def trajectory(z, meta: dict, shaping: float, gamma: float) -> dict | None:
+def trajectory(z, meta: dict, shaping: float, gamma: float, offset_mode: str = "along") -> dict | None:
     """Decision-level arrays of one fast-copy trajectory (an opened npz). None if it has no complete decision."""
     act, img, qpos, hand = z["action"], z["img_step"], z["qpos"], z["hand"]
     n = len(act) // EXECUTE
     if n < 1 or len(img) < 2 * n + 1 or not np.array_equal(img[:2 * n + 1], 4 * np.arange(2 * n + 1)):
         return None
     steps = EXECUTE * np.arange(n + 1)
-    lab = decision_labels(meta, hand, steps)
+    lab = decision_labels(meta, hand, steps, offset_mode=offset_mode)
     reward = np.diff(lab["depth"]) * 1000.0 + shaping * (gamma * lab["phi"][1:] - lab["phi"][:-1])
     if lab["seated"][n]:
         reward[-1] += BONUS
@@ -80,7 +93,8 @@ def trajectory(z, meta: dict, shaping: float, gamma: float) -> dict | None:
     delta = (act[:EXECUTE * n].reshape(n, EXECUTE, D.JOINTS) - qpos[steps[:-1], :D.JOINTS][:, None]).reshape(n, ACTION_DIM)
     return {"n": n, "delta": delta.astype(np.float32), "reward": reward.astype(np.float32), "term": term,
             "q": qpos[steps, :D.JOINTS].astype(np.float32), "done": lab["seated"].astype(np.float32),
-            "depth": lab["depth"].astype(np.float32), "probe": lab["probe"], "end_seated": bool(lab["seated"][n]),
+            "depth": lab["depth"].astype(np.float32), "probe": lab["probe"], "gap_mm": lab["gap_mm"],
+            "offset_mode": offset_mode, "end_seated": bool(lab["seated"][n]),
             "kind": meta["kind"], "outcome": meta.get("outcome")}
 
 
@@ -101,6 +115,8 @@ def window(tr: dict, k: int, s0, top, warm_next: bool = True) -> dict:
            "v_valid": (k + np.arange(H + 1) < n).astype(np.float32),
            "action": np.zeros((H, ACTION_DIM), np.float32), "reward": np.zeros(H, np.float32), "term": np.zeros(H, np.float32),
            "valid": np.zeros(H, np.float32), "a_next": np.zeros((H + 1, ACTION_DIM), np.float32), "a_next_valid": np.zeros(H + 1, np.float32)}
+    if "gap_mm" in tr:
+        out["gap_mm"] = tr["gap_mm"][dec]
     m = min(H, n - k)
     out["action"][:m], out["reward"][:m], out["term"][:m], out["valid"][:m] = act[k:k + m], tr["reward"][k:k + m], tr["term"][k:k + m], 1.0
     for j in range(H + 1):                       # the data's own action at each observation (the warm-up's next action)

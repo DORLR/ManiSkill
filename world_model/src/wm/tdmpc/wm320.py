@@ -71,13 +71,18 @@ class Encoder(nn.Module):
 
 
 class WM320(nn.Module):
-    def __init__(self, stem: str, stats: dict, shaping: float = 0.0, imagenet: bool = False, offset_weight: float = 0.0, **cfg_over):
-        """offset_weight > 0 (the user's decision 2026-11-18): a training-only head reads the hand's offset from H*
-        (wmdata320's "probe": along, lateral x, lateral y [mm], tilt [deg]) from the latents the reward head sees (the
-        encoded z and the imagined z of the window); its loss, with this weight, trains the encoder and the dynamics to
-        carry the offset. No decision uses it; validation reports its error."""
+    def __init__(self, stem: str, stats: dict, shaping: float = 0.0, imagenet: bool = False, offset_weight: float = 0.0,
+                 offset_mode: str = "along", **cfg_over):
+        """offset_weight > 0 (the user's decision 2026-11-18): a head reads the offset target from the latents the
+        reward head sees (the encoded z and the imagined z of the window).
+        offset_mode:
+          - 'gap' (zero-privilege): dim 0 = pin-tip gap (-along - L) [mm], dims 1..3 = lateral x, y [mm], tilt [deg].
+          - 'along' (legacy): dim 0 = hand along offset from H* [mm], dims 1..3 = lateral x, y [mm], tilt [deg]."""
         super().__init__()
+        if offset_mode not in WD.OFFSET_MODES:
+            raise ValueError(f"unknown offset_mode {offset_mode!r}; expected one of {WD.OFFSET_MODES}")
         self.offset_weight = float(offset_weight)
+        self.offset_mode = str(offset_mode)
         self.ret_max = 20.0 + 10.0 + shaping * PHI_MAX                    # value targets lie within +-ret_max
         self.shaping = shaping
         use_tdmpc2()
@@ -217,9 +222,14 @@ class WM320(nn.Module):
             with torch.no_grad():
                 err = (pr - tgt) * self.off_scale
                 lat = err[..., 1:3].norm(dim=-1)                              # lateral read-out error [mm]
+                d0_enc = (err[0, :, 0].abs() * ov[0]).sum() / ov[0].sum().clamp(min=1)
+                d0_img = (err[-1, :, 0].abs() * ov[-1]).sum() / ov[-1].sum().clamp(min=1)
                 oinfo = {"offset_loss": ol, "offset_lat_err_mm_encoded": (lat[0] * ov[0]).sum() / ov[0].sum().clamp(min=1),
-                         "offset_along_err_mm_encoded": (err[0, :, 0].abs() * ov[0]).sum() / ov[0].sum().clamp(min=1),
+                         "offset_along_err_mm_encoded": d0_enc,
                          "offset_lat_err_mm_imagined_last": (lat[-1] * ov[-1]).sum() / ov[-1].sum().clamp(min=1)}
+                if self.offset_mode == "gap":
+                    oinfo["offset_gap_err_mm_encoded"] = d0_enc
+                    oinfo["offset_gap_err_mm_imagined_last"] = d0_img
         total = cfg.consistency_coef * cons + cfg.reward_coef * rl + cfg.value_coef * (ql + vl) + 0.1 * dl + bc_weight * bc + self.offset_weight * ol
         info = {"total": total, "consistency": cons, "reward_loss": rl, "q_loss": ql, "v_loss": vl, "done_loss": dl,
                 "bc_loss": bc, "z_spread": z[:, 0].std(0).mean(), "target_value_mean": (tv * v_ok).sum() / v_ok.sum().clamp(min=1), **oinfo}
@@ -236,7 +246,8 @@ def load(ckpt: str, device="cuda") -> "WM320":
     ck = torch.load(ckpt, map_location="cpu", weights_only=False)
     if ck.get("labels") != WD.LABELS:
         raise ValueError(f"{ckpt} was trained with labels {ck.get('labels')}, this code has {WD.LABELS}")
-    m = WM320(ck["stem"], ck["stats"], ck.get("shaping", 0.0), imagenet=ck.get("imagenet", False), offset_weight=ck.get("offset_weight", 0.0), **ck["cfg"])
+    m = WM320(ck["stem"], ck["stats"], ck.get("shaping", 0.0), imagenet=ck.get("imagenet", False),
+              offset_weight=ck.get("offset_weight", 0.0), offset_mode=ck.get("offset_mode", "along"), **ck["cfg"])
     m.load_state_dict(ck["state"])
     return m.to(device).eval()
 
@@ -245,9 +256,12 @@ def load(ckpt: str, device="cuda") -> "WM320":
 class WindowData(torch.utils.data.Dataset):
     """One item = one window (wmdata320.window) of a fast-copy trajectory with its H+4 pictures. items: rows (entry, k)."""
 
-    def __init__(self, root, entries, items, stats: dict, shaping: float, gamma: float):
+    def __init__(self, root, entries, items, stats: dict, shaping: float, gamma: float, offset_mode: str = "along"):
+        if offset_mode not in WD.OFFSET_MODES:
+            raise ValueError(f"unknown offset_mode {offset_mode!r}; expected one of {WD.OFFSET_MODES}")
         self.paths = [str(Path(root) / e["path"]) for e in entries]
         self.items, self.st, self.shaping, self.gamma = np.asarray(items, np.int64), stats, shaping, gamma
+        self.offset_mode = str(offset_mode)
         self.kind = [WD_KINDS.get(e["kind"], 3) for e in entries]
 
     def __len__(self):
@@ -257,7 +271,7 @@ class WindowData(torch.utils.data.Dataset):
         e, k = (int(x) for x in self.items[i])
         with np.load(self.paths[e]) as z:
             meta = json.loads(str(z["meta"]))
-            tr = WD.trajectory(z, meta, self.shaping, self.gamma)
+            tr = WD.trajectory(z, meta, self.shaping, self.gamma, offset_mode=self.offset_mode)
             jb, jo, pb, po = z["rgb_jpeg"], z["rgb_offsets"], z["depth_png"], z["depth_offsets"]
         w = WD.window(tr, k, self.st["s0"], self.st["top"])
         s = w.pop("slots")
@@ -312,8 +326,7 @@ def face_items(entries: list[dict], root, shaping: float, gamma: float, kinds=("
             tr = WD.trajectory(z, json.loads(str(z["meta"])), shaping, gamma)
         if tr is None:
             continue
-        L_mm = 1000.0 * float(e["pin_length_m"])
-        hit = np.nonzero(tr["probe"][1:, 0] >= -L_mm - 0.5)[0]
+        hit = np.nonzero(tr["gap_mm"][1:] <= 0.5)[0]
         if len(hit):
             out.append((i, int(hit[0])))
     return np.array(out, np.int64).reshape(-1, 2)

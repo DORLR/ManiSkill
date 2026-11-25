@@ -31,8 +31,11 @@ class WMAgent:
         ck = torch.load(ckpt, map_location="cpu", weights_only=False)           # as wm320.load, read once
         if ck.get("labels") != WD.LABELS:
             raise ValueError(f"{ckpt} was trained with labels {ck.get('labels')}, this code has {WD.LABELS}")
+        self.offset_mode = str(ck.get("offset_mode", "along"))
+        if self.offset_mode not in WD.OFFSET_MODES:
+            raise ValueError(f"{ckpt} has unknown offset_mode {self.offset_mode!r}; expected one of {WD.OFFSET_MODES}")
         self.m = WM320(ck["stem"], ck["stats"], ck.get("shaping", 0.0), imagenet=ck.get("imagenet", False),
-                       offset_weight=ck.get("offset_weight", 0.0), **ck["cfg"])
+                       offset_weight=ck.get("offset_weight", 0.0), offset_mode=self.offset_mode, **ck["cfg"])
         self.m.load_state_dict(ck["state"])
         self.m.to(self.device).eval()
         self.horizon, self.gamma, self.step = horizon, float(self.m.cfg.gamma), int(ck.get("step", -1))
@@ -58,20 +61,30 @@ class WMAgent:
 
     @torch.no_grad()
     def offset_mm(self, z: torch.Tensor) -> np.ndarray | None:
-        """The offset read-out head on z: the hand's estimated offset from H* (along the insertion axis, lateral x,
-        lateral y [mm], tilt [deg]; wmdata320.decision_labels' "probe" frame), (4,). None without the head."""
+        """The offset read-out head on z, (4,). None without the head.
+        - offset_mode == 'gap': (gap_mm, lateral x [mm], lateral y [mm], tilt [deg]) — zero-privilege pin-tip gap.
+        - offset_mode == 'along' (legacy): (along_mm, lateral x [mm], lateral y [mm], tilt [deg]) from H*."""
         if self.m._offset is None:
             return None
         return (self.m._offset(z) * self.m.off_scale)[0].double().cpu().numpy()
 
     @torch.no_grad()
-    def gap_mm(self, z: torch.Tensor, pin_length_mm: float) -> float | None:
-        """Estimated distance of the pin tips in front of the board face [mm] (negative: that deep in the hole), from the
-        offset read-out head on z (z comes from the pictures and joints only; no H* at test time). None without the head.
-        2026-11-18, the user's decision: used only to tell the phase (in the hole or not), never to score or move
-        (the ablation modes "servo" of attempt320 move by the read-out on purpose)."""
-        o = self.offset_mm(z)
-        return None if o is None else float(-o[0] - pin_length_mm)
+    def gap_mm(self, z: torch.Tensor, pin_length_mm: float | None = None) -> float | None:
+        """Estimated distance of the pin tips in front of the board face [mm] (negative: that deep in the hole), from
+        the offset read-out head on z (pictures and joints only; no H* at test time). None without the head.
+        - offset_mode == 'gap' (zero-privilege): reads float(o[0]) directly; raises ValueError if pin_length_mm is passed.
+        - offset_mode == 'along' (legacy backwards-compat): requires pin_length_mm and computes -o[0] - pin_length_mm."""
+        if self.offset_mode == "gap":
+            if pin_length_mm is not None:
+                raise ValueError("offset_mode='gap' is zero-privilege: do not pass pin_length_mm to gap_mm()")
+            o = self.offset_mm(z)
+            return None if o is None else float(o[0])
+        if self.offset_mode == "along":
+            if pin_length_mm is None:
+                raise ValueError("legacy offset_mode='along' requires pin_length_mm; use an offset_mode='gap' checkpoint for zero-privilege inference")
+            o = self.offset_mm(z)
+            return None if o is None else float(-o[0] - float(pin_length_mm))
+        raise ValueError(f"unknown offset_mode {self.offset_mode!r}")
 
     @torch.no_grad()
     def values(self, z: torch.Tensor) -> np.ndarray:
