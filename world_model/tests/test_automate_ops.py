@@ -1073,7 +1073,7 @@ def test_caps(tmp: Path):
         r = caps(t("f" + str(abs(hash(rows)))), "qx_check collect 4G 500% 0", units=u2, gpu0=rows)
         assert (r.returncode == 0) == allowed and (allowed or "GPU 0" in r.stdout), (rows, r.stdout, r.stderr)
     # GPU 1: memory our starting units declared but have not allocated yet counts against the 12 GB left to others
-    dec = {"qingxin-collect-x-1.scope": 20, "qingxin-collect-x-2.scope": 20}
+    dec = {"qingxin-collect-x-1": 20, "qingxin-collect-x-2": 20}                          # qx_run writes qx/<name>.gpu (no suffix)
     r = caps(t("p1"), "qx_check collect 4G 500% 7", units=u2, free=30000, declared=dec)
     assert r.returncode == 1 and "declared" in r.stdout, r.stdout
     r = caps(t("p2"), "qx_check collect 4G 500% 7", units=u2, free=30000)
@@ -1219,7 +1219,7 @@ unit = Path(os.environ["QX_UNIT_FILE"]).read_text().strip()
 if code in ("shed", "gpu0", "shed134"):                          # what qx_watch.py leaves before its stop
     d = Path(os.environ["QX_RUN_DIR"]) / ("shed" if code == "shed134" else code)
     d.mkdir(parents=True, exist_ok=True)
-    (d / unit).write_text("test reason")
+    (d / f"{unit}.scope").write_text("test reason")              # qx_watch.py marks <name>.scope (list-units name)
     os._exit(134 if code == "shed134" else 143)                  # 134: Kit's SIGTERM abort (r6-ops-02)
 if code in ("hang", "hang_held"):                                # qx_watch.py's marker: the heartbeat + kill info
     (out / "heartbeat").mkdir(exist_ok=True)
@@ -1681,18 +1681,18 @@ name=$1; shift; shift
 OUT=""; prev=""; for a in "$@"; do [ "$prev" = "--out" ] && OUT=$a; prev=$a; done
 k=$(cat "$OUT/k" 2>/dev/null || echo 0); echo $((k + 1)) > "$OUT/k"
 code=$(sed -n "$((k + 1))p" "$OUT/scenario.txt"); [ -z "$code" ] && code=done
-unit=qingxin-run-$name-1.scope
+unit=qingxin-run-$name-1                         # qx_run writes the scope name without its suffix
 echo "$unit" > "$QX_UNIT_FILE"
 LOGS=$(dirname "$QX_UNIT_FILE")
 echo "start $name" > "$LOGS/$name.log"
-shed() { mkdir -p "$QX_RUN_DIR/shed"; echo "test reason" > "$QX_RUN_DIR/shed/$unit"; }
+shed() { mkdir -p "$QX_RUN_DIR/shed"; echo "test reason" > "$QX_RUN_DIR/shed/$unit.scope"; }   # as qx_watch.py marks
 # shed during launch(): Kit aborts (134) before batch_assemblies.py books or writes any marker (r6-ops-02)
 [ "$code" = shedlaunch ] && { shed; exit 134; }
 [ -e "$OUT/00001.started" ] && echo "$name" | cut -d_ -f1,2 >> "$OUT/booked"   # batch_assemblies.py would book a crash here (<tag>_<k>)
 echo x > "$OUT/00001.started"                       # batch_assemblies.py's marker of the assembly it is in
 case $code in
   done) rm -f "$OUT/00001.started"; echo "BATCH DONE" >> "$LOGS/$name.log"; exit 0 ;;
-  shed|gpu0) mkdir -p "$QX_RUN_DIR/$code"; echo "test reason" > "$QX_RUN_DIR/$code/$unit"; exit 143 ;;
+  shed|gpu0) mkdir -p "$QX_RUN_DIR/$code"; echo "test reason" > "$QX_RUN_DIR/$code/$unit.scope"; exit 143 ;;
   shed134) shed; exit 134 ;;                         # Kit's SIGTERM abort (carb assertion, core dump)
   donethenshed) rm -f "$OUT/00001.started"; echo "BATCH DONE" >> "$LOGS/$name.log"; shed; exit 134 ;;
   *) exit $code ;;

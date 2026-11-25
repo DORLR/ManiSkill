@@ -116,7 +116,9 @@ EOF
 learner_running() {  # the unit named by the newest <learner run dir>/logs/train_unit_* is active
   local f u
   f=$(ls -t "$LRUN"/logs/train_unit_* 2>/dev/null | head -1)
-  [ -n "$f" ] && u=$(cat "$f") && [ -n "$u" ] && systemctl --user is-active --quiet "$u"
+  [ -n "$f" ] && u=$(cat "$f") && [ -n "$u" ] || return 1
+  case "$u" in *.scope|*.service) ;; *) u="$u.scope" ;; esac   # qx_run writes the scope name without its suffix
+  systemctl --user is-active --quiet "$u"
 }
 
 wait_learner() {     # <R> (header)

@@ -171,7 +171,7 @@ def units() -> list[dict]:
         procs = CGROOT / props.get("ControlGroup", "").lstrip("/") / "cgroup.procs"
         pids = [int(p) for p in procs.read_text().split()] if props.get("ControlGroup") and procs.exists() else []
         decl = 0
-        g = RUN_DIR / "qx" / f"{n}.gpu"
+        g = RUN_DIR / "qx" / f"{n.removesuffix('.scope')}.gpu"   # qx_run writes qx/<name>.gpu; list-units gives <name>.scope
         if g.exists() and g.read_text().strip().isdigit():
             decl = int(g.read_text().strip()) * 1_000_000_000 // 1048576
         out.append({"name": n, "kind": n.split("-")[1] if n.count("-") >= 2 else "", "pids": pids,

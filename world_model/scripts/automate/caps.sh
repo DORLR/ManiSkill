@@ -149,7 +149,7 @@ qx_gpu_mib_of() {   # qx_gpu_mib_of "<pid list>" "<pid MiB table>" -> MiB sum
 }
 
 qx_declared_mib() { # declared GPU GB of a unit (its reservation file) -> MiB
-  local f=$QX_RUN_DIR/qx/$1.gpu g=0
+  local f=$QX_RUN_DIR/qx/${1%.scope}.gpu g=0        # qx_run writes qx/<name>.gpu; units are listed as <name>.scope
   [ -f "$f" ] && g=$(cat "$f")
   [[ $g =~ ^[0-9]+$ ]] || g=0
   echo $(( g * 1000000000 / 1048576 ))
@@ -261,7 +261,7 @@ qx_run() {
   for f in "$QX_RUN_DIR"/qx/*.gpu; do              # reservations of units that are gone (older than 5 min)
     [ -e "$f" ] || continue
     u=$(basename "$f" .gpu)
-    systemctl --user is-active --quiet "$u" && continue
+    systemctl --user is-active --quiet "$u.scope" && continue   # the file holds the scope name without its suffix
     m=$(stat -c %Y "$f" 2>/dev/null) || continue               # removed meanwhile by its own qx_run
     [ $(( $(date +%s) - m )) -lt 300 ] || rm -f "$f"
   done
@@ -286,7 +286,7 @@ qx_run() {
     -p CPUQuota="$cpu" env CUDA_VISIBLE_DEVICES=$cvd CUDA_DEVICE_ORDER=PCI_BUS_ID QX_GPU_GB="$gpu_gb" "$@" {lk}>&- &
   pid=$!
   for i in $(seq 1 120); do                         # hold the lock until the scope is active (or the command ended)
-    systemctl --user is-active --quiet "$unit" && break
+    systemctl --user is-active --quiet "$unit.scope" && break   # systemd-run --scope --unit=<name> creates <name>.scope
     kill -0 $pid 2>/dev/null || break
     sleep 0.5
   done

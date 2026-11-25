@@ -89,18 +89,18 @@ while [ $k -le 30 ]; do
     rm -f "$log" "$ufile"
     sleep 60; continue
   fi
-  if [ $rc -eq 7 ] || { [ -n "$unit" ] && [ -e "$QX_RUN_DIR/gpu0/$unit" ]; }; then
+  if [ $rc -eq 7 ] || { [ -n "$unit" ] && [ -e "$QX_RUN_DIR/gpu0/$unit.scope" ]; }; then
     why=""
-    if [ -n "$unit" ] && [ -e "$QX_RUN_DIR/gpu0/$unit" ]; then
-      why=": qx_watch.py $(head -c 300 "$QX_RUN_DIR/gpu0/$unit" | tr '\n' ' ')"
+    if [ -n "$unit" ] && [ -e "$QX_RUN_DIR/gpu0/$unit.scope" ]; then
+      why=": qx_watch.py $(head -c 300 "$QX_RUN_DIR/gpu0/$unit.scope" | tr '\n' ' ')"
       release_own_markers "$t_start"                                 # stopped by the watcher: not a crash
     fi
     echo "$(date '+%F %T') run_batch $tag: forbidden GPU-0 context (exit $rc, unit ${unit:-?}$why, log $log); STOP written" |
       tee -a "$OUT/STOP" >> "$QX_RUN_DIR/ALERT"
     exit 7
   fi
-  if [ -n "$unit" ] && [ -e "$QX_RUN_DIR/shed/$unit" ] && [ $rc -ne 124 ] && ! grep -q "BATCH DONE" "$log"; then
-    why=$(head -c 300 "$QX_RUN_DIR/shed/$unit" | tr '\n' ' '); rm -f "$QX_RUN_DIR/shed/$unit"
+  if [ -n "$unit" ] && [ -e "$QX_RUN_DIR/shed/$unit.scope" ] && [ $rc -ne 124 ] && ! grep -q "BATCH DONE" "$log"; then
+    why=$(head -c 300 "$QX_RUN_DIR/shed/$unit.scope" | tr '\n' ' '); rm -f "$QX_RUN_DIR/shed/$unit.scope"
     release_own_markers "$t_start"
     now=$(date +%s); recent=()
     for t in "${sheds[@]}"; do [ $(( now - t )) -lt 86400 ] && recent+=("$t"); done

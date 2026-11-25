@@ -119,16 +119,16 @@ while true; do
   hung=0
   [ -n "${wpid:-}" ] && [ -e "$OUT/heartbeat/${wpid}_${wstart}.hung" ] && hung=1
   gpu0=0; shed=0
-  [ -n "$unit" ] && [ -e "$QX_RUN_DIR/gpu0/$unit" ] && gpu0=1
-  [ -n "$unit" ] && [ -e "$QX_RUN_DIR/shed/$unit" ] && shed=1
+  [ -n "$unit" ] && [ -e "$QX_RUN_DIR/gpu0/$unit.scope" ] && gpu0=1
+  [ -n "$unit" ] && [ -e "$QX_RUN_DIR/shed/$unit.scope" ] && shed=1
   case $code in
     0) grep -q '^WORKER DONE' "$log" && end_loop "done (WORKER DONE; see logs/summary.json)" 0 ;;
     3) end_loop "refused (exit 3: config, plan, inputs or code), log $log" 1 ;;
     7) stop_run "forbidden GPU-0 context (exit 7, unit ${unit:-?}), log $log" ;;
   esac
-  [ $gpu0 -eq 1 ] && stop_run "stopped by qx_watch.py for GPU 0 (exit $code, unit $unit: $(head -c 300 "$QX_RUN_DIR/gpu0/$unit")), log $log"
+  [ $gpu0 -eq 1 ] && stop_run "stopped by qx_watch.py for GPU 0 (exit $code, unit $unit: $(head -c 300 "$QX_RUN_DIR/gpu0/$unit.scope")), log $log"
   if [ $shed -eq 1 ]; then                        # any exit code (header: shed by the watcher)
-    why=$(head -c 300 "$QX_RUN_DIR/shed/$unit" 2>/dev/null); rm -f "$QX_RUN_DIR/shed/$unit"
+    why=$(head -c 300 "$QX_RUN_DIR/shed/$unit.scope" 2>/dev/null); rm -f "$QX_RUN_DIR/shed/$unit.scope"
     now=$(date +%s); recent=()
     for t in "${sheds[@]}"; do [ $(( now - t )) -lt 86400 ] && recent+=("$t"); done
     sheds=("${recent[@]}" "$now")
