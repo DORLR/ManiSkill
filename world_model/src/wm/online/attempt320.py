@@ -37,8 +37,9 @@ after each restore, the repeated proposal's R and first-decision hand deviation 
 decision the deviation of the hand from the branch of the executed candidate.
 The attempt itself goes on exactly as mode "wm".
 Insertion time (2026-11-19, reporting only; never an input of the agent): after every executed agent decision of every
-mode (back-off and re-position decisions included) the simulator-truth success criterion (demo320.is_success) is
-checked; the summary keeps the number of decisions after which it first held (`first_success_decision`, None if never),
+mode (back-off and re-position decisions included) the simulator-truth success criterion of the adapter (truth_step:
+ManiSkill demo320.is_success; AutoMate check_plug_inserted_in_socket, wm.sim_automate.checks) is checked; the summary
+keeps the number of decisions after which it first held (`first_success_decision`, None if never),
 per executed decision whether it held (`truth_ok`) and the true depth left and lateral offset (`truth_depth_mm`,
 `truth_lateral_mm`), and per main-loop agent decision [decisions executed before it, wall-clock ms of the agent's
 computation from the pictures to the chosen action, GPU synchronised; the counterfactual probe excluded] (`latency_ms`).
@@ -79,8 +80,8 @@ Per decision of "wm"/"collect" (every 0.4 s):
      next try would repeat the same approach (the agent is deterministic), so every back-off halves the correction
      margin of the attempt instead (the model corrects more readily). Otherwise, or after `max_retries` back-offs,
      the attempt ends "stalled".
-  6. ends: seated (2), stalled (5), left (hand more than 6 cm from the start), 150 decisions in total (back-off
-     and re-position decisions included).
+  6. ends: seated (2), stalled (5), left (hand more than left_m from the start: ManiSkill 6 cm, AutoMate 6 cm + L),
+     max_decisions in total (back-off and re-position decisions included; ManiSkill 150, AutoMate robot.max_decisions).
 Exploration in "collect" (labels may be used here: training grasps only, as the scripted sets did):
   - with probability `p_shift` per attempt, once, when the pin tips are first 0.5-4 mm in front of the board face
     (FK and H*), the hand is moved by 0.5-2 mm in a random direction across the insertion axis during that decision;
@@ -92,6 +93,9 @@ correction decisions only. The last decision is followed by a 4-step hold (as ev
 H* only (wmdata320); `seated_fk` is taken at the last decision's end (step 8n, the instant of the trajectory's
 terminal flag; the stored outcome), `seated_fk_after_hold` after the hold (as the policies' test reports it). The
 simulator's truth goes to the attempt's summary, for reporting, never into the trajectory.
+Simulators (the user's decisions 1, 3, 6 and 9 of 2026-11-25): this module and wm.online.shared320 import no simulator;
+the adapters wm.online.maniskill320 (ManiSkill, behaviour unchanged) and wm.online.automate320 (AutoMate) give the
+recorder's reads, the "left" distance, the labels' simulator key and the truth (OnlineTester docstring).
 """
 
 from __future__ import annotations
@@ -99,18 +103,16 @@ from __future__ import annotations
 import time
 
 import numpy as np
-from scipy.spatial.transform import Rotation
 
-from ..collect import branch as B
-from ..collect.branch import Brancher, FullRecorder
-from ..collect.explore import truth_outcome
+from . import shared320 as B                   # the simulator-free parts (were wm.collect.branch / explore)
+from .shared320 import AttemptBase, FullRecorder
 from ..tdmpc import demo320 as D
 from ..tdmpc import wmdata320 as WD
-from ..tdmpc.demo320 import is_success
 from .common320 import RANDOM_EDGES_MM, check_offset_mode, gap_bin, jpeg, offset, servo_move, simulator_of_robot, unjpeg
 
 EXECUTE = WD.EXECUTE
-LEFT_M = 0.06                                  # as the policies' closed-loop test ("free" stops)
+LEFT_M = 0.06                                  # as the policies' closed-loop test ("free" stops); the adapter's left_m:
+                                               # ManiSkill LEFT_M, AutoMate LEFT_M + L (the user's decision 3 of 2026-11-25)
 STEPS_MM = (0.5, 1.5)
 BACKOFF_MM, BACKOFF_DECISIONS = 5.0, 2
 DONE_P, DONE_TIMES, NOT_DONE_P = 0.5, 2, 0.5
@@ -176,7 +178,15 @@ class _ForbidPinLength:
             self.tester._forbid_L = False
 
 
-class OnlineTester(Brancher):
+class OnlineTester(AttemptBase):
+    """The attempt loop (module docstring). Simulator-free: an adapter (wm.online.maniskill320.ManiSkillTester,
+    wm.online.automate320.AutomateTester) sets
+        io           shared320.RecorderIO of its simulator (the recorder's reads)
+        left_m       the "left" distance [m] from the start (ManiSkill LEFT_M; AutoMate LEFT_M + L)
+        label_meta   extra keys of the labels' meta (AutoMate: simulator "automate"; ManiSkill: none)
+    and defines truth_step(rel7) -> (success, depth_left_mm, lateral_mm) after a decision and truth_final(out) -> the
+    summary's success fields (simulator truth: reporting only, never an input of the agent)."""
+
     @property
     def L(self) -> float:
         if getattr(self, "_forbid_L", False):
@@ -186,18 +196,16 @@ class OnlineTester(Brancher):
     @L.setter
     def L(self, value: float) -> None:
         self._L_value = value
-    # ------------------------------------------------------------ joint offsets that move the hand
-    def jacobian(self, q9: np.ndarray, eps: float = 1e-5) -> np.ndarray:
-        """(6, 7): hand position [m] and rotation vector [rad] (world frame) per joint [rad], by central differences of FK."""
-        J = np.zeros((6, 7))
-        for i in range(7):
-            qp, qm = q9.copy(), q9.copy()
-            qp[i] += eps
-            qm[i] -= eps
-            Tp, Tm = self.fk(np.stack([qp, qm]))
-            J[:3, i] = (Tp[:3, 3] - Tm[:3, 3]) / (2 * eps)
-            J[3:, i] = Rotation.from_matrix(Tp[:3, :3] @ Tm[:3, :3].T).as_rotvec() / (2 * eps)
-        return J
+
+    # ------------------------------------------------------------ the simulator's part (the adapter's)
+    def recorder(self) -> FullRecorder:
+        return FullRecorder(self.robot, self.io)
+
+    def truth_step(self, rel7: np.ndarray) -> tuple[bool, float, float]:
+        raise NotImplementedError("the simulator adapter defines truth_step")
+
+    def truth_final(self, out: dict) -> dict:
+        raise NotImplementedError("the simulator adapter defines truth_final")
 
     def face_gap_mm(self) -> float:
         """How far the pin tips are in front of the board face along the insertion axis [mm] (FK and H*; collect mode only)."""
@@ -222,7 +230,7 @@ class OnlineTester(Brancher):
         r, rng = self.robot, np.random.default_rng(seed)
         torch.manual_seed(seed)
         np.random.seed(seed % (2 ** 32))
-        rec = FullRecorder(r)
+        rec = self.recorder()
         rec.begin()
         jp: list[bytes] = []                                   # JPEG bytes of every recorded picture, in order
         dec: dict[int, np.ndarray] = {}                        # decoded pictures still needed by a context
@@ -247,7 +255,7 @@ class OnlineTester(Brancher):
             kinds.append(KINDS[kind])
             return q
 
-        meta_l = {"H_star": self.H_star, "axis": self.F[:, 0], "pin_length_m": self.L}
+        meta_l = {"H_star": self.H_star, "axis": self.F[:, 0], "pin_length_m": self.L, **self.label_meta}
 
         def true_return(hb: list) -> tuple[float, dict]:
             """FK/H* labels of a branch's hand poses at its decision boundaries -> (R, labels), as wmdata320.trajectory."""
@@ -299,11 +307,10 @@ class OnlineTester(Brancher):
 
         def truth_check(k_done: int):
             """Reporting only: the success criterion on the simulator's truth after k_done executed decisions."""
-            tr = truth_outcome(rec.buf["eval_rel"][-1])
-            ok = bool(is_success(tr))
+            ok, depth_mm, lat_mm = self.truth_step(rec.buf["eval_rel"][-1])
             log["truth_ok"].append(ok)
-            log["truth_depth_mm"].append(round(float(tr["depth_left_mm"]), 2))
-            log["truth_lateral_mm"].append(round(float(tr["lateral_mm"]), 2))
+            log["truth_depth_mm"].append(round(float(depth_mm), 2))
+            log["truth_lateral_mm"].append(round(float(lat_mm), 2))
             if log["first_success_decision"] is None and ok:
                 log["first_success_decision"] = k_done
 
@@ -467,7 +474,7 @@ class OnlineTester(Brancher):
             hand = r.hand_pose()[:3, 3].copy()
             if mode not in ("act", "act_done") and probe_rec is not None:       # the executed branch against the real decision
                 probe_rec["first_step_dev_mm"] = round(float(np.linalg.norm(hand - probe_rec.pop("first_hand")) * 1000.0), 4)
-            if np.linalg.norm(hand - start_hand) > LEFT_M:
+            if np.linalg.norm(hand - start_hand) > self.left_m:
                 why = "left"
                 break
             hands.append(hand)
@@ -495,7 +502,7 @@ class OnlineTester(Brancher):
                     q_last = execute(ramp, ramp, "backoff")
                     k += 1
                     truth_check(k)
-                if np.linalg.norm(r.hand_pose()[:3, 3] - start_hand) > LEFT_M:
+                if np.linalg.norm(r.hand_pose()[:3, 3] - start_hand) > self.left_m:
                     why = "left"
                     break
                 # re-position: candidate positions across the way in, each imagined, the best (or a random one) taken
@@ -528,7 +535,7 @@ class OnlineTester(Brancher):
                 hands = [r.hand_pose()[:3, 3].copy()]
                 try_start, try_corr, done_run, inside = hands[0].copy(), np.zeros(3), 0, False
                 servo_hist = []
-                if np.linalg.norm(hands[0] - start_hand) > LEFT_M:
+                if np.linalg.norm(hands[0] - start_hand) > self.left_m:
                     why = "left"
                     break
         for _ in range(4):
@@ -537,12 +544,11 @@ class OnlineTester(Brancher):
         out = rec.end()
         picture(len(out["rgb"]) - 1)
         out["rgb_jpeg_list"], out["dec_kind"] = jp, np.asarray(kinds, np.int8)
-        lab = WD.decision_labels({"H_star": self.H_star, "axis": self.F[:, 0], "pin_length_m": self.L}, out["hand"].astype(np.float64),
-                                 np.array([EXECUTE * k, len(out["hand"]) - 1]))
-        truth = truth_outcome(out["eval_rel"][-1])
+        lab = WD.decision_labels({"H_star": self.H_star, "axis": self.F[:, 0], "pin_length_m": self.L, **self.label_meta},
+                                 out["hand"].astype(np.float64), np.array([EXECUTE * k, len(out["hand"]) - 1]))
         summary = {"mode": mode, "offset_mode": offset_mode, "stopped": why, "decisions": k, "seated_fk": bool(lab["seated"][0]),
                    "seated_fk_after_hold": bool(lab["seated"][1]),
-                   "success": is_success(truth), **{key: float(truth[key]) for key in D.SUCCESS},
+                   **self.truth_final(out),
                    **{key: log[key] for key in ("interventions", "random_candidates", "retries", "shift", "stall_states", "repositions",
                                                 "inside_at", "inside_gap_mm", "servo_moves", "per_decision", "probes",
                                                 "first_success_decision", "truth_ok", "truth_depth_mm", "truth_lateral_mm",

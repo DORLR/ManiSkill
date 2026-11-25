@@ -21,6 +21,10 @@ as wm/collect/episode._axis_from does at collection: the direction of the FK han
 "axial_push" phase (no simulator truth). Per-grasp result file <out>/<port>/<grasp>.json as
 eval_policy320 (with error_kind setup / crash); crashed grasps are retried; a dying worker rebuilds the pool.
 Workers are spread over the GPUs given (--gpus), one GPU per worker (renderer and model).
+ManiSkill only: the attempt is wm.online.maniskill320.ManiSkillTester (attempt320's loop on the simulator-free
+wm.online.shared320, behaviour unchanged: tests/test_online_port_maniskill_cpu.py). AutoMate grasps are refused here;
+AutoMate runs `run_wm320_attempts.py automate prepare|worker|finish ...` (run_wm320_automate.py: capped Isaac workers,
+one app each; launchers scripts/automate/online_job.sh and online_automate.sh).
 
     python world_model/scripts/online/run_wm320_attempts.py --grasps $Q/data/wm_v1 --ckpt <model.pt> --mode collect \
         --split train --pool $Q/data/online320 --round 1 --starts 3 --workers 6 --gpus 3,4,5,6,7,2
@@ -104,8 +108,9 @@ def side_camera(robot, H_star: np.ndarray, axis: np.ndarray, w: int = 480, h: in
     return grab
 
 
-def write_fast(path: Path, out: dict, meta: dict) -> dict:
-    """One attempt -> a fast-copy trajectory file (demo320's format, byte for byte the same codecs); its manifest entry."""
+def fast_arrays(out: dict) -> tuple:
+    """The arrays of a fast-copy trajectory file (demo320's format, byte for byte the same codecs) of one attempt's
+    recording, checked: (rgb_blob, rgb_offsets, depth_blob, depth_offsets, dec_kind list)."""
     jp = out["rgb_jpeg_list"]
     if not len(jp) == len(out["rgb"]) == len(out["depth"]) == len(out["img_step"]):
         raise ValueError("pictures, depth pictures and image steps differ in number")
@@ -119,13 +124,27 @@ def write_fast(path: Path, out: dict, meta: dict) -> dict:
     kinds = [int(x) for x in out["dec_kind"]]
     if len(kinds) != len(out["action"]) // 8:
         raise ValueError(f"{len(kinds)} decision kinds for {len(out['action']) // 8} decisions")
-    meta = {**meta, "steps": int(len(out["action"])), "format": D.FORMAT, "dec_kind": kinds}
+    return rgb_blob, rgb_off, dblob, doff, kinds
+
+
+def save_fast(path: Path, out: dict, meta: dict, arrays: tuple) -> None:
+    """Write the file atomically (meta as json, then the arrays of fast_arrays and the recording's joints)."""
+    rgb_blob, rgb_off, dblob, doff, kinds = arrays
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp.npz")
     np.savez(tmp, meta=np.asarray(json.dumps(meta)), rgb_jpeg=rgb_blob, rgb_offsets=rgb_off, depth_png=dblob, depth_offsets=doff,
              img_step=out["img_step"], qpos=out["qpos"], hand=out["hand"], action=out["action"], dec_kind=np.asarray(kinds, np.int8))
     os.replace(tmp, path)
-    return {**D.entry_of(meta, meta["source"], len(jp)), "dec_kind": kinds}
+
+
+def write_fast(path: Path, out: dict, meta: dict) -> dict:
+    """One attempt -> a fast-copy trajectory file (demo320's format, byte for byte the same codecs); its manifest entry.
+    ManiSkill (AutoMate: run_wm320_automate.write_fast_automate, the allow-listed meta)."""
+    arrays = fast_arrays(out)
+    kinds = arrays[4]
+    meta = {**meta, "steps": int(len(out["action"])), "format": D.FORMAT, "dec_kind": kinds}
+    save_fast(path, out, meta, arrays)
+    return {**D.entry_of(meta, meta["source"], len(out["rgb_jpeg_list"])), "dec_kind": kinds}
 
 
 def work(job):
@@ -142,7 +161,7 @@ def work(job):
         from wm.collect import branch as B
         from wm.env.expert import Expert
         from wm.env.robot import Robot
-        from wm.online.attempt320 import OnlineTester
+        from wm.online.maniskill320 import ManiSkillTester as OnlineTester
         if _S["port"] != g["port"]:
             if _S["robot"] is not None:
                 old, _S["robot"], _S["port"] = _S["robot"], None, None
@@ -435,9 +454,10 @@ def main():
     seed = args.seed + 1_000_003 * args.round if collect else args.seed
     every = [json.loads(Path(f).read_text()) for f in sorted(glob.glob(f"{args.grasps}/*/*/grasp.json"))]
     am = [g.get("grasp") for g in every if D.is_automate(g)]
-    if am:                                                     # attempt320 scores with ManiSkill's truth and labels
-        raise SystemExit(f"{len(am)} AutoMate grasps (e.g. {am[:3]}): the online attempts are not ported to AutoMate "
-                         "(port plan: docs/2026-11-23_automate_online_port_plan.md); ManiSkill grasps only")
+    if am:                                                     # AutoMate: its own workers (run_wm320_automate.py)
+        raise SystemExit(f"{len(am)} AutoMate grasps (e.g. {am[:3]}): AutoMate attempts run through "
+                         "`run_wm320_attempts.py automate prepare|worker|finish ...` (run_wm320_automate.py; the "
+                         "launcher scripts/automate/online_automate.sh); this path is ManiSkill's")
     D.check_automate_conditions(every)                         # AutoMate grasps need a decided split (ManiSkill: no-op)
     every = [g for g in every if g.get("reference_ok") and _matches_split(g, args.split, args.split_mode)]
     if args.split == "any" and (not every or not all("pair_index" in g for g in every)):
@@ -511,4 +531,7 @@ def main():
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["automate"]:                      # AutoMate (Isaac Lab): capped workers, one app each
+        import run_wm320_automate as RAA
+        sys.exit(RAA.main(sys.argv[2:]))
     main()
