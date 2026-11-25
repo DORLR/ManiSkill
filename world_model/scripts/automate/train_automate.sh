@@ -6,7 +6,7 @@
 # 1. Freezes the code: this world_model tree is copied read-only to <run dir>/code (hash in <run dir>/code.sha256);
 #    a second start in the same run dir must find the copy unchanged. The script runs from that copy.
 # 2. Writes the budget table (our active units, MemoryMax / CPUQuota / declared and measured GPU-1 memory, against
-#    125 GB / 3200 % / 48 GB) plus this job to <run dir>/logs/budget_<unix time>.txt and prints it.
+#    180 GB / 4800 % / 72 GB since 2026-11-25) plus this job to <run dir>/logs/budget_<unix time>.txt and prints it.
 # 3. Preflight in a capped CPU scope with the job's own environment (collect_lib.sh cl_train_preflight: cl_isaac_env,
 #    cl_clean_env and cl_train_env as in step 4; r7-data-05): the encoder weight files exist under CL_TORCH_HOME /
 #    CL_HF_HOME, `wm` imports from <run dir>/code/src and scikit-learn, joblib and threadpoolctl import from the

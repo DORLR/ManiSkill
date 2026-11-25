@@ -8,7 +8,7 @@
 # for --mode collect, --out for a test). Every step reads the collection's frozen assets: WM_AUTOMATE_ASSETS = plan.json
 # input_roots.assets of --grasps, which must be <collection>/inputs/assets (set after cl_clean_env; prepare checks it
 # and records it in job.json, the workers export job.json's and refuse another). Resources per worker are the caller's (no
-# defaults: measure them in the smoke T7); N workers x each must fit 125 GB / 3200 % / 48 GB alone (cl_static_budget),
+# defaults: measure them in the smoke T7); N workers x each must fit the caps (180 GB / 4800 % / 72 GB since 2026-11-25) alone (cl_static_budget),
 # and every start is checked against the live sums of all our units, the learner's included (caps.sh qx_check).
 #   1. prepare: CPU, in a capped scope (qx_run_retry prep, 4G, 100 %, no GPU) with the workers' environment; exit 3
 #      (refused) ends here.

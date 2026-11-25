@@ -18,7 +18,7 @@ Recorder are stand-ins, systemctl / nvidia-smi are fake scripts where the shell 
   6 signal: SIGTERM releases the claim with the previous text and exits 5
   7 heartbeat + watcher: a stale heartbeat of a live pid in one of our scopes is killed, its claim marked hang, the
     .hung marker and ALERT written; the next claim records a hang death; watcher decisions (GPU 0, pressure, GPU sum)
-  8 caps.sh: input validation, failing tools refuse, the 125 GB / GPU 0 / pressure / MemAvailable refusals, the
+  8 caps.sh: input validation, failing tools refuse, the 180 GB / GPU 0 / pressure / MemAvailable refusals, the
     caps cannot be raised from the environment, CPUQuota parsing, the static worker budget, the code hash
   9 collect_worker.sh restart loop: refusal / build failure / hang not counted, crash rate cap, exit 3, STOP, code hash
  10 split automate_v1: 5 test + 10 % held-out assemblies by group quota, near twins together, interpolation only,
@@ -940,8 +940,8 @@ def test_heartbeat_watch(tmp: Path):
     assert QW.decide_units(us, 0.0, big, {999: {"types": ["C"], "mib": 500}}, {}) == [], "not our pid"
     assert first(QW.decide_units(us, 31.0, big, {}, {})) == ("qingxin-train-b-2.scope", "memory")
     assert first(QW.decide_units(us, 0.0, 9 * 10**9, {}, {})) == ("qingxin-train-b-2.scope", "memory")
-    assert first(QW.decide_units(us, 0.0, big, {}, {10: 30000, 20: 20000})) == ("qingxin-train-b-2.scope", "gpu_sum")
-    assert first(QW.decide_units(us[:1] + us[2:], 0.0, big, {}, {10: 46000})) == ("qingxin-collect-a-1.scope", "gpu_sum")
+    assert first(QW.decide_units(us, 0.0, big, {}, {10: 40000, 20: 30000})) == ("qingxin-train-b-2.scope", "gpu_sum")
+    assert first(QW.decide_units(us[:1] + us[2:], 0.0, big, {}, {10: 69000})) == ("qingxin-collect-a-1.scope", "gpu_sum")
     assert first(QW.decide_units(us, 0.0, big, {}, {10: 6000}, 5000)) == ("qingxin-collect-a-1.scope", "gpu_free")
     assert QW.decide_units(us, 0.0, big, {}, {10: 6000}, 20000) == []
     assert QW.decide_units(us, 0.0, big, {}, {}, 5000) == [], "no GPU-1 memory of ours: nothing to free"
@@ -973,7 +973,7 @@ def test_heartbeat_watch(tmp: Path):
     (QW.RUN_DIR / "watch" / "wanted").touch()
     assert QW.wanted_recently(time.time()) is True
     return note + "; heartbeat gaps per stage; watcher code.sha256; decisions: GPU 0 (8 / 50 MiB graphics accepted; 51 MiB, C, C+G, no type stop; unreadable memory " \
-                  "alerts only), pressure / MemAvailable, GPU-1 sum > 48 GB, GPU-1 free < 8 GB stop the newest " \
+                  "alerts only), pressure / MemAvailable, GPU-1 sum > 72 GB, GPU-1 free < 8 GB stop the newest " \
                   "stoppable unit; gpu0 marker + STOP of the run; a failing reading / folder never ends a cycle"
 
 
@@ -1064,8 +1064,8 @@ def test_caps(tmp: Path):
     r = caps(t("c"), "qx_check collect 16G 500% 0", fail="nvidia")
     assert r.returncode == 1 and "nvidia-smi" in r.stdout, r.stdout
     u2 = "qingxin-collect-x-1.scope\nqingxin-collect-x-2.scope\n"                         # 2 x 60e9 bytes
-    r = caps(t("d"), "qx_check collect 6G 500% 0", units=u2)
-    assert r.returncode == 1 and "125 GB" in r.stdout, r.stdout
+    r = caps(t("d"), "qx_check collect 61G 500% 0", units=u2)                             # 120e9 + 65.5e9 > 180e9
+    assert r.returncode == 1 and "180 GB" in r.stdout, r.stdout
     r = caps(t("e"), "qx_check collect 4G 500% 0", units=u2)
     assert r.returncode == 0, r.stdout
     for rows, allowed in (("888 G 8", True), ("888 G 30\n888 G 20", True), ("888 G 51", False), ("888 C 100", False),
@@ -1086,7 +1086,7 @@ def test_caps(tmp: Path):
     assert "rc=0" in r.stdout and "rc=1" in r.stdout, r.stdout
     r = caps(t("g"), "qx_check collect 4G 500% 0", units=u2,
              env_extra={"QX_CAP_MEM_BYTES": "999999999999999", "QX_CAPS_LOADED": "1"})
-    r2 = caps(t("g2"), "qx_check collect 6G 500% 0", units=u2,
+    r2 = caps(t("g2"), "qx_check collect 61G 500% 0", units=u2,                           # over 180e9 with u2
               env_extra={"QX_CAP_MEM_BYTES": "999999999999999", "QX_CAPS_LOADED": "1"})
     assert r.returncode == 0 and r2.returncode == 1, "the environment cannot raise the caps"
     d = t("h")
@@ -1100,14 +1100,14 @@ def test_caps(tmp: Path):
     (d / "proc" / "meminfo").write_text("MemAvailable: 30000000 kB\n")                    # 30.7 GB
     r = caps(d, "qx_check collect 16G 500% 0")
     assert r.returncode == 1 and "MemAvailable" in r.stdout, r.stdout
-    r = caps(t("j"), "qx_check collect 30G 500% 50")                                         # GPU 1: 9000 MiB ours? no: no units
-    assert r.returncode == 1 and "48 GB" in r.stdout, r.stdout
+    r = caps(t("j"), "qx_check collect 30G 500% 75")                                         # 75 GB > our 72 GB
+    assert r.returncode == 1 and "72 GB" in r.stdout, r.stdout
     r = caps(t("k"), "for v in 4s 500ms 1.500000s '1min 30s' infinity; do qx_quota_pct \"$v\"; done; "
                      "qx_to_bytes 16384M; qx_to_bytes 18.5G || echo bad; echo '" + PIDS_TEXT + "' | qx_parse_pids | sort")
     assert r.stdout.split() == ["400", "50", "150", "9000", "-1", str(16384 * 2**20), "bad",
                                 "1374517", "643", "4242", "7000"], r.stdout
-    r = caps(t("l"), "cl_static_budget 6 16G 500% 7 && echo ok6; cl_static_budget 7 16G 500% 7 || echo no7; "
-                     "cl_static_budget 7 18G 400% 6 || echo no7b")
+    r = caps(t("l"), "cl_static_budget 6 16G 500% 7 && echo ok6; cl_static_budget 10 16G 500% 7 || echo no7; "
+                     "cl_static_budget 10 18G 400% 6 || echo no7b")
     assert r.stdout.split()[-3:] == ["ok6", "no7", "no7b"] or "ok6" in r.stdout and "no7" in r.stdout, r.stdout
     d = t("m")
     (d / "tree" / "a").mkdir(parents=True)
@@ -1194,10 +1194,10 @@ def test_caps(tmp: Path):
     assert 1 <= nretry <= 4 and (d / "slept").read_text().count("slept") == nretry, (nretry, r.stdout)
     r = caps(d, stub + "qx_run_retry test rr 1G 100% 0 true; echo rc=$?", env_extra={"QX_RETRY_MAX_S": "x"})
     assert "rc=99" in r.stdout and "QX_RETRY_MAX_S=x is not a whole number" in r.stdout, r.stdout
-    return "validation (18.5G, 4.5, x, kind), failing systemctl / nvidia-smi refuse, 125 GB sum, GPU 0 rule (G <= 50 " \
+    return "validation (18.5G, 4.5, x, kind), failing systemctl / nvidia-smi refuse, 180 GB sum, GPU 0 rule (G <= 50 " \
            "MiB per pid only; C, C+G, 51 MiB, unreadable refused; other users' pids ignored), declared-not-allocated " \
            "GPU-1 memory counted, watch starts under pressure; frozen switches = config defaults, stale WM_* dropped; " \
-           "user-service pressure, MemAvailable, 48 GB GPU, env cannot raise caps, CPUQuota '1min 30s' = 9000 %, " \
+           "user-service pressure, MemAvailable, 72 GB GPU, env cannot raise caps, CPUQuota '1min 30s' = 9000 %, " \
            "6 workers fit / 7 do not, code hash; unapproved per_grasp / KIT_GPU 0 / start gap 'entrance' refused by " \
            "cl_write_switches, approved 'socket_top' frozen; " \
            "watch starts despite a GPU-0 violation / failing nvidia-smi; watcher code WARNING; QX_GPU_GB exported; " \

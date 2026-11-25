@@ -4,10 +4,10 @@
 # <ckpt>: an AutoMate checkpoint of train_wm320.py (offset_mode gap, provenance split = the collection's), e.g. the
 # learner's last.pt copied aside; <training grasp keys>: a comma list of 4-6 grasps with condition "train" and
 # reference_ok from at least 3 assemblies (e.g. 00015_g00,00015_g01,00117_g02,00863_g00,00470_g01); the first is the
-# grasp of the two tests and of T8. Resources: one worker's. Beside the learner (MemoryMax 100G = 100 x 2^30 =
-# 107.37e9 bytes) and the watcher (256M = 0.27e9 bytes) the caps' 125e9 bytes leave 17.36e9 bytes = 16.17 GiB, so
-# use at most 16G (= 17.18e9 bytes) of RAM and at most 12 GB of GPU 1, e.g. 16G 500% 12 (the smoke measures what is
-# needed). If the smoke needs more than 16G, the lead asks the user (the smoke is not shrunk). Switches and assets: the collection's frozen
+# grasp of the two tests and of T8. Resources: one worker's. Since 2026-11-25 the caps are 180e9 bytes RAM / 4800 % / 72 GB
+# of GPU 1 (the user's plan B); beside the learner (MemoryMax 100G = 107.37e9 bytes) and the watcher (0.27e9 bytes)
+# 72.4e9 bytes remain; the smoke of 2026-11-25 measured one worker at 8.8e9 bytes peak and 4.4 GB of GPU 1, e.g. 16G 500% 12
+# (the smoke measures what is needed). If the smoke needs more than 16G, the lead asks the user (the smoke is not shrunk). Switches and assets: the collection's frozen
 # <collection>/inputs/switches.env (no new switches file) and <collection>/inputs/assets (WM_AUTOMATE_ASSETS = plan.json
 # input_roots.assets, set after cl_clean_env in every step; prepare and the restore check refuse anything else).
 # Run it while the learner trains if the learner's numbers are wanted (T7: the learner's GPU-1 and RAM peak during a

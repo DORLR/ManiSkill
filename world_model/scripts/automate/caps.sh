@@ -7,13 +7,15 @@
 # a single process is meant, by PID and process start time; never by a process-name pattern.
 #
 # Caps (all our jobs together; fixed here, the environment cannot change them):
-#   RAM  sum_i M_i + M_new <= 125 GB = 125e9 bytes            M_i: MemoryMax of every active qingxin-* scope;
-#        qingxin.slice itself has MemoryMax=125e9 bytes and MemorySwapMax=0 (a hard limit enforced by the kernel)
-#   CPU  sum_i C_i + C_new <= 3200 %                           C_i: CPUQuota; qingxin.slice has CPUQuota=3200 %
-#   GPU1 sum_u max(D_u, G_u) + G_new <= 48 GB = 48e9 bytes      D_u: GPU GB declared at the start of unit u (kept
+# Caps raised on 2026-11-25 by the user's decision (plan B, for the AutoMate online rounds beside the learner;
+# before: 125 GB / 3200 % / 48 GB):
+#   RAM  sum_i M_i + M_new <= 180 GB = 180e9 bytes            M_i: MemoryMax of every active qingxin-* scope;
+#        qingxin.slice itself has MemoryMax=180e9 bytes and MemorySwapMax=0 (a hard limit enforced by the kernel)
+#   CPU  sum_i C_i + C_new <= 4800 %                           C_i: CPUQuota; qingxin.slice has CPUQuota=4800 %
+#   GPU1 sum_u max(D_u, G_u) + G_new <= 72 GB = 72e9 bytes      D_u: GPU GB declared at the start of unit u (kept
 #        in $QX_RUN_DIR/qx/<unit>.gpu while u runs), G_u: GPU-1 memory of the PIDs in u's cgroup from the full
 #        nvidia-smi process table (compute AND graphics processes, nvidia-smi -q -d PIDS). Checked at every start
-#        and every 60 s by qx_watch.py, which stops our newest GPU unit when the sum passes 48 GB.
+#        and every 60 s by qx_watch.py, which stops our newest GPU unit when the sum passes 72 GB.
 #   GPU1 F - P - G_new >= 12 GB (12e9 bytes) stay free for other users   (only if G_new > 0); F = memory.free now,
 #        P = sum_u max(0, D_u - G_u): what our running units declared but have not allocated yet (a Kit start takes
 #        12 s to 5.5 min, starts are 90 s apart)
@@ -54,9 +56,9 @@
 #   qx_budget   prints our active units with MemoryMax, CPUQuota, declared and measured GPU-1 memory, and the sums.
 if [[ "$(declare -p QX_CAPS_LOADED 2>/dev/null)" != "declare -r"* ]]; then   # once per shell; the environment cannot preset them
   readonly QX_CAPS_LOADED=1
-  readonly QX_CAP_MEM_BYTES=125000000000
-  readonly QX_CAP_CPU_PCT=3200
-  readonly QX_CAP_GPU_OURS_MIB=45776          # 48e9 bytes / 2^20
+  readonly QX_CAP_MEM_BYTES=180000000000      # 180 GB (was 125 GB; raised 2026-11-25, the user's plan B)
+  readonly QX_CAP_CPU_PCT=4800                # 48 threads (was 32)
+  readonly QX_CAP_GPU_OURS_MIB=68664          # 72e9 bytes / 2^20 (was 48e9)
   readonly QX_GPU_FREE_MIN_MIB=11444          # 12e9 bytes / 2^20
   readonly QX_MEMAVAIL_MIN_BYTES=20000000000
   readonly QX_PSI_SOME_MAX=10 QX_PSI_FULL_MAX=1
@@ -180,7 +182,7 @@ qx_check() (        # a subshell: pipefail stays inside
     gpu_rows+=("$u|$v")
   done
   if [ $(( mem_sum + mem_new )) -gt $QX_CAP_MEM_BYTES ]; then
-    echo "refused: our MemoryMax sum ${mem_sum} B + $mem ($mem_new B) > ${QX_CAP_MEM_BYTES} B (125 GB)"; return 1
+    echo "refused: our MemoryMax sum ${mem_sum} B + $mem ($mem_new B) > ${QX_CAP_MEM_BYTES} B (180 GB)"; return 1
   fi
   if [ $(( cpu_sum + cpu_new )) -gt $QX_CAP_CPU_PCT ]; then
     echo "refused: our CPUQuota sum ${cpu_sum} % + ${cpu_new} % > ${QX_CAP_CPU_PCT} %"; return 1
@@ -213,7 +215,7 @@ qx_check() (        # a subshell: pipefail stays inside
       { echo "refused: nvidia-smi memory.free failed"; return 1; }
     [[ "$free_mib" =~ ^[0-9]+$ ]] || { echo "refused: GPU 1 free memory unreadable ($free_mib)"; return 1; }
     if [ $(( ours1 + new_mib )) -gt $QX_CAP_GPU_OURS_MIB ]; then
-      echo "refused: our GPU-1 memory ${ours1} MiB + ${gpu_gb} GB > 48 GB (${QX_CAP_GPU_OURS_MIB} MiB)"; return 1
+      echo "refused: our GPU-1 memory ${ours1} MiB + ${gpu_gb} GB > 72 GB (${QX_CAP_GPU_OURS_MIB} MiB)"; return 1
     fi
     if [ $(( free_mib - pend - new_mib )) -lt $QX_GPU_FREE_MIN_MIB ]; then
       echo "refused: GPU 1 has ${free_mib} MiB free, ${pend} MiB of it declared by our starting units; after ${gpu_gb} GB" \

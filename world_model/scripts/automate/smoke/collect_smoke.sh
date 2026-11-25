@@ -95,7 +95,7 @@
 # of loop 2: a run of them until loops 0 and 1 finish the 36 grasps ends the smoke with "loop 2 never claimed a grasp".
 # Afterwards: worker_gpu_gb_recommended = ceil(1.3 x the measured GPU-1 maximum) and the time estimate (printed by the
 # checker). Production sets worker_gpu_gb in its config to that recommendation, also when it is below the default 7
-# (collect.WORKER_GPU_GB; no code change, r7-ops-05, r11-ops-01); N workers x worker_gpu_gb <= 48, and the workers
+# (collect.WORKER_GPU_GB; no code change, r7-ops-05, r11-ops-01); N workers x worker_gpu_gb <= 72 (our GPU-1 cap since 2026-11-25), and the workers
 # that fit now are n = min(6, floor((F - 12 GB) / worker_gpu_gb)): report the time estimate for that n to the user and
 # re-check F before each collect_add_worker.sh.
 set -u

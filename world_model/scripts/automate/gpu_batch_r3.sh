@@ -36,7 +36,7 @@
 # starts every GPU job with CUDA_VISIBLE_DEVICES=1 (GPU 0 is never visible; the GPU-0 rule and the watcher are
 # unchanged). MemoryMax 18G per process (collect.WORKER_RESOURCES["cuda:0"], measured GPU PhysX peaks 13-15 GB); GPU
 # GB declared per process: 7 (run_on_rs2.sh default; GPU PhysX without cameras not measured yet: the watcher stops our
-# newest unit if the measured GPU-1 sum passes 48 GB).
+# newest unit if the measured GPU-1 sum passes our GPU-1 cap (72 GB since 2026-11-25)).
 # Afterwards (not here): compare per assembly with batch_r3_cpu (compare_physics_device.py --batch-a batch_r3_gpu
 # --batch-b batch_r3_cpu: (i) / (ii) / (iii) pass, depth_left, h_end, success_end, success_any; the assemblies only in
 # the CPU batch are listed as such) and show the comparison to the user.

@@ -183,7 +183,7 @@ cl_static_budget() {    # N MEM CPU GPU: N x each <= the caps (otherwise later w
     { echo "refused: resources '$mem $cpu $gpu' unreadable"; return 1; }
   if [ $(( n * b )) -gt $QX_CAP_MEM_BYTES ] || [ $(( n * ${cpu%\%} )) -gt $QX_CAP_CPU_PCT ] ||
      [ $(( n * gpu * 1000000000 / 1048576 )) -gt $QX_CAP_GPU_OURS_MIB ]; then
-    echo "refused: $n workers x ($mem, $cpu, $gpu GB) exceed 125 GB / 3200 % / 48 GB"; return 1
+    echo "refused: $n workers x ($mem, $cpu, $gpu GB) exceed the caps (180 GB / 4800 % / 72 GB since 2026-11-25)"; return 1
   fi
 }
 

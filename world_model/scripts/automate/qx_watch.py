@@ -4,7 +4,7 @@
   1. memory: full avg10 of user@<uid>.service/memory.pressure (the cgroup systemd-oomd watches) > PSI_FULL_STOP, or
      MemAvailable < MEMAVAIL_STOP_BYTES  ->  stop our newest unit of a stoppable kind (not watch / test / prep)
   2. GPU 1: sum over our units of max(declared GPU GB, measured GPU-1 memory of the unit's PIDs from the full process
-     table, nvidia-smi -q -d PIDS) > 48 GB  ->  stop our newest unit that holds GPU-1 memory or declared some;
+     table, nvidia-smi -q -d PIDS) > 72 GB  ->  stop our newest unit that holds GPU-1 memory or declared some;
      GPU-1 memory.free < GPU1_FREE_STOP_BYTES (8e9) while our measured GPU-1 sum > 0  ->  stop our newest unit that
      holds GPU-1 memory (other users keep room)
   3. GPU 0: a PID of one of our units holds on GPU 0 more than graphics contexts (nvidia-smi type G) of at most
@@ -50,7 +50,7 @@ PROC = Path("/proc")
 PERIOD_S = 60
 PSI_FULL_STOP = 30.0
 MEMAVAIL_STOP_BYTES = 10_000_000_000
-GPU_OURS_MAX_MIB = 45776                   # 48e9 bytes
+GPU_OURS_MAX_MIB = 68664                   # 72e9 bytes (was 48e9; raised 2026-11-25, the user's plan B)
 GPU0_G_MAX_MIB = 50                        # per pid on GPU 0: graphics contexts only, at most 50 MiB in total
 GPU1_FREE_STOP_BYTES = 8_000_000_000
 NOT_STOPPABLE = {"watch", "test", "prep"}
@@ -219,7 +219,7 @@ def _decide_rest(us: list[dict], psi_full: float, avail: int, gpu1: dict, gpu1_f
     if total > GPU_OURS_MAX_MIB:                                    # 2. GPU 1, our sum
         gpu_users = [u for u in newest if use[u["name"]] > 0]
         if gpu_users:
-            return [(gpu_users[0]["name"], f"our GPU-1 memory {total} MiB > {GPU_OURS_MAX_MIB} MiB (48 GB)", "gpu_sum")]
+            return [(gpu_users[0]["name"], f"our GPU-1 memory {total} MiB > {GPU_OURS_MAX_MIB} MiB (72 GB)", "gpu_sum")]
     if gpu1_free_mib is not None and gpu1_free_mib * 1048576 < GPU1_FREE_STOP_BYTES and sum(meas.values()) > 0:
         holders = [u for u in newest if meas[u["name"]] > 0]        # 2. GPU 1, room for other users
         if holders:

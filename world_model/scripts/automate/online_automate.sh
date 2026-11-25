@@ -9,7 +9,7 @@
 # the rounds collect on its training grasps, the tests use its selection grasps. Resources per worker are the caller's
 # (no defaults; from the smoke T7: MemoryMax >= the measured scope peak, GPU GB >= Kit's measured GPU-1 peak +
 # <torch MiB> + 1 GB); every start is checked against the live sums of all our units, the learner's included
-# (caps.sh: 125 GB / 3200 % / 48 GB of GPU 1). If the planned workers do not fit beside the learner, the starts wait
+# (caps.sh: 180 GB / 4800 % / 72 GB of GPU 1 since 2026-11-25, the user's plan B; before 125 GB / 3200 % / 48 GB). If the planned workers do not fit beside the learner, the starts wait
 # (caps refusals, ALERT after 30 min): show the numbers to the user, never shrink silently.
 # 1. Code: the rounds run with the learner's frozen code <learner run dir>/code (unchanged since train_automate.sh froze
 #    it: cl_code_hash = <learner run dir>/code.sha256) when every file the rounds call (ROUND_FILES: the online
