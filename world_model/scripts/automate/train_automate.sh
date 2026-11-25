@@ -43,14 +43,14 @@ if [ "${1:-}" = "--inside" ]; then                       # the tmux side, from t
   rc=$?
   echo "exit $rc $(date)" >> "$log"
   unit=$(cat "$ufile" 2>/dev/null)
-  if [ $rc -eq 7 ] || { [ -n "$unit" ] && [ -e "$QX_RUN_DIR/gpu0/$unit" ]; }; then
+  if [ $rc -eq 7 ] || { [ -n "$unit" ] && [ -e "$QX_RUN_DIR/gpu0/$unit.scope" ]; }; then
     msg="training $SCRIPT: forbidden GPU-0 context (exit $rc, unit ${unit:-?}); STOP written, no restart (log $log)"
     echo "$(date '+%F %T') $msg" >> "$RUN/STOP"
     echo "$(date '+%F %T') $msg" >> "$RUN/logs/ALERT"
-  elif [ -n "$unit" ] && [ -e "$QX_RUN_DIR/shed/$unit" ]; then
-    msg="training $SCRIPT stopped by qx_watch.py (exit $rc): $(head -c 300 "$QX_RUN_DIR/shed/$unit" | tr '\n' ' ')(log $log;"
+  elif [ -n "$unit" ] && [ -e "$QX_RUN_DIR/shed/$unit.scope" ]; then
+    msg="training $SCRIPT stopped by qx_watch.py (exit $rc): $(head -c 300 "$QX_RUN_DIR/shed/$unit.scope" | tr '\n' ' ')(log $log;"
     msg="$msg newest checkpoint: $(ls -t "$RUN"/*.pt "$RUN"/*/*.pt 2>/dev/null | head -1)); no restart"
-    rm -f "$QX_RUN_DIR/shed/$unit"
+    rm -f "$QX_RUN_DIR/shed/$unit.scope"
     echo "$(date '+%F %T') $msg" >> "$RUN/logs/ALERT"
   elif [ $rc -eq 8 ]; then
     echo "$(date '+%F %T') training $SCRIPT: nvidia-smi unreadable at a GPU check (exit 8; log $log)" >> "$RUN/logs/ALERT"

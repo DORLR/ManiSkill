@@ -18,7 +18,7 @@
 # files cannot be used, the watcher deletes a dead pid's heartbeat within its 60 s period, qx_watch.py):
 #   1. touch <out>/STOP. BEFORE stopping anything, record for each loop p<w> whether the unit named in its newest unit
 #      file m1/logs/batch_r3_gpu_<stamp>_p<w>_*.unit (largest unix time in the name) is active:
-#      systemctl --user is-active <that unit>.scope (the unit file holds the name without its suffix; r9-ops-chk-01). Then systemctl --user stop the exact units named in
+#      systemctl --user is-active <that unit>.scope (the unit file holds the name without its suffix; r9-ops-chk-01). Then systemctl --user stop the exact units (<name>.scope) named in
 #      m1/logs/batch_r3_gpu_<stamp>_p*_*.unit; wait until `tmux -L qingxin ls` shows no qingxin-batch* session.
 #   2. ONLY for each loop p<w> whose newest unit was active in step 1 (its process was really stopped by us; a loop
 #      whose newest process had already ended by itself, a crash or exit 124, and that was sleeping before its next

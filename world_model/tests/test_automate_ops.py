@@ -1246,7 +1246,7 @@ def fake_tree(tmp: Path) -> Path:
     (W / "scripts/automate/collect_lib.sh").write_text(lib)
     (W / "scripts/automate/caps.sh").write_text(   # stand-in qx_run (unit file, runs the command), sleep is instant
         f"export QX_RUN_DIR={tmp}/run\nmkdir -p $QX_RUN_DIR\n"
-        "qx_run() { [ -n \"${QX_UNIT_FILE:-}\" ] && echo \"qingxin-collect-t-$RANDOM.scope\" > \"$QX_UNIT_FILE\"; "
+        "qx_run() { [ -n \"${QX_UNIT_FILE:-}\" ] && echo \"qingxin-collect-t-$RANDOM\" > \"$QX_UNIT_FILE\"; "
         "export QX_UNIT_FILE; shift 5; \"$@\"; }\n"
         "sleep() { [ -e \"$QX_RUN_DIR/nowatch\" ] && rm -f \"$QX_RUN_DIR/nowatch\"; :; }\n"
         "[ -e \"$QX_RUN_DIR/fastalert\" ] && REFUSED_ALERT_S=0\n")
