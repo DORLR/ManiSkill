@@ -60,11 +60,32 @@ def phase_of(gap_mm: np.ndarray, seated: np.ndarray) -> np.ndarray:
     return np.where(seated > 0.5, 3, p)
 
 
-def probes_of(root: Path, entries: list[dict], used: set[int], shaping: float, gamma: float) -> dict[int, np.ndarray]:
+def true_gap_from_probe(probe_dim0: np.ndarray, L_mm: np.ndarray | float, offset_mode: str) -> np.ndarray:
+    """True pin-tip gap [mm] (positive in front of board, negative in hole) from probe dim 0."""
+    x = np.asarray(probe_dim0, np.float64)
+    if offset_mode == "gap":
+        return x
+    if offset_mode == "along":
+        return -x - np.asarray(L_mm, np.float64)
+    raise ValueError(f"unknown offset_mode {offset_mode!r}")
+
+
+def along_progress_from_delta(delta_dim0: np.ndarray, offset_mode: str) -> np.ndarray:
+    """Signed forward insertion progress [mm] (positive = moving into the hole) from dim-0 change over k steps.
+    In 'gap' mode: -(g(t+k) - g(t)) == along(t+k) - along(t) identically since L cancels out."""
+    d = np.asarray(delta_dim0, np.float64)
+    if offset_mode == "gap":
+        return -d
+    if offset_mode == "along":
+        return d
+    raise ValueError(f"unknown offset_mode {offset_mode!r}")
+
+
+def probes_of(root: Path, entries: list[dict], used: set[int], shaping: float, gamma: float, offset_mode: str = "along") -> dict[int, np.ndarray]:
     out = {}
     for e in sorted(used):
         with np.load(root / entries[e]["path"]) as z:
-            tr = WD.trajectory(z, json.loads(str(z["meta"])), shaping, gamma)
+            tr = WD.trajectory(z, json.loads(str(z["meta"])), shaping, gamma, offset_mode=offset_mode)
         out[e] = None if tr is None else tr["probe"]
     return out
 
@@ -76,11 +97,12 @@ def run_source(m, ck: dict, root: Path, entries: list[dict], n_windows: int, bat
     if len(items) > n_windows:
         items = items[np.sort(rng.choice(len(items), n_windows, replace=False))]
     shaping, gamma = float(ck.get("shaping", 0.0)), float(m.cfg.gamma)
-    probes = probes_of(root, entries, {int(e) for e in items[:, 0]}, shaping, gamma)
+    offset_mode = str(ck.get("offset_mode", getattr(m, "offset_mode", "along")))
+    probes = probes_of(root, entries, {int(e) for e in items[:, 0]}, shaping, gamma, offset_mode=offset_mode)
     keep = np.array([probes[int(e)] is not None for e in items[:, 0]], bool)
     dropped = int((~keep).sum())
     items = items[keep]
-    ds = WindowData(root, entries, items, ck["stats"], shaping, gamma)
+    ds = WindowData(root, entries, items, ck["stats"], shaping, gamma, offset_mode=offset_mode)
     dl = torch.utils.data.DataLoader(ds, batch_size=batch, shuffle=False, num_workers=workers, persistent_workers=False)
     H = WD.H
     keys = ("lat_wm", "lat_enc", "lat_zero", "lat_cv", "al_wm", "al_enc", "al_zero", "al_cv", "ok", "phase", "prog_true", "prog_wm",
@@ -107,7 +129,7 @@ def run_source(m, ck: dict, root: Path, entries: list[dict], n_windows: int, bat
         done = W["done"].T.double().cpu().numpy()
         rew = W["reward"].T.double().cpu().numpy()
         L_mm = np.array([1000.0 * float(entries[int(e)]["pin_length_m"]) for e in e_idx])
-        gap = -pr[0, :, 0] - L_mm
+        gap = true_gap_from_probe(pr[0, :, 0], L_mm, offset_mode)
         ph = phase_of(gap, done[0])
         prev = np.stack([probes[int(e)][int(k) - 1] if k > 0 else probes[int(e)][int(k)] for e, k in zip(e_idx, k_idx)])
         vel = pr[0] - prev                                                              # (B, 4) true change of the last decision
@@ -130,13 +152,13 @@ def run_source(m, ck: dict, root: Path, entries: list[dict], n_windows: int, bat
             tmp["al_cv"].append(np.abs(dc - dt)[:, 0])
             tmp["ok"].append(ok)
             tmp["phase"].append(ph)
-            tmp["prog_true"].append(dt[:, 0])
-            tmp["prog_wm"].append(dw[:, 0])
+            tmp["prog_true"].append(along_progress_from_delta(dt[:, 0], offset_mode))
+            tmp["prog_wm"].append(along_progress_from_delta(dw[:, 0], offset_mode))
             tmp["done_lab"].append(done[j])
             tmp["done_img"].append(done_img[j])
             tmp["rew_true"].append(rew[j - 1])
             tmp["rew_img"].append(rew_img[j - 1])
-            tmp["gap_j"].append(-pr[j, :, 0] - L_mm)
+            tmp["gap_j"].append(true_gap_from_probe(pr[j, :, 0], L_mm, offset_mode))
         for key in keys:
             rows[key].append(np.stack(tmp[key], 1))                                   # (B, H)
         rows["traj"].append(e_idx.astype(np.int64))
@@ -252,18 +274,17 @@ def main():
     ap.add_argument("--windows", type=int, default=20000, help="windows per source (random, seeded)")
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--split-mode", choices=list(D.SPLIT_MODES), default="split320")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ck = torch.load(args.ckpt, map_location="cpu", weights_only=False)
     if not ck.get("offset_weight", 0.0) > 0:
         raise SystemExit(f"{args.ckpt} has no offset read-out head")
-    if ck.get("offset_label", WD.OFFSET_ALONG) != WD.OFFSET_ALONG:     # the gap label (AutoMate, decision 6 of 2026-11-23)
-        raise SystemExit(f"{args.ckpt} has offset label {ck.get('offset_label')!r}: this analysis compares the read-out "
-                         "with the along-axis probe labels (ManiSkill checkpoints only)")
     m = load(args.ckpt, dev)
-    sources = {"demo": (Path(args.fast), [e for e in D.load_entries(args.fast) if e["split"] == "heldout"])}
-    res = {"ckpt": args.ckpt, "step": int(ck.get("step", -1)), "H": WD.H, "sources": {}, "errors": {}}
+    sources = {"demo": (Path(args.fast), [e for e in D.load_entries(args.fast, split_mode=args.split_mode) if e["split"] == "heldout"])}
+    res = {"ckpt": args.ckpt, "step": int(ck.get("step", -1)), "offset_mode": m.offset_mode, "split_mode": args.split_mode,
+           "H": WD.H, "sources": {}, "errors": {}}
     if args.record:
         try:
             man = json.loads((Path(args.record) / "manifest.json").read_text())

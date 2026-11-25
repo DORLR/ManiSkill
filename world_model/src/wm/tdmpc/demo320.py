@@ -51,6 +51,7 @@ SELECT_ONE_IN = 20
 MIN_SELECT_GRASPS = 20               # AutoMate: checkpoints are not chosen on fewer selection grasps (train_wm320.py
                                      # refuses such data; the collector's plan counts against it before collecting)
 FORMAT = "wm-fast-1"
+SPLIT_MODES = ("split320", "strict_extrap")
 SUCCESS = {"depth_left_mm": 1.25, "angle_deg": 4.0, "lateral_mm": 2.0}      # the one success criterion (truth, at the end)
 
 
@@ -59,12 +60,35 @@ def is_success(truth: dict) -> bool:
     return all(float(truth[k]) < v for k, v in SUCCESS.items())
 
 
-def split320(port: str, pitch_deg: float, pos_m: float, grasp: str) -> str:
+def is_interior_strip(pitch_deg: float, pos_m: float) -> bool:
+    """Interior interpolation strips held out in both split320 and strict_extrap."""
+    x = pos_m * 1000.0
+    return -42.0 < pitch_deg < -38.0 or -21.0 < x < -19.0
+
+
+def is_extrap_band(pitch_deg: float, pos_m: float) -> bool:
+    """Outer extrapolation bands (pitch <= -55 or >= -25 deg, pos <= -28 or >= -12 mm)."""
+    x = pos_m * 1000.0
+    return pitch_deg <= -55.0 or pitch_deg >= -25.0 or x <= -28.0 or x >= -12.0
+
+
+def split320(port: str, pitch_deg: float, pos_m: float, grasp: str, split_mode: str = "split320") -> str:
+    if split_mode not in SPLIT_MODES:
+        raise ValueError(f"unknown split_mode {split_mode!r}; expected one of {SPLIT_MODES}")
     if port in TEST_PORTS:
         return "test"
-    if port in OOD_VAL_SHAPES or -42.0 < pitch_deg < -38.0 or -21.0 < pos_m * 1000 < -19.0:
+    if port in OOD_VAL_SHAPES or is_interior_strip(pitch_deg, pos_m):
+        return "heldout"
+    if split_mode == "strict_extrap" and is_extrap_band(pitch_deg, pos_m):
         return "heldout"
     return "select" if zlib.crc32(grasp.encode()) % SELECT_ONE_IN == 0 else "train"
+
+
+def _call_split(port: str, pitch_deg: float, pos_m: float, grasp: str, split_mode: str = "split320") -> str:
+    """Call split320 preserving 4-arg backwards compatibility when split_mode == 'split320' (tests may monkeypatch split320)."""
+    if split_mode == "split320":
+        return split320(port, pitch_deg, pos_m, grasp)
+    return split320(port, pitch_deg, pos_m, grasp, split_mode=split_mode)
 
 
 # ---------------------------------------------------------------- AutoMate's split (from the stored condition)
@@ -90,13 +114,14 @@ def automate_condition(e: dict) -> str | None:
     return e.get("condition")
 
 
-def split_of_entry(e: dict, allow_undecided: bool = False) -> str:
-    """The split of a manifest entry or grasp.json. ManiSkill (no simulator key): split320, unchanged. AutoMate: the
+def split_of_entry(e: dict, allow_undecided: bool = False, split_mode: str = "split320") -> str:
+    """The split of a manifest entry or grasp.json. ManiSkill (no simulator key): split320 with split_mode
+    (_call_split; "split320" unchanged). AutoMate: the
     stored condition through AUTOMATE_SPLIT_OF_CONDITION; "unassigned" or a missing condition raises SplitUndecided
     (allow_undecided: returns "unassigned" instead, for collection-time reports only); an unknown condition always
     raises."""
     if not is_automate(e):
-        return split320(e["port"], e["pitch_deg"], e["grasp_pos_m"], e["grasp"])
+        return _call_split(e["port"], e["pitch_deg"], e["grasp_pos_m"], e["grasp"], split_mode)
     c = automate_condition(e)
     if c in AUTOMATE_SPLIT_OF_CONDITION:
         return AUTOMATE_SPLIT_OF_CONDITION[c]
@@ -109,16 +134,18 @@ def split_of_entry(e: dict, allow_undecided: bool = False) -> str:
                          f"(known: {sorted(AUTOMATE_SPLIT_OF_CONDITION)})")
 
 
-def group320(port: str, pitch_deg: float, pos_m: float, grasp: str) -> str:
-    """Reporting group of a grasp: unseen_shape, interior_strip, test_port, select, train_outer, train_band."""
-    s, x = split320(port, pitch_deg, pos_m, grasp), pos_m * 1000
+def group320(port: str, pitch_deg: float, pos_m: float, grasp: str, split_mode: str = "split320") -> str:
+    """Reporting group of a grasp: unseen_shape, interior_strip, extrap_outer (strict_extrap), test_port, select, train_outer, train_band."""
+    s = _call_split(port, pitch_deg, pos_m, grasp, split_mode)
     if s == "test":
         return "test_port"
     if s == "heldout":
-        return "unseen_shape" if port in OOD_VAL_SHAPES else "interior_strip"
+        if port in OOD_VAL_SHAPES:
+            return "unseen_shape"
+        return "interior_strip" if is_interior_strip(pitch_deg, pos_m) else "extrap_outer"
     if s == "select":
         return "select"
-    return "train_outer" if pitch_deg < -55 or pitch_deg > -25 or x < -28 or x > -12 else "train_band"
+    return "train_outer" if is_extrap_band(pitch_deg, pos_m) else "train_band"
 
 
 def group_of_entry(e: dict) -> str:
@@ -293,13 +320,16 @@ def check_automate_conditions(grasps: list[dict]) -> None:
         raise SystemExit(f"{len(bad)} AutoMate grasps have no usable split, e.g. {bad[:3]}")
 
 
-def load_entries(root: str | Path, allow_undecided: bool = False) -> list[dict]:
-    """The fast copy's trajectories with their split (split_of_entry) and `bc` (is_bc: the policy imitates it, a
-    successful expert trajectory; module docstring). An AutoMate entry without a decided split raises SplitUndecided
-    (a ValueError); allow_undecided (collection-time reports only) gives it the split "unassigned" instead."""
+def load_entries(root: str | Path, allow_undecided: bool = False, split_mode: str = "split320") -> list[dict]:
+    """The fast copy's trajectories with their split (split_of_entry; split_mode for ManiSkill entries) and `bc`
+    (is_bc: the policy imitates it, a successful expert trajectory; module docstring). An AutoMate entry without a
+    decided split raises SplitUndecided (a ValueError); allow_undecided (collection-time reports only) gives it the
+    split "unassigned" instead."""
+    if split_mode not in SPLIT_MODES:
+        raise ValueError(f"unknown split_mode {split_mode!r}; expected one of {SPLIT_MODES}")
     out = []
     for e in json.loads((Path(root) / "manifest.json").read_text())["entries"]:
-        out.append({**e, "split": split_of_entry(e, allow_undecided), "bc": is_bc(e)})
+        out.append({**e, "split": split_of_entry(e, allow_undecided, split_mode), "bc": is_bc(e)})
     return out
 
 

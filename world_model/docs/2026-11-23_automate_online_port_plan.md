@@ -1,5 +1,14 @@
 # Port plan: online attempts and test-time evaluation on AutoMate (Isaac Lab)
 
+> **2026-11-25 update (merge of Chongyu's d1-gap-fix, the user's decision):** the offset read-out is now Chongyu's
+> `offset_mode` design for both simulators (`--offset-mode along|gap`, stored in the checkpoint; `WMAgent.gap_mm`
+> refuses a pin length in gap mode; `attempt320._read_agent_offset_and_gap` and `_ForbidPinLength`). AutoMate accepts
+> only `gap` (`train_wm320` refuses `--offset-mode along` on AutoMate data; `common320.check_offset_mode` and
+> `WMAgent` refuse a non-gap AutoMate checkpoint); ManiSkill accepts either mode. The names `offset_label`,
+> `gap_mm`/`along_mm` labels, `gap_estimate_mm` and `check_offset_label` used below no longer exist. Other decisions
+> of 2026-11-25: shared simulator-free module for the pieces both simulators need; LEFT_M = 6 cm + L on AutoMate
+> (ManiSkill unchanged); exploration windows measured from the tight-fit entrance; no back-off (`--max-retries 0`).
+
 Scope: run `scripts/online/run_wm320_attempts.py` (online rounds, `--mode collect`; tests `--mode act | wm | servo | random`)
 and the ACT-alone test on AutoMate grasps. Plan only; nothing is ported yet.
 Code read: `/home/qingxin/projects/ManiSkill-wm/world_model`, branch `automate`, uncommitted tree, 2026-11-23

@@ -3,6 +3,8 @@
 Modes
   act      the built-in ACT head alone (no correction, no stop, no retry; the "free" stops of the policies'
            closed-loop test): the "policy alone" column
+  act_done identical to "act" (no WM candidate corrections, no inside_mm, no retry), EXCEPT it uses the done head
+           (done(z) > 0.5 twice consecutively) to stop "seated", matching the stopping rule of "wm"
   wm       the run-time loop: candidates, correction when the model is sure, stop when seated, back off when blocked
   collect  "wm" plus exploration (online rounds, training grasps only)
   servo    ablation (2026-11-19, the user's request): the loop of "wm" (same done stop, same in-hole rule, same
@@ -46,9 +48,10 @@ candidates were offered, and the pick (0 proposal, i a corrected copy, -1 the se
 lateral offset from H* (`fk_lat` [mm], label frame) and the executed move of a non-proposal pick (`move_mm`: along,
 x, y in the label frame of the true axis).
 Gap g_t (the in-hole rule, the probe's and the ablation "random"'s bins, the logs): from the offset read-out o_t by
-common320.gap_estimate_mm. AutoMate (the user's decision 6 of 2026-11-23): the checkpoint's offset head was trained on
-the gap itself (offset label "gap_mm", wmdata320), g_t = o_t[0], with no pin length L, H* or simulator truth; an
-AutoMate attempt with a checkpoint of any other label is refused. ManiSkill: g_t = -o_t[0] - L, unchanged.
+_read_agent_offset_and_gap (agent320.WMAgent.gap_mm). offset_mode "gap" (wmdata320): g_t = o_t[0], with no pin length
+L, H* or simulator truth (self.L is not read during the decision, _ForbidPinLength); offset_mode "along" (legacy):
+g_t = -o_t[0] - L. AutoMate (the user's decision 6 of 2026-11-23): an attempt with a checkpoint of any offset_mode
+but "gap" is refused (common320.check_offset_mode).
 
 Per decision of "wm"/"collect" (every 0.4 s):
   1. observation: the context pictures of the recorder (pictures 2d-6, 2d-4, 2d-2, 2d of the attempt, 0.4 s apart,
@@ -104,8 +107,7 @@ from ..collect.explore import truth_outcome
 from ..tdmpc import demo320 as D
 from ..tdmpc import wmdata320 as WD
 from ..tdmpc.demo320 import is_success
-from .common320 import (RANDOM_EDGES_MM, check_offset_label, gap_bin, gap_estimate_mm, jpeg, offset, servo_move,
-                        simulator_of_robot, unjpeg)
+from .common320 import RANDOM_EDGES_MM, check_offset_mode, gap_bin, jpeg, offset, servo_move, simulator_of_robot, unjpeg
 
 EXECUTE = WD.EXECUTE
 LEFT_M = 0.06                                  # as the policies' closed-loop test ("free" stops)
@@ -114,12 +116,76 @@ BACKOFF_MM, BACKOFF_DECISIONS = 5.0, 2
 DONE_P, DONE_TIMES, NOT_DONE_P = 0.5, 2, 0.5
 MIN_TRY_MM, MIN_CORR_MM = 1.0, 0.5
 KINDS = {"proposal": 0, "correction": 1, "random": 2, "shift": 3, "backoff": 4, "reposition": 5}
-MODES = ("act", "wm", "collect", "servo", "random")
+MODES = ("act", "act_done", "wm", "collect", "servo", "random")
 SERVO_MIN_MM, SERVO_MAX_MM = 0.5, 1.5           # ablation "servo": dead band and largest move per decision
 SERVO_RECENT = 4                                # ablation "servo", axis "motion": decisions of recent motion
 
 
+def validate_attempt_args(mode: str, inside_mm: float | None = None, max_retries: int = 3, servo_axis: str = "true",
+                          random_p: tuple | list | None = None, probe_max: int = 0) -> None:
+    """Validate attempt() arguments without needing a simulator (also called by CPU unit tests)."""
+    if mode not in MODES:
+        raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
+    if mode == "act_done" and inside_mm is not None:
+        raise ValueError("mode act_done has no candidate corrections and does not accept inside_mm")
+    if mode in ("servo", "random") and inside_mm is None:
+        raise ValueError(f"mode {mode} is an ablation of the in-hole agent: it needs inside_mm")
+    if mode in ("servo", "random") and max_retries:
+        raise ValueError(f"mode {mode} runs without back-off (its re-position would use imagination): max_retries must be 0")
+    if mode == "servo" and servo_axis not in ("true", "motion"):
+        raise ValueError(f"servo_axis must be 'true' or 'motion', not {servo_axis!r}")
+    if mode == "random" and (random_p is None or len(random_p) != len(RANDOM_EDGES_MM) + 1
+                             or not all(0.0 <= float(x) <= 1.0 for x in random_p)):
+        raise ValueError(f"mode random needs random_p: {len(RANDOM_EDGES_MM) + 1} probabilities in [0, 1], got {random_p!r}")
+    if probe_max and mode != "wm":
+        raise ValueError("the counterfactual probe runs with mode wm only")
+
+
+def _read_agent_offset_and_gap(agent, z, pin_length_m: float | None = None) -> tuple[np.ndarray | None, float | None]:
+    """Read (offset_mm, gap_mm) from `agent` according to its offset_mode.
+    In zero-privilege 'gap' mode, pin_length_m MUST be None (never read/passed at test time) and agent.gap_mm(z) is
+    called with no pin_length_mm argument. In legacy 'along' mode, pin_length_m is passed to agent.gap_mm()."""
+    omode = getattr(agent, "offset_mode", "along")
+    if omode == "gap":
+        if pin_length_m is not None:
+            raise RuntimeError("zero-privilege violation: attempt320 must not pass/read self.L in offset_mode='gap'")
+        g = agent.gap_mm(z)
+        o = agent.offset_mm(z)
+        return o, g
+    if omode == "along":
+        if pin_length_m is None:
+            raise ValueError("legacy offset_mode='along' requires pin_length_m")
+        o = agent.offset_mm(z)
+        g = agent.gap_mm(z, pin_length_mm=float(pin_length_m) * 1000.0)
+        return o, g
+    raise ValueError(f"unknown offset_mode {omode!r}")
+
+
+class _ForbidPinLength:
+    """Context manager that raises RuntimeError if OnlineTester.L is accessed during test-time decision making."""
+
+    def __init__(self, tester: "OnlineTester", active: bool):
+        self.tester, self.active = tester, bool(active)
+
+    def __enter__(self):
+        if self.active:
+            self.tester._forbid_L = True
+
+    def __exit__(self, *exc):
+        if self.active:
+            self.tester._forbid_L = False
+
+
 class OnlineTester(Brancher):
+    @property
+    def L(self) -> float:
+        if getattr(self, "_forbid_L", False):
+            raise RuntimeError("zero-privilege violation: attempt320 read self.L during test-time decision in offset_mode='gap'")
+        return self._L_value
+
+    @L.setter
+    def L(self, value: float) -> None:
+        self._L_value = value
     # ------------------------------------------------------------ joint offsets that move the hand
     def jacobian(self, q9: np.ndarray, eps: float = 1e-5) -> np.ndarray:
         """(6, 7): hand position [m] and rotation vector [rad] (world frame) per joint [rad], by central differences of FK."""
@@ -143,24 +209,16 @@ class OnlineTester(Brancher):
                 random_reposition: float = 0.5, inside_mm: float | None = None, servo_axis: str = "true",
                 random_p: tuple | list | None = None, probe_max: int = 0, probe_gap_mm: float = 6.0) -> tuple[dict, dict]:
         """-> (summary, recording). `inside_mm` (2026-11-18, the user's decision; None = off): once the estimated pin-tip
-        depth g_t < -inside_mm (common320.gap_estimate_mm: AutoMate g_t = o[0] of a "gap_mm" checkpoint, no pin length,
-        the user's decision 6 of 2026-11-23; ManiSkill g_t = -o[0] - L as agent.gap_mm), the try is in the hole and only the proposal is executed
+        depth g_t < -inside_mm (agent.gap_mm: offset_mode "gap" g_t = o[0], no pin length, required on AutoMate by the
+        user's decision 6 of 2026-11-23; offset_mode "along" g_t = -o[0] - L), the try is in the hole and only the proposal is executed
         (no correction, no random candidate, no exploration push) until a back-off starts a new try. The decision and g_t at entry are logged (`inside_at`, `inside_gap_mm`). The recording is FullRecorder.end() plus `rgb_jpeg_list` (the stored JPEG bytes)
         and `dec_kind` (one KINDS value per executed decision)."""
         import torch
-        assert mode in MODES
-        if mode in ("servo", "random") and inside_mm is None:
-            raise ValueError(f"mode {mode} is an ablation of the in-hole agent: it needs inside_mm")
-        if mode in ("servo", "random") and max_retries:
-            raise ValueError(f"mode {mode} runs without back-off (its re-position would use imagination): max_retries must be 0")
-        if mode == "servo" and servo_axis not in ("true", "motion"):
-            raise ValueError(f"servo_axis must be 'true' or 'motion', not {servo_axis!r}")
-        if mode == "random" and (random_p is None or len(random_p) != len(RANDOM_EDGES_MM) + 1
-                                 or not all(0.0 <= float(x) <= 1.0 for x in random_p)):
-            raise ValueError(f"mode random needs random_p: {len(RANDOM_EDGES_MM) + 1} probabilities in [0, 1], got {random_p!r}")
-        if probe_max and mode != "wm":
-            raise ValueError("the counterfactual probe runs with mode wm only")
-        check_offset_label(agent.offset_label, simulator_of_robot(self.robot))   # AutoMate: the gap label only (decision 6)
+        validate_attempt_args(mode, inside_mm=inside_mm, max_retries=max_retries, servo_axis=servo_axis,
+                              random_p=random_p, probe_max=probe_max)
+        offset_mode = str(getattr(agent, "offset_mode", "along"))
+        forbid_L = mode != "collect" and (offset_mode == "gap" or mode in ("act", "act_done"))
+        check_offset_mode(offset_mode, simulator_of_robot(self.robot))   # AutoMate: offset_mode "gap" only (decision 6)
         r, rng = self.robot, np.random.default_rng(seed)
         torch.manual_seed(seed)
         np.random.seed(seed % (2 ** 32))
@@ -268,125 +326,135 @@ class OnlineTester(Brancher):
             idx = D.context_indices(j)
             q9 = r.qpos().astype(np.float64)
             q = q9[:7].copy()
-            z = agent.encode(np.stack([picture(i) for i in idx]), np.stack([rec.buf["depth"][i] for i in idx]), q)
-            chunk = agent.propose(z)[:EXECUTE]                  # (8, 7) relative to q
-            target, kind = chunk, "proposal"
-            if mode != "act":
-                p = agent.done(z)
-                vm = float(agent.values(z).mean())
-                log["done_p"].append(round(p, 3))
-                log["v_mean"].append(round(vm, 3))
-                done_run = done_run + 1 if p > DONE_P else 0
-                o = agent.offset_mm(z)                          # read-out (None without the head); g_t as agent.gap_mm
-                g = None if o is None else gap_estimate_mm(o, agent.offset_label, lambda: self.L * 1000.0)  # AutoMate: no L
-                if o is None and mode in ("servo", "random"):
-                    raise ValueError(f"mode {mode} needs the offset read-out head")
-                fk = WD.decision_labels(meta_l, r.hand_pose()[None].astype(np.float64), np.array([0]))["probe"][0]
-                rec_d = {"k": k, "g": None if g is None else round(g, 3),
-                         "lat": None if o is None else round(float(np.hypot(o[1], o[2])), 3), "offered": False, "pick": 0,
-                         "fk_lat": [round(float(fk[1]), 3), round(float(fk[2]), 3)]}
-                log["per_decision"].append(rec_d)
-                if inside_mm is not None and not inside:
-                    if g is not None and g < -inside_mm:
-                        inside = True                           # for the rest of this try (a back-off starts a new one)
-                        if log["inside_at"] is None:
-                            log["inside_at"], log["inside_gap_mm"] = k, round(g, 3)
-                if done_run >= DONE_TIMES:                      # one more push with the proposal, then the end
-                    q_last = execute(q[None] + chunk, q[None] + chunk, "proposal")
-                    k += 1
-                    truth_check(k)
-                    why = "seated"
-                    break
-                J = self.jacobian(q9)
-                Rh = r.hand_pose()[:3, :3]
-                dirs = [s * Rh[:, i] for i in range(3) for s in (1.0, -1.0)]
-                dirs = [d for d in dirs if not any(d @ e > np.cos(np.radians(45.0)) for e in excluded)]
-                moves = [d * mm / 1000.0 for d in dirs for mm in STEPS_MM] if not inside else []   # in the hole: none
-                offs = [offset(J, mv) for mv in moves]
-                cands = np.stack([chunk] + [chunk + of[None] for of in offs])
-                rec_d["offered"] = bool(len(offs))
-                pick = 0
-                probing = bool(probe_max and len(offs) and g is not None and g < probe_gap_mm and probes_in_bin[gap_bin(g)] < probe_max)
-                if len(offs) and mode in ("wm", "collect"):      # imagination: the agent's own correction rule
-                    if probing:
-                        sc, g_img = agent.score(z, cands, parts=True)
-                    else:
-                        sc = agent.score(z, cands)             # (1 + n, num_q)
-                    adv = sc[1:] - sc[0]
-                    ok = (adv.mean(1) > m_now) & (adv.min(1) > 0)
-                    if ok.any():
-                        pick = 1 + int(np.argmax(np.where(ok, adv.mean(1), -np.inf)))
-                model_pick = pick
-                if mode == "collect":
-                    gap = self.face_gap_mm()
-                    if len(offs) and 0.0 <= gap < 6.0 and rng.random() < eps:
-                        pick = int(rng.integers(1, len(cands)))
+            probe_rec = None
+            with _ForbidPinLength(self, forbid_L):
+                z = agent.encode(np.stack([picture(i) for i in idx]), np.stack([rec.buf["depth"][i] for i in idx]), q)
+                chunk = agent.propose(z)[:EXECUTE]                  # (8, 7) relative to q
+                target, kind = chunk, "proposal"
+                if mode == "act_done":
+                    p = agent.done(z)
+                    log["done_p"].append(round(p, 3))
+                    done_run = done_run + 1 if p > DONE_P else 0
+                    if done_run >= DONE_TIMES:                      # one more push with the proposal, then the end
+                        q_last = execute(q[None] + chunk, q[None] + chunk, "proposal")
+                        k += 1
+                        truth_check(k)
+                        why = "seated"
+                        break
+                elif mode != "act":
+                    p = agent.done(z)
+                    vm = float(agent.values(z).mean())
+                    log["done_p"].append(round(p, 3))
+                    log["v_mean"].append(round(vm, 3))
+                    done_run = done_run + 1 if p > DONE_P else 0
+                    o, g = _read_agent_offset_and_gap(agent, z, pin_length_m=None if offset_mode == "gap" else self.L)
+                    if o is None and mode in ("servo", "random"):
+                        raise ValueError(f"mode {mode} needs the offset read-out head")
+                    fk = WD.decision_labels(meta_l, r.hand_pose()[None].astype(np.float64), np.array([0]))["probe"][0]
+                    rec_d = {"k": k, "g": None if g is None else round(g, 3),
+                             "lat": None if o is None else round(float(np.hypot(o[1], o[2])), 3), "offered": False, "pick": 0,
+                             "fk_lat": [round(float(fk[1]), 3), round(float(fk[2]), 3)]}
+                    log["per_decision"].append(rec_d)
+                    if inside_mm is not None and not inside:
+                        if g is not None and g < -inside_mm:
+                            inside = True                           # for the rest of this try (a back-off starts a new one)
+                            if log["inside_at"] is None:
+                                log["inside_at"], log["inside_gap_mm"] = k, round(g, 3)
+                    if done_run >= DONE_TIMES:                      # one more push with the proposal, then the end
+                        q_last = execute(q[None] + chunk, q[None] + chunk, "proposal")
+                        k += 1
+                        truth_check(k)
+                        why = "seated"
+                        break
+                    J = self.jacobian(q9)
+                    Rh = r.hand_pose()[:3, :3]
+                    dirs = [s * Rh[:, i] for i in range(3) for s in (1.0, -1.0)]
+                    dirs = [d for d in dirs if not any(d @ e > np.cos(np.radians(45.0)) for e in excluded)]
+                    moves = [d * mm / 1000.0 for d in dirs for mm in STEPS_MM] if not inside else []   # in the hole: none
+                    offs = [offset(J, mv) for mv in moves]
+                    cands = np.stack([chunk] + [chunk + of[None] for of in offs])
+                    rec_d["offered"] = bool(len(offs))
+                    pick = 0
+                    probing = bool(probe_max and len(offs) and g is not None and g < probe_gap_mm and probes_in_bin[gap_bin(g)] < probe_max)
+                    if len(offs) and mode in ("wm", "collect"):      # imagination: the agent's own correction rule
+                        if probing:
+                            sc, g_img = agent.score(z, cands, parts=True)
+                        else:
+                            sc = agent.score(z, cands)             # (1 + n, num_q)
+                        adv = sc[1:] - sc[0]
+                        ok = (adv.mean(1) > m_now) & (adv.min(1) > 0)
+                        if ok.any():
+                            pick = 1 + int(np.argmax(np.where(ok, adv.mean(1), -np.inf)))
+                    model_pick = pick
+                    if mode == "collect":
+                        gap = self.face_gap_mm()
+                        if len(offs) and 0.0 <= gap < 6.0 and rng.random() < eps:
+                            pick = int(rng.integers(1, len(cands)))
+                            log["random_candidates"] += 1
+                    if mode == "random" and len(offs) and rng.random() < float(random_p[gap_bin(g)]):
+                        pick = int(rng.integers(1, len(cands)))    # ablation: a corrected copy at random, no imagination
                         log["random_candidates"] += 1
-                if mode == "random" and len(offs) and rng.random() < float(random_p[gap_bin(g)]):
-                    pick = int(rng.integers(1, len(cands)))    # ablation: a corrected copy at random, no imagination
-                    log["random_candidates"] += 1
-                if pick and pick == model_pick:
-                    log["interventions"] += 1
-                target, kind = cands[pick], ("proposal" if pick == 0 else "correction" if pick == model_pick else "random")
-                rec_d["pick"] = pick
-                if pick:
-                    rec_d["move_mm"] = [round(float(x), 3) for x in Bt @ moves[pick - 1] * 1000.0]
-                if pick and pick == model_pick:                # the model's own corrections only
-                    try_corr = try_corr + moves[pick - 1]
-                if mode == "servo":
-                    mv = np.zeros(3)
-                    ax = None
-                    if servo_axis == "true":
-                        ax = np.asarray(self.F[:, 0], np.float64)
-                    else:                                      # the way in, from the hand's own motion (no H*, no axis)
-                        n_b = min(SERVO_RECENT, len(hands) - 1, len(servo_hist))
-                        dm = (hands[-1] - hands[-1 - n_b] - np.sum(servo_hist[len(servo_hist) - n_b:], axis=0)) if n_b > 0 else np.zeros(3)
-                        if np.linalg.norm(dm) >= MIN_TRY_MM / 1000.0:
-                            ax_last = dm / np.linalg.norm(dm)
-                        ax = ax_last                           # blocked: the last estimate
-                    if not inside and float(np.hypot(o[1], o[2])) >= SERVO_MIN_MM and ax is not None:
-                        # ablation: move by the read-out, no imagination (in the read-out's label frame _basis(ax))
-                        rec_d["axis_err_deg"] = round(float(np.degrees(np.arccos(np.clip(ax @ self.F[:, 0], -1.0, 1.0)))), 2)
-                        mv = servo_move(float(o[1]), float(o[2]), ax, SERVO_MAX_MM)     # [m]
-                        target, kind = chunk + offset(J, mv)[None], "correction"
-                        rec_d["pick"] = -1
-                        rec_d["move_mm"] = [round(float(x), 3) for x in Bt @ mv * 1000.0]
-                        log["servo_moves"] += 1
-                    servo_hist.append(mv)
-                if torch.cuda.is_available():
-                    torch.cuda.synchronize()
-                lat_ms = (time.perf_counter() - t_dec) * 1000.0    # the choice is made; the probe below is not counted
-                probe_rec = None
-                if probing:                                    # B2: every candidate really executed, then restored
-                    t_p = time.time()
-                    probes_in_bin[gap_bin(g)] += 1
-                    targets = list(cands)
-                    servo = float(np.hypot(o[1], o[2])) >= SERVO_MIN_MM
-                    if servo:
-                        targets.append(chunk + offset(J, servo_move(float(o[1]), float(o[2]), self.F[:, 0], SERVO_MAX_MM))[None])
-                    targets.append(cands[0])                   # the proposal again: the simulator's own noise
-                    br, dev = branch_all(q, chunk, targets)
-                    dup = br.pop()
-                    probe_rec = {"k": k, "g": round(g, 3), "lat": round(float(np.hypot(o[1], o[2])), 3), "pick": pick, "n_cand": len(cands),
-                                 "S": [round(float(x), 4) for x in sc.mean(1)], "S_min_adv": [round(float(x), 4) for x in adv.min(1)],
-                                 "G_img": [round(float(x), 4) for x in g_img], "R": [round(b["R"], 4) for b in br],
-                                 "seated": [b["seated"] for b in br], "depth_gain_mm": [round(b["depth_gain_mm"], 3) for b in br],
-                                 "lat_mm": [round(b["lat_mm"], 3) for b in br], "servo": servo, "restore_dev_mm": round(dev, 4),
-                                 "r_steps": [b["r_steps"] for b in br], "seated_steps": [b["seated_steps"] for b in br],
-                                 "R0_repeat": round(dup["R"], 4),
-                                 "repeat_first_dev_mm": round(float(np.linalg.norm(dup["first_hand"] - br[0]["first_hand"]) * 1000.0), 4),
-                                 "first_hand": br[pick]["first_hand"], "seconds": round(time.time() - t_p, 2)}
-                    log["probes"].append(probe_rec)
-                if mode == "collect" and not shifted and 0.5 <= gap <= 4.0 and not inside:   # no push in the hole
-                    shifted = True
-                    a = self.F[:, 0]
-                    u = rng.normal(size=3)
-                    u -= (u @ a) * a
-                    u /= np.linalg.norm(u)
-                    mm = float(rng.uniform(0.5, 2.0))
-                    target, kind = target + offset(J, u * mm / 1000.0)[None], "shift"
-                    log["shift"] = {"decision": k, "mm": round(mm, 3), "gap_mm": round(gap, 3)}
-            if lat_ms is None:                                 # mode act: the proposal is the choice
+                    if pick and pick == model_pick:
+                        log["interventions"] += 1
+                    target, kind = cands[pick], ("proposal" if pick == 0 else "correction" if pick == model_pick else "random")
+                    rec_d["pick"] = pick
+                    if pick:
+                        rec_d["move_mm"] = [round(float(x), 3) for x in Bt @ moves[pick - 1] * 1000.0]
+                    if pick and pick == model_pick:                # the model's own corrections only
+                        try_corr = try_corr + moves[pick - 1]
+                    if mode == "servo":
+                        mv = np.zeros(3)
+                        ax = None
+                        if servo_axis == "true":
+                            ax = np.asarray(self.F[:, 0], np.float64)
+                        else:                                      # the way in, from the hand's own motion (no H*, no axis)
+                            n_b = min(SERVO_RECENT, len(hands) - 1, len(servo_hist))
+                            dm = (hands[-1] - hands[-1 - n_b] - np.sum(servo_hist[len(servo_hist) - n_b:], axis=0)) if n_b > 0 else np.zeros(3)
+                            if np.linalg.norm(dm) >= MIN_TRY_MM / 1000.0:
+                                ax_last = dm / np.linalg.norm(dm)
+                            ax = ax_last                           # blocked: the last estimate
+                        if not inside and float(np.hypot(o[1], o[2])) >= SERVO_MIN_MM and ax is not None:
+                            # ablation: move by the read-out, no imagination (in the read-out's label frame _basis(ax))
+                            rec_d["axis_err_deg"] = round(float(np.degrees(np.arccos(np.clip(ax @ self.F[:, 0], -1.0, 1.0)))), 2)
+                            mv = servo_move(float(o[1]), float(o[2]), ax, SERVO_MAX_MM)     # [m]
+                            target, kind = chunk + offset(J, mv)[None], "correction"
+                            rec_d["pick"] = -1
+                            rec_d["move_mm"] = [round(float(x), 3) for x in Bt @ mv * 1000.0]
+                            log["servo_moves"] += 1
+                        servo_hist.append(mv)
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                    lat_ms = (time.perf_counter() - t_dec) * 1000.0    # the choice is made; the probe below is not counted
+                    if probing:                                    # B2: every candidate really executed, then restored
+                        t_p = time.time()
+                        probes_in_bin[gap_bin(g)] += 1
+                        targets = list(cands)
+                        servo = float(np.hypot(o[1], o[2])) >= SERVO_MIN_MM
+                        if servo:
+                            targets.append(chunk + offset(J, servo_move(float(o[1]), float(o[2]), self.F[:, 0], SERVO_MAX_MM))[None])
+                        targets.append(cands[0])                   # the proposal again: the simulator's own noise
+                        br, dev = branch_all(q, chunk, targets)
+                        dup = br.pop()
+                        probe_rec = {"k": k, "g": round(g, 3), "lat": round(float(np.hypot(o[1], o[2])), 3), "pick": pick, "n_cand": len(cands),
+                                     "S": [round(float(x), 4) for x in sc.mean(1)], "S_min_adv": [round(float(x), 4) for x in adv.min(1)],
+                                     "G_img": [round(float(x), 4) for x in g_img], "R": [round(b["R"], 4) for b in br],
+                                     "seated": [b["seated"] for b in br], "depth_gain_mm": [round(b["depth_gain_mm"], 3) for b in br],
+                                     "lat_mm": [round(b["lat_mm"], 3) for b in br], "servo": servo, "restore_dev_mm": round(dev, 4),
+                                     "r_steps": [b["r_steps"] for b in br], "seated_steps": [b["seated_steps"] for b in br],
+                                     "R0_repeat": round(dup["R"], 4),
+                                     "repeat_first_dev_mm": round(float(np.linalg.norm(dup["first_hand"] - br[0]["first_hand"]) * 1000.0), 4),
+                                     "first_hand": br[pick]["first_hand"], "seconds": round(time.time() - t_p, 2)}
+                        log["probes"].append(probe_rec)
+                    if mode == "collect" and not shifted and 0.5 <= gap <= 4.0 and not inside:   # no push in the hole
+                        shifted = True
+                        a = self.F[:, 0]
+                        u = rng.normal(size=3)
+                        u -= (u @ a) * a
+                        u /= np.linalg.norm(u)
+                        mm = float(rng.uniform(0.5, 2.0))
+                        target, kind = target + offset(J, u * mm / 1000.0)[None], "shift"
+                        log["shift"] = {"decision": k, "mm": round(mm, 3), "gap_mm": round(gap, 3)}
+            if lat_ms is None:                                 # mode act / act_done: the proposal is the choice
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
                 lat_ms = (time.perf_counter() - t_dec) * 1000.0
@@ -397,7 +465,7 @@ class OnlineTester(Brancher):
             k += 1
             truth_check(k)
             hand = r.hand_pose()[:3, 3].copy()
-            if mode != "act" and probe_rec is not None:       # the executed branch against the real decision
+            if mode not in ("act", "act_done") and probe_rec is not None:       # the executed branch against the real decision
                 probe_rec["first_step_dev_mm"] = round(float(np.linalg.norm(hand - probe_rec.pop("first_hand")) * 1000.0), 4)
             if np.linalg.norm(hand - start_hand) > LEFT_M:
                 why = "left"
@@ -406,7 +474,7 @@ class OnlineTester(Brancher):
             if len(hands) > B.STALL_DECISIONS and np.linalg.norm(hands[-1] - hands[-1 - B.STALL_DECISIONS]) < B.STALL_M:
                 log["stall_states"].append({"decision": k, "done_p": None if p is None else round(p, 3), "v_mean": None if vm is None else round(vm, 3)})
                 room = max_decisions - k >= BACKOFF_DECISIONS + 1 + B.STALL_DECISIONS + 1
-                bad = mode != "act" and p < NOT_DONE_P
+                bad = mode not in ("act", "act_done") and p < NOT_DONE_P
                 d = hand - try_start
                 if np.linalg.norm(d) < MIN_TRY_MM / 1000.0:
                     d = hand - start_hand
@@ -431,27 +499,28 @@ class OnlineTester(Brancher):
                     why = "left"
                     break
                 # re-position: candidate positions across the way in, each imagined, the best (or a random one) taken
-                j = len(rec.buf["rgb"]) - 1
-                idx = D.context_indices(j)
-                q9 = r.qpos().astype(np.float64)
-                q = q9[:7].copy()
-                z = agent.encode(np.stack([picture(i) for i in idx]), np.stack([rec.buf["depth"][i] for i in idx]), q)
-                ax = -d                                        # the way in
-                e1 = np.cross(ax, [0.0, 0.0, 1.0]) if abs(ax[2]) < 0.9 else np.cross(ax, [1.0, 0.0, 0.0])
-                e1 /= np.linalg.norm(e1)
-                e2 = np.cross(ax, e1)
-                rad = radius_mm / 1000.0 * np.sqrt(rng.uniform(0.0, 1.0, n_candidates))
-                ang = rng.uniform(0.0, 2 * np.pi, n_candidates)
-                pos = rad[:, None] * (np.cos(ang)[:, None] * e1 + np.sin(ang)[:, None] * e2)
-                Jr = self.jacobian(q9)
-                ramp = np.arange(1, EXECUTE + 1)[:, None] / EXECUTE
-                rp = np.stack([offset(Jr, mv)[None] * ramp for mv in pos])     # (N, 8, 7) relative to q
-                sc = agent.score(z, rp).mean(1)
-                best = int(np.argmax(sc))
-                pick, how = best, "model"
-                if mode == "collect" and rng.random() < random_reposition:
-                    pick, how = int(rng.integers(n_candidates)), "random"
-                q_last = execute(q[None] + rp[pick], q[None] + rp[pick], "reposition")
+                with _ForbidPinLength(self, forbid_L):
+                    j = len(rec.buf["rgb"]) - 1
+                    idx = D.context_indices(j)
+                    q9 = r.qpos().astype(np.float64)
+                    q = q9[:7].copy()
+                    z = agent.encode(np.stack([picture(i) for i in idx]), np.stack([rec.buf["depth"][i] for i in idx]), q)
+                    ax = -d                                        # the way in
+                    e1 = np.cross(ax, [0.0, 0.0, 1.0]) if abs(ax[2]) < 0.9 else np.cross(ax, [1.0, 0.0, 0.0])
+                    e1 /= np.linalg.norm(e1)
+                    e2 = np.cross(ax, e1)
+                    rad = radius_mm / 1000.0 * np.sqrt(rng.uniform(0.0, 1.0, n_candidates))
+                    ang = rng.uniform(0.0, 2 * np.pi, n_candidates)
+                    pos = rad[:, None] * (np.cos(ang)[:, None] * e1 + np.sin(ang)[:, None] * e2)
+                    Jr = self.jacobian(q9)
+                    ramp = np.arange(1, EXECUTE + 1)[:, None] / EXECUTE
+                    rp = np.stack([offset(Jr, mv)[None] * ramp for mv in pos])     # (N, 8, 7) relative to q
+                    sc = agent.score(z, rp).mean(1)
+                    best = int(np.argmax(sc))
+                    pick, how = best, "model"
+                    if mode == "collect" and rng.random() < random_reposition:
+                        pick, how = int(rng.integers(n_candidates)), "random"
+                    q_last = execute(q[None] + rp[pick], q[None] + rp[pick], "reposition")
                 k += 1
                 truth_check(k)
                 log["repositions"].append({"decision": k, "how": how, "mm": [round(float(x) * 1000, 3) for x in pos[pick]],
@@ -471,7 +540,8 @@ class OnlineTester(Brancher):
         lab = WD.decision_labels({"H_star": self.H_star, "axis": self.F[:, 0], "pin_length_m": self.L}, out["hand"].astype(np.float64),
                                  np.array([EXECUTE * k, len(out["hand"]) - 1]))
         truth = truth_outcome(out["eval_rel"][-1])
-        summary = {"mode": mode, "stopped": why, "decisions": k, "seated_fk": bool(lab["seated"][0]), "seated_fk_after_hold": bool(lab["seated"][1]),
+        summary = {"mode": mode, "offset_mode": offset_mode, "stopped": why, "decisions": k, "seated_fk": bool(lab["seated"][0]),
+                   "seated_fk_after_hold": bool(lab["seated"][1]),
                    "success": is_success(truth), **{key: float(truth[key]) for key in D.SUCCESS},
                    **{key: log[key] for key in ("interventions", "random_candidates", "retries", "shift", "stall_states", "repositions",
                                                 "inside_at", "inside_gap_mm", "servo_moves", "per_decision", "probes",
@@ -484,4 +554,4 @@ class OnlineTester(Brancher):
         return summary, out
 
 
-__all__ = ["OnlineTester", "KINDS", "MODES", "RANDOM_EDGES_MM", "gap_bin"]
+__all__ = ["OnlineTester", "KINDS", "MODES", "RANDOM_EDGES_MM", "gap_bin", "validate_attempt_args", "_read_agent_offset_and_gap"]

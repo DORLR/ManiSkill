@@ -29,7 +29,7 @@
     (optimiser steps through stats_for, WindowData, the imitation loader and one validation, heldout_shape /
     heldout_grasp logged separately); last.pt and step2.pt hold the encoder settings and provenance (this tree's wm
     file, the split identity, the depth statistics sha256, the completeness record, the converter's code record
-    "fast_copy_code") and the offset label "gap_mm" (decision 6 of 2026-11-23); a manifest without a split
+    "fast_copy_code") and offset_mode "gap" (decision 6 of 2026-11-23; --offset-mode along refused); a manifest without a split
     identity, without a completeness record or with a partial one refused (--allow-partial passes that check);
     --resume of that checkpoint on a fast copy of another split identity refused. r11-integration-01: every
     validation split logs face_items_kept = [contact pushes in the face AUC, contact pushes in the split].
@@ -441,7 +441,6 @@ def test_loss_smoke():
          "term": torch.zeros(B, WD.H), "valid": torch.ones(B, WD.H), "obs_valid": torch.ones(B, WD.H + 1), "v_valid": torch.ones(B, WD.H + 1),
          "a_next": torch.rand(B, WD.H + 1, WD.ACTION_DIM, generator=g) * 2 - 1, "a_next_valid": torch.ones(B, WD.H + 1),
          "done": torch.zeros(B, WD.H + 1), "probe": torch.randn(B, WD.H + 1, 4, generator=g)}
-    W["offset"] = W["probe"]                          # the offset head's target (wmdata320 "offset")
     r2, d2 = pictures(4, 9)
     Bc = {"rgb": r2.view(1, 4, 320, 320, 3), "depth": d2.view(1, 4, 320, 320), "q": torch.randn(1, 7, generator=g),
           "a": torch.randn(1, 16 * 7, generator=g) * 0.1}
@@ -754,7 +753,10 @@ def test_automate_train(tmp: Path):
     import hashlib
     assert pv["depth_stats"]["sha256"] == hashlib.sha256((data / "depth_stats.json").read_bytes()).hexdigest()
     assert pv["completeness"] == comp and pv["allow_partial"] is False and pv["fast_copy_code"] == code, pv
-    assert ck["offset_label"] == pv["offset_label"] == WD.OFFSET_GAP, "AutoMate: the offset head learns the gap (decision 6)"
+    assert ck["offset_mode"] == "gap" and "offset_label" not in ck and "offset_label" not in pv, \
+        "AutoMate: the offset head learns the gap (decision 6; --offset-mode default gap)"
+    m = refused(data, tmp / "t11m", *args, "--offset-mode", "along")            # decision 6: gap only on AutoMate
+    assert "--offset-mode gap only" in m and not (tmp / "t11m").exists(), m
     assert (tmp / "t11" / "step2.pt").exists() and (tmp / "t11" / "DONE.json").exists()
     log = [json.loads(x) for x in (tmp / "t11" / "log.jsonl").read_text().splitlines()]
     start = [r for r in log if r.get("event") == "start"][0]
@@ -770,20 +772,24 @@ def test_automate_train(tmp: Path):
     run_train(data, tmp / "t11o", *args, "--offset-weight", "1.0")
     cko = torch.load(tmp / "t11o" / "last.pt", map_location="cpu", weights_only=False)
     assert cko["step"] == 2 and cko["offset_weight"] == 1.0, {k: cko.get(k) for k in ("step", "offset_weight")}
-    assert cko["offset_label"] == cko["provenance"]["offset_label"] == WD.OFFSET_GAP, cko["provenance"]
+    assert cko["offset_mode"] == "gap" and "offset_label" not in cko["provenance"], cko["provenance"]
     from wm.tdmpc.wm320 import WindowData, window_items
     mo = load(str(tmp / "t11o" / "last.pt"), device="cpu")
     assert mo._offset is not None and mo.offset_weight == 1.0
     tr_ents = [e for e in D.load_entries(str(data)) if e["split"] == "train" and e["steps"] >= WD.EXECUTE]
-    wd = WindowData(str(data), tr_ents, window_items(tr_ents), cko["stats"], cko["shaping"], cko["cfg"]["gamma"])
+    wd = WindowData(str(data), tr_ents, window_items(tr_ents), cko["stats"], cko["shaping"], cko["cfg"]["gamma"],
+                    offset_mode=cko["offset_mode"])
     item = wd[0]
+    item_a = WindowData(str(data), tr_ents, window_items(tr_ents), cko["stats"], cko["shaping"], cko["cfg"]["gamma"],
+                        offset_mode="along")[0]
     with np.load(data / tr_ents[0]["path"]) as z:
         meta0 = json.loads(str(z["meta"]))
     assert meta0["simulator"] == "automate", meta0.get("simulator")
-    off, probe = item["offset"].numpy(), item["probe"].numpy()
-    assert np.array_equal(off[:, 0], (-probe[:, 0].astype(np.float64) - 1000.0 * meta0["pin_length_m"]).astype(np.float32)), \
+    off, probe = item["probe"].numpy(), item_a["probe"].numpy()                  # gap-mode target, along-mode probe
+    assert np.allclose(off[:, 0], -probe[:, 0].astype(np.float64) - 1000.0 * meta0["pin_length_m"], atol=1e-4, rtol=0), \
         (off[:, 0], probe[:, 0])
-    assert np.array_equal(off[:, 1:], probe[:, 1:]), "lateral x, y and tilt as probe"
+    assert np.array_equal(off[:, 0], item["gap_mm"].numpy()), "the gap-mode target is gap_mm"
+    assert np.array_equal(off[:, 1:], probe[:, 1:]), "lateral x, y and tilt as the along probe"
     batch = torch.utils.data.default_collate([item])
     mo.train()
     total, info = mo.loss(batch, None, 0, 5000, 0.0)
@@ -802,8 +808,8 @@ def test_automate_train(tmp: Path):
     (data / "depth_stats.json").write_text(json.dumps(DS.compute(str(data), 0.5)))
     return (f"2 optimiser steps on 3 training trajectories (resnet34, token_dim 8), validation over select / heldout / "
             f"heldout_shape / heldout_grasp; provenance with this tree's wm, the split identity, the stats sha256, the "
-            f"completeness and the converter's code record; face_items_kept logged per split; with --offset-weight 1.0: offset_weight 1.0, offset_label gap_mm, "
-            f"WindowData offset[:, 0] = -probe[:, 0] - 1000 L and WM320.loss offset_loss {info['offset_loss']:.4f} > 0; "
+            f"completeness and the converter's code record; face_items_kept logged per split; with --offset-weight 1.0: offset_weight 1.0, offset_mode gap "
+            f"(--offset-mode along refused), WindowData gap probe[:, 0] = -along probe[:, 0] - 1000 L and WM320.loss offset_loss {info['offset_loss']:.4f} > 0; "
             f"test trajectory not converted; no split identity, no completeness record and a partial "
             f"collection refused (--allow-partial passes); resume on another split refused"
             + (f"; NOTE {note}" if note else ""))

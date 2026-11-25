@@ -12,8 +12,8 @@ Per decision (0.4 s):
   done      the done head's probability that the plug is seated now
   value     the value heads' estimates V at the current latent (their mean is what the back-off decision compares)
   gap       the pin-tip gap from the offset read-out head (gap_mm; attempt320's in-hole rule): for a checkpoint with
-            offset label "gap_mm" (AutoMate, the user's decision 6 of 2026-11-23) the read-out itself, without the pin
-            length; "along_mm" (ManiSkill) minus the pin length, as before (common320.gap_estimate_mm)
+            offset_mode "gap" the read-out itself, without the pin length (required for AutoMate, the user's decision 6
+            of 2026-11-23); offset_mode "along" (legacy; every checkpoint without the key) minus the pin length
 Nothing here reads H*, the insertion axis or the simulator's truth.
 """
 
@@ -33,18 +33,17 @@ class WMAgent:
         ck = torch.load(ckpt, map_location="cpu", weights_only=False)           # as wm320.load, read once
         if ck.get("labels") != WD.LABELS:
             raise ValueError(f"{ckpt} was trained with labels {ck.get('labels')}, this code has {WD.LABELS}")
+        self.offset_mode = str(ck.get("offset_mode", "along"))
+        if self.offset_mode not in WD.OFFSET_MODES:
+            raise ValueError(f"{ckpt} has unknown offset_mode {self.offset_mode!r}; expected one of {WD.OFFSET_MODES}")
         self.m = WM320(ck["stem"], ck["stats"], ck.get("shaping", 0.0), imagenet=ck.get("imagenet", False),
-                       offset_weight=ck.get("offset_weight", 0.0), **encoder_settings(ck), **ck["cfg"])
+                       offset_weight=ck.get("offset_weight", 0.0), offset_mode=self.offset_mode, **encoder_settings(ck), **ck["cfg"])
         self.m.load_state_dict(ck["state"])
         self.m.to(self.device).eval()
         self.horizon, self.gamma, self.step = horizon, float(self.m.cfg.gamma), int(ck.get("step", -1))
         self.shaping = float(ck.get("shaping", 0.0))                           # the reward's shaping weight (for true returns)
-        # the offset head's first component (wmdata320 OFFSET_LABELS): "along_mm" for every checkpoint without the key
-        self.offset_label = ck.get("offset_label", WD.OFFSET_ALONG)
-        if self.offset_label not in WD.OFFSET_LABELS:
-            raise ValueError(f"{ckpt} has offset label {self.offset_label!r}, this code knows {WD.OFFSET_LABELS}")
-        if (ck.get("provenance") or {}).get("split") is not None and self.offset_label != WD.OFFSET_GAP:
-            raise ValueError(f"{ckpt} was trained on AutoMate data with offset label {self.offset_label!r}: its gap would "
+        if (ck.get("provenance") or {}).get("split") is not None and self.offset_mode != "gap":
+            raise ValueError(f"{ckpt} was trained on AutoMate data with offset_mode {self.offset_mode!r}: its gap would "
                              "need the pin length at test time (decision 6 of 2026-11-23); train a new one")
         del ck
 
@@ -69,28 +68,30 @@ class WMAgent:
 
     @torch.no_grad()
     def offset_mm(self, z: torch.Tensor) -> np.ndarray | None:
-        """The offset read-out head on z: the hand's estimated offset from H* (along the insertion axis, lateral x,
-        lateral y [mm], tilt [deg]; wmdata320.decision_labels' "probe" frame; with offset label "gap_mm" the first
-        component is the pin-tip gap instead, wmdata320 "offset"), (4,). None without the head."""
+        """The offset read-out head on z, (4,). None without the head.
+        - offset_mode == 'gap': (gap_mm, lateral x [mm], lateral y [mm], tilt [deg]) — zero-privilege pin-tip gap.
+        - offset_mode == 'along' (legacy): (along_mm, lateral x [mm], lateral y [mm], tilt [deg]) from H*."""
         if self.m._offset is None:
             return None
         return (self.m._offset(z) * self.m.off_scale)[0].double().cpu().numpy()
 
     @torch.no_grad()
     def gap_mm(self, z: torch.Tensor, pin_length_mm: float | None = None) -> float | None:
-        """Estimated distance of the pin tips in front of the board face [mm] (negative: that deep in the hole), from the
-        offset read-out head on z (z comes from the pictures and joints only; no H* at test time). None without the head.
-        2026-11-18, the user's decision: used only to tell the phase (in the hole or not), never to score or move
-        (the ablation modes "servo" of attempt320 move by the read-out on purpose).
-        Offset label "gap_mm" (AutoMate, decision 6 of 2026-11-23): g = o[0], no pin length (giving one is refused);
-        "along_mm": g = -o[0] - pin_length_mm, as before (common320.gap_estimate_mm)."""
-        from .common320 import gap_estimate_mm
-        if self.offset_label == WD.OFFSET_GAP and pin_length_mm is not None:
-            raise ValueError("this checkpoint reads the pin-tip gap directly: no pin length at test time")
-        if self.offset_label == WD.OFFSET_ALONG and pin_length_mm is None:
-            raise ValueError("this checkpoint's offset head reads the depth along the axis: its gap needs the pin length")
-        o = self.offset_mm(z)
-        return None if o is None else gap_estimate_mm(o, self.offset_label, lambda: pin_length_mm)
+        """Estimated distance of the pin tips in front of the board face [mm] (negative: that deep in the hole), from
+        the offset read-out head on z (pictures and joints only; no H* at test time). None without the head.
+        - offset_mode == 'gap' (zero-privilege): reads float(o[0]) directly; raises ValueError if pin_length_mm is passed.
+        - offset_mode == 'along' (legacy backwards-compat): requires pin_length_mm and computes -o[0] - pin_length_mm."""
+        if self.offset_mode == "gap":
+            if pin_length_mm is not None:
+                raise ValueError("offset_mode='gap' is zero-privilege: do not pass pin_length_mm to gap_mm()")
+            o = self.offset_mm(z)
+            return None if o is None else float(o[0])
+        if self.offset_mode == "along":
+            if pin_length_mm is None:
+                raise ValueError("legacy offset_mode='along' requires pin_length_mm; use an offset_mode='gap' checkpoint for zero-privilege inference")
+            o = self.offset_mm(z)
+            return None if o is None else float(-o[0] - float(pin_length_mm))
+        raise ValueError(f"unknown offset_mode {self.offset_mode!r}")
 
     @torch.no_grad()
     def values(self, z: torch.Tensor) -> np.ndarray:

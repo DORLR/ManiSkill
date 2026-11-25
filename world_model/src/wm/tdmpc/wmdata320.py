@@ -24,17 +24,17 @@ length only; never from the simulator's truth (the fast copy does not even conta
            ManiSkill bit-identical to before. AutoMate labels = ManiSkill labels (full angle; decision 9 of
            2026-11-22: labels and reward unchanged from ManiSkill). tilt_definition(meta) names it "full_angle"; an
            AutoMate meta (or its switches) that names any other angle term is refused (no other label exists).
-  probe    (along, lateral x, lateral y, rotation) relative to H* [mm, deg]: FK labels used to find the decision
-           before the face (face_items); also the target of the stand-alone policy's training-only offset read-out
-           head (policy320.ResnetFMPolicy.off), never read at test time
-  offset   the target of the world model's offset read-out head (--offset-weight, 2026-11-18: wm320.WM320._offset),
-           per the offset label of the data (offset_label(meta), OFFSET_LABELS; stored in the checkpoint):
-             "along_mm" (ManiSkill; every checkpoint without the key): = probe, unchanged
-             "gap_mm"   (AutoMate, the user's decision 6 of 2026-11-23): probe with its first component replaced by
-                        the pin-tip gap g = s - L [mm], s = -(hand - H*) . axis the hand's distance back from the seated
-                        pose along the insertion axis, L = pin_length_m (AutoMate: the tight-fit depth); g < 0: the
-                        tip is |g| past the entrance. L is used here only, to build the training label; at test time
-                        the agent reads g = o[0] directly (online.common320.gap_estimate_mm), no L, H* or truth
+  probe    (along, lateral x, lateral y, rotation) relative to H* [mm, deg], with offset_mode (OFFSET_MODES; stored
+           in the checkpoint as "offset_mode"):
+             "along" (legacy; every checkpoint without the key): the first component is along, as before
+             "gap"   (zero-privilege): the first component is the pin-tip gap g = -along - L [mm] (L = pin_length_m;
+                     AutoMate: the tight-fit depth), g < 0: the tip is |g| past the entrance. L is used here only, to
+                     build the training label; at test time the agent reads g = o[0] directly (agent320.WMAgent.gap_mm),
+                     no L, H* or truth. AutoMate runs use "gap" only (train_wm320.py, agent320, attempt320 refuse
+                     anything else; the user's decision 6 of 2026-11-23)
+           The target of the world model's offset read-out head (--offset-weight, 2026-11-18: wm320.WM320._offset) and
+           of the stand-alone policy's training-only offset read-out head (policy320.ResnetFMPolicy.off, "along"),
+           never read at test time; gap_mm (whatever the mode) finds the decision before the face (face_items)
 The bonus, the last reward and the seated label of the last observation all refer to the same instant (step 8n).
 """
 
@@ -48,8 +48,7 @@ EXECUTE, H = 8, 4                      # control steps per decision; decisions p
 SEATED_M, SEATED_DEG, BONUS = 1.5e-3, 4.0, 10.0
 LABELS = "wm320-labels-3"              # 3: only a seated end is terminal; a jam is cut (no fixed continuation)
 TILT_DEFINITIONS = ("full_angle",)     # the labels' one angle term (ManiSkill and AutoMate, decision 9 of 2026-11-22)
-OFFSET_ALONG, OFFSET_GAP = "along_mm", "gap_mm"   # the offset head's first component (module docstring, offset)
-OFFSET_LABELS = (OFFSET_ALONG, OFFSET_GAP)
+OFFSET_MODES = ("along", "gap")        # dim 0 of probe: "along" = hand along axis (legacy); "gap" = pin-tip gap (-along - L, zero-privilege)
 
 ACTION_DIM = EXECUTE * D.JOINTS
 
@@ -72,24 +71,16 @@ def tilt_definition(meta: dict) -> str:
     return t
 
 
-def offset_label(meta: dict) -> str:
-    """The offset label of a trajectory (module docstring, offset): "gap_mm" for AutoMate (meta simulator
-    "automate"), "along_mm" otherwise."""
-    return OFFSET_GAP if meta.get("simulator") == "automate" else OFFSET_ALONG
+def decision_labels(meta: dict, hand: np.ndarray, steps: np.ndarray, offset_mode: str = "along") -> dict:
+    """Labels at the given control steps (hand: (T+1, 4, 4) recorded FK hand poses).
 
-
-def offset_target(meta: dict, probe: np.ndarray) -> np.ndarray:
-    """The world model's offset-head target from the probe labels (T, 4) of the same steps: probe itself for
-    "along_mm"; for "gap_mm" a copy whose first component is the pin-tip gap g = -along - L [mm]."""
-    if offset_label(meta) == OFFSET_ALONG:
-        return probe
-    out = probe.copy()
-    out[:, 0] = (-probe[:, 0].astype(np.float64) - 1000.0 * float(meta["pin_length_m"])).astype(np.float32)
-    return out
-
-
-def decision_labels(meta: dict, hand: np.ndarray, steps: np.ndarray) -> dict:
-    """Labels at the given control steps (hand: (T+1, 4, 4) recorded FK hand poses)."""
+    offset_mode:
+      - 'along' (legacy): probe[:, 0] = along_mm (hand offset from H* along insertion axis, <= 0 before H*).
+      - 'gap' (zero-privilege): probe[:, 0] = gap_mm = -along_mm - L_mm (pin-tip distance in front of board face,
+        positive in front of board, negative inside hole; computed using training metadata pin_length_m only).
+    """
+    if offset_mode not in OFFSET_MODES:
+        raise ValueError(f"unknown offset_mode {offset_mode!r}; expected one of {OFFSET_MODES}")
     Hs, L = np.asarray(meta["H_star"], np.float64), float(meta["pin_length_m"])
     if meta.get("axis") is None:
         raise ValueError(f"{meta.get('grasp')}: no insertion axis in the meta (the reference push had no axial push); "
@@ -102,19 +93,23 @@ def decision_labels(meta: dict, hand: np.ndarray, steps: np.ndarray) -> dict:
     ang = np.degrees(np.arccos(np.clip((np.trace(R, axis1=1, axis2=2) - 1) / 2, -1, 1)))
     dist = np.linalg.norm(e, axis=1)
     lat = np.hypot(lx, ly)
+    along_mm = along * 1000.0
+    gap_mm = -along_mm - L * 1000.0
+    dim0 = gap_mm if offset_mode == "gap" else along_mm
     return {"depth": np.clip(L - dist, 0, L), "seated": (dist < SEATED_M) & (ang < SEATED_DEG),
             "phi": -(np.abs(along) * 1000 + lat * 1000 + ang),
-            "probe": np.stack([along * 1000, lx * 1000, ly * 1000, ang], 1).astype(np.float32)}
+            "along_mm": along_mm.astype(np.float32), "gap_mm": gap_mm.astype(np.float32),
+            "probe": np.stack([dim0, lx * 1000, ly * 1000, ang], 1).astype(np.float32)}
 
 
-def trajectory(z, meta: dict, shaping: float, gamma: float) -> dict | None:
+def trajectory(z, meta: dict, shaping: float, gamma: float, offset_mode: str = "along") -> dict | None:
     """Decision-level arrays of one fast-copy trajectory (an opened npz). None if it has no complete decision."""
     act, img, qpos, hand = z["action"], z["img_step"], z["qpos"], z["hand"]
     n = len(act) // EXECUTE
     if n < 1 or len(img) < 2 * n + 1 or not np.array_equal(img[:2 * n + 1], 4 * np.arange(2 * n + 1)):
         return None
     steps = EXECUTE * np.arange(n + 1)
-    lab = decision_labels(meta, hand, steps)
+    lab = decision_labels(meta, hand, steps, offset_mode=offset_mode)
     reward = np.diff(lab["depth"]) * 1000.0 + shaping * (gamma * lab["phi"][1:] - lab["phi"][:-1])
     if lab["seated"][n]:
         reward[-1] += BONUS
@@ -128,8 +123,8 @@ def trajectory(z, meta: dict, shaping: float, gamma: float) -> dict | None:
     delta = (act[:EXECUTE * n].reshape(n, EXECUTE, D.JOINTS) - q[:-1][:, None]).reshape(n, ACTION_DIM)
     return {"n": n, "delta": delta.astype(np.float32), "reward": reward.astype(np.float32), "term": term,
             "q": q.astype(np.float32), "done": lab["seated"].astype(np.float32),
-            "depth": lab["depth"].astype(np.float32), "probe": lab["probe"], "offset": offset_target(meta, lab["probe"]),
-            "end_seated": bool(lab["seated"][n]),
+            "depth": lab["depth"].astype(np.float32), "probe": lab["probe"], "gap_mm": lab["gap_mm"],
+            "offset_mode": offset_mode, "end_seated": bool(lab["seated"][n]),
             "kind": meta["kind"], "outcome": meta.get("outcome")}
 
 
@@ -146,10 +141,12 @@ def window(tr: dict, k: int, s0, top, warm_next: bool = True) -> dict:
     dec = np.minimum(k + np.arange(H + 1), n)
     act = scale_action(tr["delta"], s0, top)
     out = {"slots": slots, "q": tr["q"][dec], "done": tr["done"][dec], "fk_depth": tr["depth"][dec], "probe": tr["probe"][dec],
-           "offset": tr["offset"][dec], "obs_valid": (k + np.arange(H + 1) <= n).astype(np.float32),
+           "obs_valid": (k + np.arange(H + 1) <= n).astype(np.float32),
            "v_valid": (k + np.arange(H + 1) < n).astype(np.float32),
            "action": np.zeros((H, ACTION_DIM), np.float32), "reward": np.zeros(H, np.float32), "term": np.zeros(H, np.float32),
            "valid": np.zeros(H, np.float32), "a_next": np.zeros((H + 1, ACTION_DIM), np.float32), "a_next_valid": np.zeros(H + 1, np.float32)}
+    if "gap_mm" in tr:
+        out["gap_mm"] = tr["gap_mm"][dec]
     m = min(H, n - k)
     out["action"][:m], out["reward"][:m], out["term"][:m], out["valid"][:m] = act[k:k + m], tr["reward"][k:k + m], tr["term"][k:k + m], 1.0
     for j in range(H + 1):                       # the data's own action at each observation (the warm-up's next action)

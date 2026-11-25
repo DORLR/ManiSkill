@@ -56,6 +56,8 @@ if [ "${1:-}" = "--inside" ]; then                       # the tmux side, from t
     echo "$(date '+%F %T') training $SCRIPT: nvidia-smi unreadable at a GPU check (exit 8; log $log)" >> "$RUN/logs/ALERT"
   elif [ $rc -ne 0 ]; then
     echo "$(date '+%F %T') training $SCRIPT ended with exit $rc (log $log)" >> "$RUN/logs/ALERT"
+  elif [ "$SCRIPT" = scripts/train/train_wm320.py ] && [ ! -e "$RUN/DONE.json" ]; then   # a signal stop at a step boundary
+    echo "$(date '+%F %T') training $SCRIPT exited 0 without $RUN/DONE.json (stopped early; last.pt kept; log $log)" >> "$RUN/logs/ALERT"
   fi
   exit $rc
 fi

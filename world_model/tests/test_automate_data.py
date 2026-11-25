@@ -58,7 +58,7 @@
     provenance apart from the device switch, the asset hashes spec / plug_obj / socket_obj included, r6-ops-03) and
     the collections' split-document check
   13 launch side: train_wm320.cap_gpu_memory and gpu_check_encoders320's QX_GPU_GB / --out / D_max rules, provenance
-    versions, train_wm320.automate_provenance (fast_copy_code from the manifest, offset_label "gap_mm"), one MIN_SELECT_GRASPS, build_index.py --automate (unfinished refused with exit 2, --partial recorded), the
+    versions, train_wm320.automate_provenance (fast_copy_code from the manifest; no offset label: the checkpoint's offset_mode), one MIN_SELECT_GRASPS, build_index.py --automate (unfinished refused with exit 2, --partial recorded), the
     up-front AutoMate refusals of eval_policy320 / eval_ppo_state / make_combo_grasps / ablation320
 Needs numpy, scipy, PIL, torch (the Isaac Lab environment has them).   python world_model/tests/test_automate_data.py
 """
@@ -1130,8 +1130,7 @@ def test_launch_side(tmp: Path):
     assert {"sklearn", "joblib", "threadpoolctl"} <= set(pv["versions"]) and "sklearn_file" in pv, pv
     assert T.MIN_SELECT_GRASPS == D.MIN_SELECT_GRASPS == 20
     ap = T.automate_provenance({"completeness": {"partial": False}, "code": {"md5": {"a": "b"}}}, True)   # r6-data-04
-    assert ap == {"completeness": {"partial": False}, "allow_partial": True, "fast_copy_code": {"md5": {"a": "b"}},
-                  "offset_label": WD.OFFSET_GAP}, ap                     # the gap label (decision 6 of 2026-11-23)
+    assert ap == {"completeness": {"partial": False}, "allow_partial": True, "fast_copy_code": {"md5": {"a": "b"}}}, ap
     assert T.automate_provenance({}, False)["fast_copy_code"] is None
     # build_index --automate: this tree's wm, the AutoMate index; refused without plan.json or with both forms
     import build_index as BI

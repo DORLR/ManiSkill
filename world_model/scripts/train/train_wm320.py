@@ -37,17 +37,20 @@ planned grasp of an assembly that is not skipped had its grasp.json, and the mis
 accepted with --accept-skipped); a missing record or partial = true is refused unless --allow-partial. The record and the switch are stored in provenance ("completeness", "allow_partial"),
 with the manifest's "code" (the md5 of the converter that wrote the fast copy, and of earlier converters whose files a
 resumed copy may keep; scripts/data/cache_wm_v1_fast.py) as "fast_copy_code" (recorded, not checked).
-Offset label (AutoMate, the user's decision 6 of 2026-11-23): the offset read-out head's first component is trained
-on the pin-tip gap g = s - L (wmdata320 "offset", OFFSET_GAP); the checkpoint holds "offset_label": "gap_mm" (top
-level and in provenance), which the online agent requires on AutoMate (online.common320.check_offset_label); a
-checkpoint of another label is not resumed. ManiSkill checkpoints get no key (= "along_mm", unchanged).
+Offset mode (--offset-mode, wmdata320 OFFSET_MODES; default "gap"): the offset read-out head's first component is
+trained on the pin-tip gap g = -along - L ("gap") or on along ("along", legacy); the checkpoint holds "offset_mode"
+(a checkpoint without the key means "along"); a checkpoint with an offset head and another mode is not resumed.
+AutoMate data (the user's decision 6 of 2026-11-23) refuses any mode but "gap"; the online agent requires "gap" on
+AutoMate (agent320.WMAgent, online.common320.check_offset_mode). --split-mode (demo320.SPLIT_MODES) applies to
+ManiSkill data; it is stored in the checkpoint as "split_mode".
 AutoMate: the in-hole rule of the agent reads the offset head's first output (gap_mm); a checkpoint trained with
 --offset-weight 0 has no offset head.
 The pictures' depth enters the stem in float32, but cuDNN's default TF32 rounds it to ~0.1 mm below 0.2 m and
 ~0.2 mm beyond (as in the stand-alone policy). last.pt is written every --save-every steps; the random generators
 are saved with it.
 Adam, lr 3e-4 with the encoder at --enc-lr-scale (TD-MPC2's 0.3), gradient clip 20, target Q rate 0.01, one target
-update per step; random shift --shift-px per window / sample (required: stated, not a silent default).
+update per step; random shift --shift-px per window / sample (default 0 since the d1-gap-fix merge; the round-8
+recipe and every AutoMate run pass --shift-px 4 explicitly).
 Validation (select split decides nothing yet; held-out logged; AutoMate also logs heldout_shape and heldout_grasp,
 the two stored conditions inside "heldout", separately): losses on fixed windows; the done head's AUC on
 observations with the pins in the hole or at the face (FK depth > 0); V just before the pins reach the face of a
@@ -83,11 +86,14 @@ repeat the single-GPU stream).
     python world_model/scripts/train/train_wm320.py --data $Q/data/wm_v1_fast --out <run> --stem standard --shift-px 4 --shaping 0.3
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import math
 import os
 import random
+import signal
 import sys
 import time
 from collections import defaultdict
@@ -168,10 +174,9 @@ def provenance(depth_stats_file: Path | None, split: dict | None = None) -> dict
 
 def automate_provenance(manifest: dict, allow_partial: bool) -> dict:
     """The AutoMate fields added to provenance (module docstring, completeness): the manifest's completeness record,
-    the --allow-partial switch, the converter's code record (manifest "code", None for an older fast copy) and the
-    offset head's label (wmdata320 OFFSET_GAP: the pin-tip gap, the user's decision 6 of 2026-11-23)."""
+    the --allow-partial switch and the converter's code record (manifest "code", None for an older fast copy)."""
     return {"completeness": manifest.get("completeness"), "allow_partial": bool(allow_partial),
-            "fast_copy_code": manifest.get("code"), "offset_label": WD.OFFSET_GAP}
+            "fast_copy_code": manifest.get("code")}
 
 
 GPU_CONTEXT_GB = 1.0                   # the CUDA context, outside the allocator cap
@@ -236,6 +241,47 @@ def check_encoder_env(encoder: str) -> None:
                              "torchvision.models.resnet34(weights=\"IMAGENET1K_V1\")' with $TORCH_HOME set")
 
 
+class GracefulStopper:
+    """Catch SIGTERM / SIGUSR1 (e.g., Slurm walltime warning / preemption) and request a clean stop after the current step."""
+
+    def __init__(self, signals=(signal.SIGTERM, signal.SIGUSR1)):
+        self.requested = False
+        self.signum: int | None = None
+        self._prev: dict[int, object] = {}
+        self._signals = tuple(signals)
+
+    def _handler(self, signum, _frame):
+        self.requested = True
+        self.signum = int(signum)
+
+    def install(self) -> "GracefulStopper":
+        for sig in self._signals:
+            try:
+                self._prev[sig] = signal.getsignal(sig)
+                signal.signal(sig, self._handler)
+            except (OSError, ValueError):
+                pass
+        return self
+
+    def restore(self) -> None:
+        for sig, prev in self._prev.items():
+            try:
+                signal.signal(sig, prev)
+            except (OSError, ValueError):
+                pass
+        self._prev.clear()
+
+    @property
+    def reason(self) -> str | None:
+        if not self.requested:
+            return None
+        try:
+            name = signal.Signals(self.signum).name
+        except Exception:
+            name = str(self.signum)
+        return f"signal_{name}"
+
+
 def save(obj, path: Path):
     torch.save(obj, str(path) + ".tmp")
     os.replace(str(path) + ".tmp", path)
@@ -263,7 +309,7 @@ def _finished_grasps(r: Path) -> list[dict]:
     return out
 
 
-def online_entries(pool, split_sha: str | None = None) -> tuple[list[dict], list[str]]:
+def online_entries(pool, split_sha: str | None = None, split_mode: str = "split320") -> tuple[list[dict], list[str]]:
     """Trajectories of the online pool (absolute paths), with split and bc: the complete rounds (DONE + manifest) and,
     of a round still being collected, its finished grasps (2026-11-18, the user's decision: the learner uses a round
     while it is collected; those entries carry partial=True). Returns them and the names of the complete rounds.
@@ -286,12 +332,12 @@ def online_entries(pool, split_sha: str | None = None) -> tuple[list[dict], list
                 raise SystemExit(f"online trajectory {e['path']} is {'AutoMate' if D.is_automate(e) else 'ManiSkill'}, the "
                                  f"fast copy is {'AutoMate' if split_sha is not None else 'ManiSkill'}: the pool must come "
                                  "from the fast copy's simulator")
-            sp = entries_or_exit(D.split_of_entry, e)
+            sp = entries_or_exit(D.split_of_entry, e, False, split_mode)
             if D.is_automate(e) and (split_sha is None or e.get("split_sha256") != split_sha):
                 raise SystemExit(f"online trajectory {e['path']} carries the split {e.get('split_sha256')}, the fast copy "
                                  f"{split_sha}: the pool must come from the fast copy's collection and split")
             if sp != "train":
-                raise SystemExit(f"online trajectory {e['path']} is of split {sp}: the pool must hold training grasps only")
+                raise SystemExit(f"online trajectory {e['path']} is of split {sp} (split_mode={split_mode}): the pool must hold training grasps only")
             if e["steps"] >= WD.EXECUTE and (not partial or (Path(pool) / e["path"]).exists()):
                 out.append({**e, "path": str(Path(pool) / e["path"]), "split": sp, "bc": e.get("outcome") == "seated_fk", "partial": partial})
     return out, rounds
@@ -390,10 +436,16 @@ def main():
     ap.add_argument("--depth-std-m", type=float, help="resnet34 / segformer_b1: the data's fixed depth standard deviation [m]")
     ap.add_argument("--depth-invalid", type=float, default=None,
                     help="resnet34 / segformer_b1: value of invalid pixels (depth 0) after normalisation (default (0 - mean) / std)")
-    ap.add_argument("--offset-weight", type=float, default=0.0, help="> 0: the training-only offset read-out head on z (wm320.WM320)")
-    ap.add_argument("--shift-px", type=int, required=True)
+    ap.add_argument("--offset-weight", type=float, default=0.0, help="> 0: offset read-out head on z (wm320.WM320)")
+    ap.add_argument("--offset-mode", choices=list(WD.OFFSET_MODES), default="gap",
+                    help="dim 0 target of _offset head: 'gap' = zero-privilege pin-tip gap (-along - L) [recommended default]; 'along' = legacy")
+    ap.add_argument("--split-mode", choices=list(D.SPLIT_MODES), default="split320",
+                    help="split320 = Changhao's default split; strict_extrap = also hold out outer extrap grasp bands")
+    ap.add_argument("--shift-px", type=int, default=0, help="random pixel shift per window/sample (0 = recommended clean setting)")
     ap.add_argument("--shaping", type=float, required=True)
     ap.add_argument("--steps", type=int, default=100000)
+    ap.add_argument("--max-steps-this-job", "--stop-after-steps", dest="max_steps_this_job", type=int, default=None,
+                    help="optional step cap for this job (Slurm segmented runs): save last.pt and exit 0 cleanly (no DONE.json) before --steps")
     ap.add_argument("--wm-batch", type=int, required=True)
     ap.add_argument("--bc-batch", type=int, required=True)
     ap.add_argument("--accum", type=int, required=True)
@@ -427,9 +479,11 @@ def main():
     resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))          # ("received 0 items of ancdata") at step 15,000
     if args.offset_weight < 0:
         raise SystemExit("--offset-weight must be >= 0")
+    if args.max_steps_this_job is not None and args.max_steps_this_job < 1:
+        raise SystemExit("--max-steps-this-job must be >= 1")
     encoder_given = args.encoder is not None
     encoder = args.encoder or ENCODER_DEFAULTS["encoder"]
-    ents = [e for e in entries_or_exit(D.load_entries, args.data) if e["split"] != "test" and e["steps"] >= WD.EXECUTE]
+    ents = [e for e in entries_or_exit(D.load_entries, args.data, False, args.split_mode) if e["split"] != "test" and e["steps"] >= WD.EXECUTE]
     by = {s: [e for e in ents if e["split"] == s] for s in ("train", "select", "heldout")}
     automate = any(D.is_automate(e) for e in ents)
     manifest = json.loads((Path(args.data) / "manifest.json").read_text())
@@ -443,6 +497,8 @@ def main():
             raise SystemExit("AutoMate data: state --encoder (resnet34 or segformer_b1) and --token-dim explicitly")
         if encoder == "resnet18":
             raise SystemExit("AutoMate data: --encoder resnet18 was dropped for AutoMate (its depth input saturates at 0.3 m)")
+        if args.offset_mode != "gap":                                # the user's decision 6 of 2026-11-23
+            raise SystemExit("AutoMate data: --offset-mode gap only (the agent reads the pin-tip gap without the pin length)")
     depth_flags = {"depth_max_m": args.depth_max_m, "depth_mean_m": args.depth_mean_m, "depth_std_m": args.depth_std_m}
     depth_stats, depth_stats_file = None, None
     if encoder == "resnet18":
@@ -554,10 +610,10 @@ def main():
     for k, v in (encoder_settings(ck) if ck else {}).items():       # an old checkpoint: the legacy ResNet-18's settings
         if v != enc_set[k]:
             raise SystemExit(f"{run}/last.pt has {k}={v}, --{k.replace('_', '-')} is {enc_set[k]}: start a new run")
-    offset_label = WD.OFFSET_GAP if automate else WD.OFFSET_ALONG     # the offset head's target (wmdata320, decision 6)
-    if ck and ck.get("offset_label", WD.OFFSET_ALONG) != offset_label:
-        raise SystemExit(f"{run}/last.pt has offset_label={ck.get('offset_label', WD.OFFSET_ALONG)}, this data's is "
-                         f"{offset_label}: start a new run")
+    if ck and (args.offset_weight > 0 or ck.get("offset_weight", 0.0) > 0) and ck.get("offset_mode", "along") != args.offset_mode:
+        raise SystemExit(f"{run}/last.pt has offset_mode={ck.get('offset_mode', 'along')}, --offset-mode is {args.offset_mode}: start a new run")
+    if ck and ck.get("split_mode", "split320") != args.split_mode:
+        raise SystemExit(f"{run}/last.pt has split_mode={ck.get('split_mode', 'split320')}, --split-mode is {args.split_mode}: start a new run")
     try:                                                              # wm320.auc at the first validation: refuse now,
         import sklearn.metrics  # noqa: F401                          # not at step 500
     except ImportError as exc:
@@ -582,10 +638,11 @@ def main():
         bce = [e for e in by[name] if e["bc"]]
         bi = D.policy_items(bce)
         bi = bi[np.sort(rng.choice(len(bi), min(1024, len(bi)), replace=False))]
-        mk = lambda items: [{k: v.clone() for k, v in b.items()} for b in loader(WindowData(args.data, by[name], items, stats, args.shaping, args.gamma), 16, 4, 0, False)]  # noqa: E731
+        mk = lambda items: [{k: v.clone() for k, v in b.items()} for b in loader(WindowData(args.data, by[name], items, stats, args.shaping, args.gamma, offset_mode=args.offset_mode), 16, 4, 0, False)]  # noqa: E731
         sets[name] = (mk(wi), mk(fi) if len(fi) else [], [], [{k: v.clone() for k, v in b.items()} for b in policy_loader(args.data, bce, 32, 4, shuffle=False, items=bi)])
     torch.manual_seed(args.seed)
-    model = WM320(args.stem, stats, args.shaping, imagenet=args.imagenet, offset_weight=args.offset_weight, **enc_set, gamma=args.gamma)
+    model = WM320(args.stem, stats, args.shaping, imagenet=args.imagenet, offset_weight=args.offset_weight, offset_mode=args.offset_mode,
+                  **enc_set, gamma=args.gamma)
     copied = None if ck else model.enc.pic.init_pretrained() if args.imagenet else 0   # identical on every process
     model = model.to(dev)
     net = DDP(model, device_ids=[dev.index], broadcast_buffers=False) if ddp else model     # broadcasts process 0's weights
@@ -603,8 +660,8 @@ def main():
     if ddp:          # the model was built identically everywhere (same seed); from here each process draws its own
         torch.manual_seed(args.seed + RS * rank + step)     # shifts, noise and dropout (a resumed run: a fresh stream from the step on)
     info0 = {"format": "wm320-1", "labels": WD.LABELS, "stem": args.stem, "imagenet": args.imagenet, "offset_weight": args.offset_weight, **enc_set,
-             "shaping": args.shaping, "cfg": {"gamma": args.gamma}, "stats": stats, "provenance": prov,
-             **({"offset_label": offset_label} if automate else {})}   # ManiSkill checkpoints unchanged (no key = along_mm)
+             "offset_mode": args.offset_mode, "split_mode": args.split_mode, "shaping": args.shaping, "cfg": {"gamma": args.gamma}, "stats": stats,
+             "provenance": prov}
 
     def checkpoint(full: bool):
         c = {**info0, "state": model.state_dict(), "step": step, "skipped": skipped, "args": vars(args)}
@@ -633,10 +690,10 @@ def main():
         """Windows: the fast copy alone, or wm_batch - wo from it and wo from the online pool; imitation: the
         successful demonstrations and the online attempts that ended seated (FK)."""
         sd = args.seed + RS * rank + step
-        ws = WindowData(args.data, by["train"], window_items(by["train"]), stats, args.shaping, args.gamma)
+        ws = WindowData(args.data, by["train"], window_items(by["train"]), stats, args.shaping, args.gamma, offset_mode=args.offset_mode)
         wl = [cycle(loader(ws, args.wm_batch - (wo if mix else 0), args.workers_wm, sd))]
         if mix:                                                # (fewer windows than wo: a drop_last loader would never yield)
-            wl.append(cycle(loader(WindowData(args.data, onl, window_items(onl), stats, args.shaping, args.gamma), wo,
+            wl.append(cycle(loader(WindowData(args.data, onl, window_items(onl), stats, args.shaping, args.gamma, offset_mode=args.offset_mode), wo,
                                    args.workers_wm // 2, sd + 3)))
         bce = [e for e in by["train"] if e["bc"]] + ([e for e in onl if e["bc"]] if mix else [])     # online data only once mixed in
         return wl, cycle(loader(PolicyData(args.data, bce, bc_items(bce)), args.bc_batch, args.workers_bc, sd + 1))
@@ -649,75 +706,107 @@ def main():
             online_partial_trajectories=sum(bool(e.get("partial")) for e in onl), online_windows_per_micro_batch=wo if mix else 0)
 
     if args.online:
-        onl, rounds_in = online_entries(args.online, (split_id or {}).get("sha256"))
+        onl, rounds_in = online_entries(args.online, (split_id or {}).get("sha256"), args.split_mode)
         mix = mixes(onl)
     wtrain, btrain = make_loaders()
     data_record()
     params = [p for p in model.parameters() if p.requires_grad]
-    acc, t0, event = defaultdict(list), time.time(), "done"
+    acc, t0, event, steps_this_job = defaultdict(list), time.time(), "done", 0
     early = {500, 1000, 2500}
-    while step < args.steps:
-        step += 1
-        opt.zero_grad(set_to_none=True)
-        finite = True
-        if args.online and step % args.refresh_every == 0:
-            new, names = online_entries(args.online, (split_id or {}).get("sha256"))
-            if names != rounds_in or len(new) - len(onl) >= args.online_reload or mixes(new) != mix:
-                del wtrain, btrain                                     # the old loaders' workers end with them
-                onl, rounds_in = new, names
-                mix = mixes(onl)
-                wtrain, btrain = make_loaders()
-                data_record()
-        for i in range(args.accum):
-            W = to(next(wtrain[0]), dev) if len(wtrain) == 1 else cat(to(next(wtrain[0]), dev), to(next(wtrain[1]), dev))
-            Bc = to(next(btrain), dev)
-            W["rgb"], W["depth"] = shift(W["rgb"], W["depth"], args.shift_px)
-            Bc["rgb"], Bc["depth"] = shift(Bc["rgb"], Bc["depth"], args.shift_px)
-            with net.no_sync() if ddp and i < args.accum - 1 else nullcontext():   # gradients averaged once, at the last micro-batch
-                loss, info = net(W, Bc, step, args.td_warmup, args.bc_weight)
-                (loss / args.accum).backward()
-            finite &= math.isfinite(info["total"])
-            for k, v in info.items():
-                acc[k].append(v)
-        gn = float(torch.nn.utils.clip_grad_norm_(params, 20.0))
-        if ddp:                                                      # every process takes the same decision
-            flag = torch.tensor([float(finite)], device=dev)
-            dist.all_reduce(flag, op=dist.ReduceOp.MIN)
-            finite = bool(flag.item() > 0)
-        if finite and math.isfinite(gn):
-            opt.step()
-            model.update_target()
-        else:
-            skipped += 1
-            log(event="skipped_nonfinite_step", step=step, skipped=skipped)
-            if skipped >= 50:
-                event = "stop_nonfinite"
+    stopper = GracefulStopper().install()
+    try:
+        while step < args.steps:
+            sig_stop = stopper.requested
+            if ddp:
+                sflag = torch.tensor([1.0 if sig_stop else 0.0], device=dev)
+                dist.all_reduce(sflag, op=dist.ReduceOp.MAX)
+                sig_stop = bool(sflag.item() > 0)
+            if sig_stop:
+                if main_rank and (step > 0 or ck is not None):
+                    save(checkpoint(True), run / "last.pt")
+                event = stopper.reason or "signal_stop"
                 break
-        acc["grad_norm"].append(gn)
-        if step % 250 == 0:
-            keys = sorted(acc)
-            means = torch.tensor([float(np.mean(acc[k])) for k in keys], dtype=torch.float64, device=dev)
-            gpu = torch.tensor([torch.cuda.max_memory_allocated(dev) / 1e9 if dev.type == "cuda" else 0.0], dtype=torch.float64, device=dev)
-            if ddp:                                                  # every process: the same keys, the same steps
-                dist.all_reduce(means)
-                means /= world
-                dist.all_reduce(gpu, op=dist.ReduceOp.MAX)
-            log(step=step, it_per_s=250 / (time.time() - t0), gpu_GB=float(gpu[0]), **{k: float(v) for k, v in zip(keys, means.tolist())})
-            acc, t0 = defaultdict(list), time.time()
-        if main_rank and step % args.keep_every == 0:
-            save(checkpoint(False), run / f"step{step}.pt")
-        if main_rank and step % args.save_every == 0:
-            save(checkpoint(True), run / "last.pt")
-        if main_rank and (step in early or step % args.eval_every == 0 or step == args.steps):
-            rec = validate(model, sets, args, dev)
-            for name, kept in face_kept.items():                    # contact pushes in auc_V_before_face_contact / all
-                rec[name]["face_items_kept"] = kept
-            log(event="val", step=step, **rec)
-            t0 = time.time()
-    log(event=event, step=step)
+            step += 1
+            opt.zero_grad(set_to_none=True)
+            finite = True
+            if args.online and step % args.refresh_every == 0:
+                new, names = online_entries(args.online, (split_id or {}).get("sha256"), args.split_mode)
+                if names != rounds_in or len(new) - len(onl) >= args.online_reload or mixes(new) != mix:
+                    del wtrain, btrain                                     # the old loaders' workers end with them
+                    onl, rounds_in = new, names
+                    mix = mixes(onl)
+                    wtrain, btrain = make_loaders()
+                    data_record()
+            for i in range(args.accum):
+                W = to(next(wtrain[0]), dev) if len(wtrain) == 1 else cat(to(next(wtrain[0]), dev), to(next(wtrain[1]), dev))
+                Bc = to(next(btrain), dev)
+                W["rgb"], W["depth"] = shift(W["rgb"], W["depth"], args.shift_px)
+                Bc["rgb"], Bc["depth"] = shift(Bc["rgb"], Bc["depth"], args.shift_px)
+                with net.no_sync() if ddp and i < args.accum - 1 else nullcontext():   # gradients averaged once, at the last micro-batch
+                    loss, info = net(W, Bc, step, args.td_warmup, args.bc_weight)
+                    (loss / args.accum).backward()
+                finite &= math.isfinite(info["total"])
+                for k, v in info.items():
+                    acc[k].append(v)
+            gn = float(torch.nn.utils.clip_grad_norm_(params, 20.0))
+            if ddp:                                                      # every process takes the same decision
+                flag = torch.tensor([float(finite)], device=dev)
+                dist.all_reduce(flag, op=dist.ReduceOp.MIN)
+                finite = bool(flag.item() > 0)
+            if finite and math.isfinite(gn):
+                opt.step()
+                model.update_target()
+            else:
+                skipped += 1
+                log(event="skipped_nonfinite_step", step=step, skipped=skipped)
+                if skipped >= 50:
+                    event = "stop_nonfinite"
+                    break
+            steps_this_job += 1
+            acc["grad_norm"].append(gn)
+            if step % 250 == 0:
+                keys = sorted(acc)
+                means = torch.tensor([float(np.mean(acc[k])) for k in keys], dtype=torch.float64, device=dev)
+                gpu = torch.tensor([torch.cuda.max_memory_allocated(dev) / 1e9 if dev.type == "cuda" else 0.0], dtype=torch.float64, device=dev)
+                if ddp:                                                  # every process: the same keys, the same steps
+                    dist.all_reduce(means)
+                    means /= world
+                    dist.all_reduce(gpu, op=dist.ReduceOp.MAX)
+                log(step=step, it_per_s=250 / (time.time() - t0), gpu_GB=float(gpu[0]), **{k: float(v) for k, v in zip(keys, means.tolist())})
+                acc, t0 = defaultdict(list), time.time()
+            sig_stop = stopper.requested
+            if ddp:
+                sflag = torch.tensor([1.0 if sig_stop else 0.0], device=dev)
+                dist.all_reduce(sflag, op=dist.ReduceOp.MAX)
+                sig_stop = bool(sflag.item() > 0)
+            if sig_stop:
+                if main_rank:
+                    save(checkpoint(True), run / "last.pt")
+                event = stopper.reason or "signal_stop"
+                break
+            if main_rank and step % args.keep_every == 0:
+                save(checkpoint(False), run / f"step{step}.pt")
+            if main_rank and step % args.save_every == 0:
+                save(checkpoint(True), run / "last.pt")
+            if main_rank and (step in early or step % args.eval_every == 0 or step == args.steps):
+                rec = validate(model, sets, args, dev)
+                for name, kept in face_kept.items():                    # contact pushes in auc_V_before_face_contact / all
+                    rec[name]["face_items_kept"] = kept
+                log(event="val", step=step, **rec)
+                t0 = time.time()
+            if args.max_steps_this_job is not None and steps_this_job >= args.max_steps_this_job and step < args.steps:
+                if main_rank and step % args.save_every != 0:
+                    save(checkpoint(True), run / "last.pt")
+                event = "segment_done"
+                break
+    finally:
+        stopper.restore()
+    log(event=event, step=step, steps_this_job=steps_this_job)
     if ddp:
         dist.barrier()
         dist.destroy_process_group()
+    if event == "segment_done" or event.startswith("signal_"):
+        return
     if event != "done":
         raise SystemExit(1)
     if main_rank:
