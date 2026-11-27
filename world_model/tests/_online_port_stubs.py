@@ -152,8 +152,13 @@ class StubAgent:
         u0 = np.clip(np.array([np.sin(z[0] * 5.0), np.cos(z[1] * 30.0), 0.3]), -1, 1)
         noisy = bool(noise) and not eval_mode
         mean = np.tile(u0, (3, 1)) if prev_mean is None else np.vstack([prev_mean[1:], u0])
-        return {"u0": u0, "dq": np.asarray(Wq, np.float64) @ u0, "move_hand_mm": u0 * 1.5, "mean": mean,
+        return {"u0": u0, "dq": np.asarray(Wq, np.float64) @ u0, "u_seq": np.tile(u0, (3, 1)), "move_hand_mm": u0 * 1.5, "mean": mean,
                 "std0": np.full(3, 0.5), "value_max": 1.0, "value_pi": 0.5, "noisy": noisy}
+
+    def mppi_gate(self, z, u_seq, Wq, margin):
+        """agent320.WMAgent.mppi_gate's interface, deterministic: both outcomes occur along a run."""
+        adv = np.array([0.4, 0.9, 1.1, 0.8, 0.7]) * (1.0 if self.n % 3 else -1.0)
+        return {"ok": bool(adv.mean() > margin and adv.min() > 0), "adv": adv}
 
     def score(self, z, deltas, parts: bool = False):
         d = np.asarray(deltas, np.float64)

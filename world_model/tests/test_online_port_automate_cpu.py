@@ -497,17 +497,19 @@ def test_loop(tmp: Path) -> str:
         lab = WD.decision_labels({"H_star": H_goal, "axis": F[:, 0], "pin_length_m": L_M, "simulator": "automate"},
                                  out["hand"].astype(np.float64), np.array([8 * summ["decisions"]]))
         assert summ["seated_fk"] == bool(lab["seated"][0])
-        if kw.get("planner") == "mppi":                 # MPPI: planned outside the hole (wm), always (collect)
+        if kw.get("planner") == "mppi":                 # MPPI: planned outside the hole only, gated
             pdec = summ["per_decision"]
             ia = summ["inside_at"]
             assert ia is not None, "the stub's gap must cross -inside_mm within the run"
-            if mode == "wm":                             # the in-hole rule switches MPPI off in the test mode only
-                assert not any(d["offered"] for d in pdec if d["k"] >= ia), (ia, pdec)
+            # the in-hole rule switches MPPI off in the hole in both modes; nothing but the head there
+            assert not any(d["offered"] or d["pick"] != 0 for d in pdec if d["k"] >= ia), (ia, pdec)
+            assert summ["shift"] is None or summ["shift"]["decision"] < ia, summ["shift"]
+            if mode == "wm":
                 assert summ["random_candidates"] == 0
-            else:                                        # collect: plans go on in the hole, no eps move there
-                assert any(d["offered"] and d["pick"] == 1 for d in pdec if d["k"] >= ia), (ia, pdec)
-                assert not any(d["pick"] == -2 for d in pdec if d["k"] >= ia), (ia, pdec)
-                assert summ["shift"] is None or summ["shift"]["decision"] < ia, summ["shift"]
+            off = [d for d in pdec if d["offered"]]      # gate: executed (pick 1) iff gate_ok; else the proposal
+            assert off and all(("gate_ok" in d) for d in off), off
+            assert all(d["pick"] in ((1,) if d["gate_ok"] else (0,)) or d["pick"] == -2 for d in off), off
+            assert any(d["gate_ok"] for d in off) and any(not d["gate_ok"] for d in off), off
             assert any(d["offered"] for d in pdec if d["k"] < ia), pdec
             assert summ["interventions"] == sum(1 for d in pdec if d.get("pick") == 1), (summ["interventions"], pdec)
             assert "strict_success" in summ and "noisy" not in str(pdec)
@@ -517,7 +519,8 @@ def test_loop(tmp: Path) -> str:
                 # is then added to it (stored as "shift")
                 assert dk["correction"] <= summ["interventions"] <= dk["correction"] + dk["shift"], (dk, summ["interventions"])
                 assert dk["random"] <= summ["random_candidates"] <= dk["random"] + dk["shift"], (dk, summ["random_candidates"])
-                assert dk["correction"] + dk["random"] + dk["shift"] == len(kinds_exec := [d for d in pdec if d["offered"]]), (dk, len(kinds_exec))
+                n_exec = sum(1 for d in pdec if d["offered"] and (d["gate_ok"] or d["pick"] == -2))
+                assert dk["correction"] + dk["random"] <= n_exec + dk["shift"], (dk, n_exec)
         res[mode + ("_mppi" if kw.get("planner") else "")] = f"{summ['stopped']}/{summ['decisions']}"
     ms = type("Robot", (), {"__module__": "wm.env.robot"})()
     try:

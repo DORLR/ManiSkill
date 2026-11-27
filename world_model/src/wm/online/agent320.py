@@ -45,6 +45,10 @@ from ..tdmpc.wm320 import WM320, encoder_settings
 #   TD-MPC2's gumbel_softmax_sample, its first step u_0; clamp. TD-MPC2 adds std_0 * N(0, 1) outside eval_mode; our
 #   attempts call it with noise=False in collection too (the user's decision of 2026-11-26: the plan stays an imitable
 #   correction; collection explores by attempt320's sparse eps moves and shift push instead).
+# Execution gate (the user's decision of 2026-11-26, "5 heads, above 0.5, as in ManiSkill"): the plan MPPI picks is executed
+# only when, valued per Q head k (reward sum + gamma^H (1 - term) Q_k(z_H, pi(z_H)), the MPPI value with each head instead
+# of 2 random ones), it beats the head's own sequence (u = 0) on every head and by more than the margin (0.5) on their mean
+# -- the fixed candidates' rule; otherwise the head's proposal is executed. Only gated plans are corrections.
 MPPI = {"horizon": 3, "iterations": 6, "num_samples": 512, "num_elites": 64, "num_pi_trajs": 24, "min_std": 0.05,
         "max_std": 2.0, "temperature": 0.5, "mm_per_unit": 1.5}
 
@@ -140,8 +144,10 @@ class WMAgent:
         return (total, G.double().cpu().numpy()) if parts else total
 
     @torch.no_grad()
-    def _mppi_value(self, z: torch.Tensor, u: torch.Tensor, Wq: torch.Tensor) -> torch.Tensor:
-        """TD-MPC2 _estimate_value for sequences u (N, H, 3) of hand moves around pi (module comment MPPI) -> (N,)."""
+    def _mppi_value(self, z: torch.Tensor, u: torch.Tensor, Wq: torch.Tensor, heads: bool = False) -> torch.Tensor:
+        """TD-MPC2 _estimate_value for sequences u (N, H, 3) of hand moves around pi (module comment MPPI) -> (N,).
+        heads=True: the same value with the terminal term of EVERY Q head instead of the mean of 2 random ones,
+        (num_q, N) (the execution gate, MPPI_GATE)."""
         m, N, H = self.m, u.shape[0], u.shape[1]
         zc = z.reshape(1, -1).expand(N, -1)
         G = torch.zeros(N, device=self.device)
@@ -156,8 +162,22 @@ class WMAgent:
             disc = disc * self.gamma
             term = torch.clamp(term + (torch.sigmoid(m._done(zc))[:, 0] > 0.5).float(), max=1.0)
         q = m.scalar(m.Q(zc, m.policy_action(zc)))[..., 0]                            # (num_q, N)
+        if heads:
+            return G[None] + disc * (1 - term)[None] * q
         i, j = torch.randperm(q.shape[0], device=self.device)[:2]                     # TD-MPC2 Q(..., 'avg')
         return G + disc * (1 - term) * (q[i] + q[j]) / 2
+
+    @torch.no_grad()
+    def mppi_gate(self, z: torch.Tensor, u_seq: np.ndarray, Wq: np.ndarray, margin: float) -> dict:
+        """The execution gate (MPPI_GATE): the chosen sequence u_seq (H, 3) against the head's own sequence u = 0, valued
+        per Q head k as _mppi_value(heads=True); adv_k = value_k(u_seq) - value_k(0). The plan is executed only if
+        mean_k adv_k > margin AND min_k adv_k > 0 (the fixed candidates' rule, attempt320). -> {"ok", "adv" (num_q,)}"""
+        Wt = torch.as_tensor(np.asarray(Wq, np.float32), device=self.device)
+        u = torch.zeros(2, self.horizon, 3, device=self.device)
+        u[0] = torch.as_tensor(np.asarray(u_seq, np.float32), device=self.device)
+        v = self._mppi_value(z, u, Wt, heads=True)                                    # (num_q, 2)
+        adv = (v[:, 0] - v[:, 1]).double().cpu().numpy()
+        return {"ok": bool(adv.mean() > margin and adv.min() > 0), "adv": adv}
 
     @torch.no_grad()
     def plan_mppi(self, z: torch.Tensor, Wq: np.ndarray, prev_mean: torch.Tensor | None, eval_mode: bool,
@@ -192,13 +212,14 @@ class WMAgent:
             std = ((score[:, None, None] * (eu - mean[None]) ** 2).sum(0) / (score.sum() + 1e-9)).sqrt()
             std = std.clamp(c["min_std"], c["max_std"])
         k = self.m.math.gumbel_softmax_sample(score)                                  # TD-MPC2 common/math.py
-        u0 = eu[int(k)][0]
+        u_seq = eu[int(k)]
+        u0 = u_seq[0]
         noisy = bool(noise) and not eval_mode
         if noisy:
             u0 = u0 + std[0] * torch.randn(3, device=dev)
         u0 = u0.clamp(-1, 1)
         dq = (Wt @ u0).double().cpu().numpy()
-        return {"u0": u0.double().cpu().numpy(), "dq": dq, "move_hand_mm": (u0 * c["mm_per_unit"]).double().cpu().numpy(),
+        return {"u0": u0.double().cpu().numpy(), "dq": dq, "u_seq": u_seq.double().cpu().numpy(), "move_hand_mm": (u0 * c["mm_per_unit"]).double().cpu().numpy(),
                 "mean": mean, "std0": std[0].double().cpu().numpy(), "value_max": float(ev.max()), "value_pi": float(value[0]),
                 "noisy": noisy}
 

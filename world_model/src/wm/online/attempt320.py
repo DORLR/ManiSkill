@@ -84,7 +84,9 @@ Per decision of "wm"/"collect" (every 0.4 s):
      max_decisions in total (back-off and re-position decisions included; ManiSkill 150, AutoMate robot.max_decisions).
 Planner "mppi" (the user's decisions of 2026-11-26; agent320.MPPI): in "wm" and "collect" the fixed candidates and their
 margin rule are replaced by TD-MPC2's MPPI over hand moves around the proposal (1.5 mm per unit); "wm" plans until the
-in-hole rule fires (inside_mm required), "collect" plans at every decision; in "collect" TD-MPC2's exploration noise is
+in-hole rule fires (inside_mm required), in both modes (in the hole the head inserts alone, the user's decision of
+2026-11-26); a plan is executed only if it passes the gate (agent320 MPPI_GATE: all 5 Q heads prefer it to the head's own
+sequence and their mean advantage exceeds the margin 0.5), else the proposal; in "collect" TD-MPC2's exploration noise is
 NOT added (the user's decision of 2026-11-26: with noise at every step nearly no online decision could be imitated):
 every executed plan is the model's correction ("correction"), the imitation head copies it from seated attempts as it
 copied the fixed planner's corrections; exploration is the sparse scheme below, unchanged (eps: one of the 12 fixed
@@ -393,9 +395,10 @@ class OnlineTester(AttemptBase):
                     if planner == "mppi":                          # MPPI (agent320 MPPI): wm and collect only (checked above)
                         J = self.jacobian(q9)
                         Rh = r.hand_pose()[:3, :3]
-                        # the in-hole rule switches MPPI off in the test mode "wm" only; collection plans always (decision of
-                        # 2026-11-26); random moves and the shift push stay outside the hole, as with the fixed candidates
-                        rec_d["offered"] = bool(mode == "collect" or not inside)
+                        # the in-hole rule switches MPPI off in the hole, in the test mode and in collection (the user's
+                        # decision of 2026-11-26: in the hole the head inserts alone); random moves and the shift push
+                        # stay outside the hole, as with the fixed candidates
+                        rec_d["offered"] = bool(not inside)
                         if rec_d["offered"]:
                             Wq = np.stack([offset(J, Rh[:, i] * MPPI["mm_per_unit"] / 1000.0) for i in range(3)], 1)  # (7, 3)
                             # no TD-MPC2 exploration noise, in collection either (the user's decision of 2026-11-26,
@@ -405,8 +408,11 @@ class OnlineTester(AttemptBase):
                             assert not plan["noisy"]
                             mppi_mean = plan["mean"]
                             mv_plan = Rh @ (plan["move_hand_mm"] / 1000.0)   # [m, world]
-                            target, kind = chunk + plan["dq"][None], "correction"
-                            rec_d.update(pick=1, u0=[round(float(x), 3) for x in plan["u0"]],
+                            gate = agent.mppi_gate(z, plan["u_seq"], Wq, m_now)   # 5 Q heads, margin (MPPI_GATE)
+                            rec_d.update(gate_adv=[round(float(x), 3) for x in gate["adv"]], gate_ok=gate["ok"])
+                            if gate["ok"]:
+                                target, kind = chunk + plan["dq"][None], "correction"
+                            rec_d.update(pick=1 if gate["ok"] else 0, u0=[round(float(x), 3) for x in plan["u0"]],
                                          std0=[round(float(x), 3) for x in plan["std0"]],
                                          v_max=round(plan["value_max"], 3), v_pi=round(plan["value_pi"], 3),
                                          move_mm=[round(float(x), 3) for x in Bt @ mv_plan * 1000.0])
