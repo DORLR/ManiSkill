@@ -40,7 +40,7 @@ qx_units() {
   return 0
 }
 
-QX_AUTODL_MEM_CAP=${QX_AUTODL_MEM_CAP:-118000000000}   # sum of declared memory (workers + learner) <= 118 GB of 124 GiB
+QX_AUTODL_MEM_CAP=${QX_AUTODL_MEM_CAP:-$(( $(cat /sys/fs/cgroup/memory.max) * 85 / 100 ))}   # declared memory (workers + learner) <= 85 % of the container limit
 
 qx_mem_used_bytes() {   # container memory in use without reclaimable page cache: memory.current - inactive_file
   local cur ina

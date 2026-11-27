@@ -45,7 +45,7 @@ def kill_hung(pid: int, unit):
         pass
 
 
-SHED_USED_BYTES = 120_000_000_000          # container memory in use without inactive page cache (limit 124 GiB)
+SHED_USED_BYTES = int(int(Path("/sys/fs/cgroup/memory.max").read_text()) * 0.93)   # memory in use without inactive page cache > 93 % of the container limit
 
 
 def mem_used() -> int:
