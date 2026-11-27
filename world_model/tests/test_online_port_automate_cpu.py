@@ -474,8 +474,9 @@ def test_mppi_real(tmp: Path) -> str:
     E, J, A_DIM = WD.EXECUTE, 7, WD.ACTION_DIM
 
     class M:                                     # the WM320 methods the planner uses
-        def __init__(self, done_bias):
+        def __init__(self, done_bias, done_c=None, done_sign=1.0):
             g = torch.Generator().manual_seed(1)
+            self.done_c, self.done_sign = done_c, done_sign
             self.A = torch.randn(4, A_DIM, generator=g) * 0.05
             self.w = torch.randn(4, generator=g)
             self.done_bias = done_bias
@@ -490,8 +491,10 @@ def test_mppi_real(tmp: Path) -> str:
             return x
         def next(self, z, a):
             return 0.9 * z + a @ self.A.T
-        def _done(self, z):
-            return (z[:, :1] * 0 + self.done_bias)
+        def _done(self, z):                      # constant, or a threshold on z[0] (fires from the next latent on)
+            if self.done_c is None:
+                return z[:, :1] * 0 + self.done_bias
+            return 1000.0 * self.done_sign * (z[:, :1] - self.done_c)
         def Q(self, z, a):
             return torch.stack([(1.0 + 0.3 * k) * z.sum(-1) + 0.1 * k + 0.01 * k * a.sum(-1) for k in range(5)])[..., None]
         def policy_action(self, z):
@@ -521,20 +524,39 @@ def test_mppi_real(tmp: Path) -> str:
     u = torch.zeros(3, 3, 3)
     u[0] = torch.tensor([[1.0, 0.0, -1.0], [0.5, -0.5, 0.0], [0.0, 0.2, 1.0]])
     u[1] = torch.tensor([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]])          # axes permuted: must differ
-    for done_bias, label in ((-100.0, "no end"), (100.0, "done fires")):
-        ag.m = M(done_bias)
+    # a done head that fires on the NEXT latent of sample 0's first step but not on the current one: threshold midway
+    m0 = M(-100.0)
+    a0 = m0.scale((m0.act_chunk(z)[:, :E] + (u[0, 0] @ Wq.T)[None, None, :]).reshape(1, -1))
+    z1 = m0.next(z, a0)
+    c, sgn = float((z[0, 0] + z1[0, 0]) / 2), (1.0 if float(z1[0, 0]) > float(z[0, 0]) else -1.0)
+    for m, label in ((M(-100.0), "no end"), (M(100.0), "done fires"), (M(0.0, c, sgn), "done from the next latent")):
+        ag.m = m
         vh = ag._mppi_value(z, u, Wq, heads=True).numpy()                              # (5, 3)
         ref = loop_value(ag.m, z, u, Wq, 0.9)
         assert np.allclose(vh, ref, atol=1e-5), (label, vh, ref)
         assert not np.allclose(vh[:, 0], vh[:, 1]), "a permuted move gave the same value"
-        if done_bias > 0:                        # the end value is masked: only the first reward counts
+        if label == "done fires":                # the end value is masked: only the first reward counts
             assert np.allclose(vh[0], vh[4]), vh
+        for seed in (0, 1, 2):                   # heads=False: the mean of the 2 heads TD-MPC2's randperm draws
+            torch.manual_seed(seed)
+            i, j = torch.randperm(5)[:2].tolist()
+            torch.manual_seed(seed)
+            v2 = ag._mppi_value(z, u, Wq).numpy()
+            assert np.allclose(v2, (ref[i] + ref[j]) / 2, atol=1e-5), (label, seed, v2, (ref[i] + ref[j]) / 2)
+    ag.m = M(-100.0)
+    ref = loop_value(ag.m, z, torch.stack([u[0], torch.zeros(3, 3)]), Wq, 0.9)
+    g = ag.mppi_gate(z, u[0].numpy(), Wq.numpy(), 0.5)              # the real gate on the real value
+    assert np.allclose(g["adv"], ref[:, 0] - ref[:, 1], atol=1e-5), (g["adv"], ref[:, 0] - ref[:, 1])
     ag.m = M(-100.0)
     real_value = ag._mppi_value
     for vals, want in ((np.array([[2.0, 1.0]] * 5), True),                          # every head +1: accept
                        (np.array([[2.0, 1.0]] * 4 + [[0.9, 1.0]]), False),          # mean 0.78 > 0.5, one head < 0
                        (np.array([[1.3, 1.0]] * 5), False)):                        # every head > 0, mean 0.3 < 0.5
-        ag._mppi_value = lambda z_, u_, W_, heads=False, v=vals: torch.tensor(v)
+        def fake(z_, u_, W_, heads=False, v=vals):   # the gate must ask for every head, the plan vs u = 0
+            assert heads is True and u_.shape == (2, 3, 3) and torch.all(u_[1] == 0), (heads, u_)
+            assert torch.allclose(u_[0], u[0]), u_[0]
+            return torch.tensor(v)
+        ag._mppi_value = fake
         g = ag.mppi_gate(z, u[0].numpy(), Wq.numpy(), 0.5)
         assert g["ok"] is want and np.allclose(g["adv"], vals[:, 0] - vals[:, 1]), (vals, g)
     ag._mppi_value = real_value
@@ -545,7 +567,6 @@ def test_mppi_real(tmp: Path) -> str:
     seen = {}                                    # the warm start: plan_mppi's first sampling mean = prev_mean shifted
     real_randn = torch.randn
     def spy_randn(*a, **k):
-        seen.setdefault("calls", 0); seen["calls"] += 1
         return real_randn(*a, **k) * 0.0         # std * 0: the first iteration's samples equal the initial mean
     prev = torch.tensor([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]])
     torch.randn = spy_randn
