@@ -512,7 +512,8 @@ def test_loop(tmp: Path) -> str:
                 # an executed plan counts as an intervention, as with the fixed planner, also when the one shift push
                 # is then added to it (stored as "shift")
                 assert dk["correction"] <= summ["interventions"] <= dk["correction"] + dk["shift"], (dk, summ["interventions"])
-                assert dk["random"] == summ["random_candidates"], (dk, summ["random_candidates"])
+                assert dk["random"] <= summ["random_candidates"] <= dk["random"] + dk["shift"], (dk, summ["random_candidates"])
+                assert dk["correction"] + dk["random"] + dk["shift"] == len(kinds_exec := [d for d in pdec if d["offered"]]), (dk, len(kinds_exec))
         res[mode + ("_mppi" if kw.get("planner") else "")] = f"{summ['stopped']}/{summ['decisions']}"
     ms = type("Robot", (), {"__module__": "wm.env.robot"})()
     try:
