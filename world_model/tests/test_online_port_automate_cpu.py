@@ -460,6 +460,68 @@ def test_t6(tmp: Path) -> str:
     return f"groups {sorted(G)}; heldout_shape clustered by assembly; counts and band successes"
 
 
+def test_mppi_real(tmp: Path) -> str:
+    """agent320.WMAgent._mppi_value / mppi_gate / plan_mppi (the real code) on a small deterministic stand-in model:
+    the value equals a hand computation of TD-MPC2's _estimate_value, heads=True gives every head, the gate applies
+    mean > margin and min > 0, plan_mppi returns its chosen elite's first step and the TD-MPC2 numbers."""
+    import torch
+    from wm.online import agent320 as AG
+    from wm.tdmpc import wmdata320 as WD
+
+    class M:                                     # the WM320 methods the planner uses, linear and deterministic
+        num_q = 5
+        def __init__(self):
+            g = torch.Generator().manual_seed(0)
+            self.A = torch.randn(4, WD.ACTION_DIM, generator=g) * 0.1
+            self.w = torch.randn(4, generator=g)
+            self.cfg = type("C", (), {"num_q": 5})()
+            from wm.tdmpc import use_tdmpc2
+            use_tdmpc2()
+            import common.math as tm             # TD-MPC2 math (gumbel_softmax_sample), as WM320.math
+            self.math = tm
+        def act_chunk(self, z):
+            return torch.zeros(z.shape[0], 16, 7) + 0.001 * z[:, :1, None]
+        def scale(self, d):
+            return torch.tanh(d * 100.0)
+        def reward(self, z, a):
+            return (z @ self.w)[:, None] + a.sum(-1, keepdim=True) * 0.01
+        def scalar(self, x):
+            return x[..., None] if x.dim() == 2 and x.shape[-1] == 1 else x
+        def next(self, z, a):
+            return 0.9 * z + a @ self.A.T
+        def _done(self, z):
+            return (z[:, :1] - 100.0)
+        def Q(self, z, a):
+            return torch.stack([(z.sum(-1) + k * 0.1) for k in range(5)])[..., None]
+        def policy_action(self, z):
+            return self.scale(self.act_chunk(z)[:, :WD.EXECUTE].reshape(z.shape[0], -1))
+
+    ag = AG.WMAgent.__new__(AG.WMAgent)
+    ag.m, ag.device, ag.horizon, ag.gamma = M(), torch.device("cpu"), 3, 0.9
+    ag.m.scalar = lambda x: x
+    z = torch.tensor([[0.3, -0.2, 0.1, 0.05]])
+    Wq = torch.full((7, 3), 0.001)
+    u = torch.zeros(2, 3, 3); u[0] = torch.tensor([[1.0, 0.0, -1.0], [0.5, 0.5, 0.0], [0.0, 0.0, 1.0]])
+    vh = ag._mppi_value(z, u, Wq, heads=True)                 # (5, 2)
+    assert vh.shape == (5, 2)
+    zc, G, disc = z.expand(2, -1), torch.zeros(2), 1.0         # hand computation (term stays 0: done logits << 0)
+    for t in range(3):
+        a = ag.m.scale((ag.m.act_chunk(zc)[:, :WD.EXECUTE] + (u[:, t] @ Wq.T)[:, None, :]).reshape(2, -1))
+        G = G + disc * ag.m.reward(zc, a)[:, 0]; zc = ag.m.next(zc, a); disc *= 0.9
+    q = ag.m.Q(zc, ag.m.policy_action(zc))[..., 0]
+    assert torch.allclose(vh, G[None] + disc * q, atol=1e-5), (vh, G[None] + disc * q)
+    g = ag.mppi_gate(z, u[0].numpy(), Wq.numpy(), 0.5)
+    adv = (vh[:, 0] - vh[:, 1]).numpy()
+    assert np.allclose(g["adv"], adv, atol=1e-5) and g["ok"] == bool(adv.mean() > 0.5 and adv.min() > 0)
+    assert ag.mppi_gate(z, u[0].numpy(), Wq.numpy(), 1e9)["ok"] is False
+    torch.manual_seed(0)
+    p = ag.plan_mppi(z, Wq.numpy(), None, eval_mode=True)
+    assert p["u_seq"].shape == (3, 3) and np.allclose(p["u_seq"][0], p["u0"]) and not p["noisy"]
+    assert np.allclose(p["dq"], Wq.numpy() @ p["u0"], atol=1e-6) and np.all(np.abs(p["u0"]) <= 1)
+    assert AG.MPPI["mm_per_unit"] == 1.5 and AG.MPPI["num_samples"] == 512 and AG.MPPI["num_elites"] == 64
+    return f"value = hand TD-MPC2 value, gate adv {np.round(adv, 3)} ok {g['ok']}, plan u0 {np.round(p['u0'], 3)}"
+
+
 def test_loop(tmp: Path) -> str:
     Robot, H_goal, axis = setup()
     from wm.data.kinematics import HandFK
@@ -519,11 +581,17 @@ def test_loop(tmp: Path) -> str:
             for d in pdec:                               # rejected = proposal, executed = correction (+ the push), eps = random
                 want = {1: (1,), 0: (0,), -2: (2,)}[d["pick"]]
                 assert dkind[d["k"]] in want + ((3,) if d["k"] == sh else ()), (d, dkind[d["k"]])
-            plans = tt_agent.plans                       # warm start: a plan after a rejected / replaced one starts at 0
-            assert plans and plans[0], plans
+            plans = tt_agent.plans                       # warm start: reset after a rejected / replaced plan, kept after
+            assert plans and plans[0], plans             # an executed one (the previous plan's mean is passed back)
             for i in range(1, len(plans)):
                 if off[i - 1]["pick"] != 1:
                     assert plans[i], (i, [d["pick"] for d in off[:i + 1]])
+                else:
+                    assert not plans[i] and np.allclose(tt_agent.prev_means[i], tt_agent.means_out[i - 1]), i
+            gc = tt_agent.gate_calls                     # the gate gets the plan's whole sequence and the margin
+            assert len(gc) == len(off) and all(c[0] == (3, 3) and c[1] == 0.5 for c in gc), gc[:2]
+            assert all(np.allclose(c[2], u) for c, u in zip(gc, tt_agent.useqs)), "gate not given the chosen u_seq"
+            assert any((not d["gate_ok"]) and min(d["gate_adv"]) > 0 for d in off), "no rejection by the margin"
             assert any(d["offered"] for d in pdec if d["k"] < ia), pdec
             assert summ["interventions"] == sum(1 for d in pdec if d.get("pick") == 1), (summ["interventions"], pdec)
             assert "strict_success" in summ and "noisy" not in str(pdec)
@@ -927,6 +995,7 @@ if __name__ == "__main__":
         print("T4 OK:", test_t4(tmp), flush=True)
         print("T5 OK:", test_t5(tmp), flush=True)
         print("T6 OK:", test_t6(tmp), flush=True)
+        print("mppi_real OK:", test_mppi_real(tmp), flush=True)
         print("loop OK:", test_loop(tmp), flush=True)
         print("F1 OK:", test_f1_claim_order(tmp), flush=True)
         print("F2/F3 OK:", test_f2_f3_inputs(tmp), flush=True)

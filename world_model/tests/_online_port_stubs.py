@@ -152,13 +152,21 @@ class StubAgent:
         u0 = np.clip(np.array([np.sin(z[0] * 5.0), np.cos(z[1] * 30.0), 0.3]), -1, 1)
         noisy = bool(noise) and not eval_mode
         self.plans = getattr(self, "plans", []) + [prev_mean is None]
+        self.prev_means = getattr(self, "prev_means", []) + [None if prev_mean is None else np.asarray(prev_mean).copy()]
+        self.means_out = getattr(self, "means_out", [])
         mean = np.tile(u0, (3, 1)) if prev_mean is None else np.vstack([prev_mean[1:], u0])
-        return {"u0": u0, "dq": np.asarray(Wq, np.float64) @ u0, "u_seq": np.tile(u0, (3, 1)), "move_hand_mm": u0 * 1.5, "mean": mean,
+        u_seq = np.stack([u0, 0.5 * u0, 0.25 * u0])
+        self.means_out.append(mean.copy())
+        self.useqs = getattr(self, "useqs", []) + [u_seq]
+        return {"u0": u0, "dq": np.asarray(Wq, np.float64) @ u0, "u_seq": u_seq, "move_hand_mm": u0 * 1.5, "mean": mean,
                 "std0": np.full(3, 0.5), "value_max": 1.0, "value_pi": 0.5, "noisy": noisy}
 
     def mppi_gate(self, z, u_seq, Wq, margin):
-        """agent320.WMAgent.mppi_gate's interface, deterministic: both outcomes occur along a run."""
-        adv = np.array([0.4, 0.9, 1.1, 0.8, 0.7]) * (1.0 if self.n % 3 else -1.0)
+        """agent320.WMAgent.mppi_gate's interface, deterministic: accepted, rejected by the margin (0 < mean < 0.5) and
+        rejected by a head below 0 occur along a run; records what it is given."""
+        self.gate_calls = getattr(self, "gate_calls", []) + [(np.asarray(u_seq).shape, float(margin), np.asarray(u_seq).copy())]
+        adv = {0: np.array([-0.4, 0.9, 1.1, 0.8, 0.7]), 1: np.array([0.4, 0.9, 1.1, 0.8, 0.7]),
+               2: np.array([0.2, 0.3, 0.25, 0.3, 0.2])}[self.n % 3]
         return {"ok": bool(adv.mean() > margin and adv.min() > 0), "adv": adv}
 
     def score(self, z, deltas, parts: bool = False):

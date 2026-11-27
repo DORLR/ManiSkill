@@ -232,8 +232,8 @@ class OnlineTester(AttemptBase):
         """-> (summary, recording). `inside_mm` (2026-11-18, the user's decision; None = off): once the estimated pin-tip
         depth g_t < -inside_mm (agent.gap_mm: offset_mode "gap" g_t = o[0], no pin length, required on AutoMate by the
         user's decision 6 of 2026-11-23; offset_mode "along" g_t = -o[0] - L), the try is in the hole and only the proposal is executed
-        (no correction, no random candidate, no exploration push) until a back-off starts a new try; with planner "mppi" in
-        mode "collect" the plans go on in the hole (corrections), still without random moves or the push. The decision and g_t at entry are logged (`inside_at`, `inside_gap_mm`). The recording is FullRecorder.end() plus `rgb_jpeg_list` (the stored JPEG bytes)
+        (no correction, no random candidate, no exploration push) until a back-off starts a new try; planner "mppi" likewise
+        stops planning in the hole in both modes (the head inserts alone). The decision and g_t at entry are logged (`inside_at`, `inside_gap_mm`). The recording is FullRecorder.end() plus `rgb_jpeg_list` (the stored JPEG bytes)
         and `dec_kind` (one KINDS value per executed decision)."""
         import torch
         validate_attempt_args(mode, inside_mm=inside_mm, max_retries=max_retries, servo_axis=servo_axis,
@@ -427,6 +427,8 @@ class OnlineTester(AttemptBase):
                                 log["random_candidates"] += 1
                                 rec_d["pick"] = -2
                                 rec_d["move_mm"] = [round(float(x), 3) for x in Bt @ mv * 1000.0]
+                        # the warm start is kept after an executed plan, also when the shift push is added below (as
+                        # TD-MPC2 keeps its mean after adding exploration noise to the executed action); reset otherwise
                         if kind == "correction":                   # the model's own plan was executed (not replaced)
                             log["interventions"] += 1
                             try_corr = try_corr + mv_plan
