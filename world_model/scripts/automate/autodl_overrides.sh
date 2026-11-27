@@ -142,6 +142,8 @@ cl_isaac_env() {
   export HOME=/root/autodl-tmp/isaac/home XDG_CACHE_HOME=/root/autodl-tmp/isaac/cache
   export TMPDIR=/root/autodl-tmp/isaac/tmp OMNI_KIT_ACCEPT_EULA=YES NUMPY_MADVISE_HUGEPAGE=0
   export PYTHONDONTWRITEBYTECODE=1 TORCH_HOME=$CL_TORCH_HOME
+  # the container image ICD (libGLX_nvidia) cannot create a Vulkan instance headless; the EGL entry point can (2026-11-26)
+  export VK_ICD_FILENAMES=/root/autodl-tmp/isaac/vk/nvidia_egl_icd.json
 }
 
 cl_train_env() {
