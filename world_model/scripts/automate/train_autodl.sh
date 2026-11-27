@@ -22,6 +22,7 @@ cl_freeze_code "$LIVE" "$RUN" || exit 1
 W=$RUN/code
 for v in $(compgen -e | grep '^WM_'); do unset "$v"; done      # as cl_clean_env
 export WM_FORBIDDEN_GPU=0 WM_DEDICATED_GPUS=1 PYTHONUNBUFFERED=1 OMP_NUM_THREADS=8
+export NCCL_P2P_DISABLE=1   # 2026-11-26: with P2P the first DDP step hung (GPU 0 idle, GPU 1 spinning)
 cl_isaac_env; cl_train_env "$W"
 ts=$(date +%s); LOG=$RUN/logs/train_$ts.log; unit=qingxin-train-$(basename "$RUN")-$ts
 echo "$unit" > "$RUN/logs/train_unit_$ts"
