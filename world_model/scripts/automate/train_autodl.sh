@@ -3,7 +3,7 @@
 # of wm320_segformer_b1_s0 unchanged except the GPU split.
 #   bash train_autodl.sh <GPUs 1|2> <run dir> [extra train_wm320.py args, e.g. --resume, --online <pool>, --steps 600]
 # GPUs 2: torchrun, 2 processes x --accum 2 (train_wm320.py: processes x accum = the single-GPU --accum 4 recipe).
-# GPUs 1: one process on GPU 0 with --accum 4 (GPU 1 is left to the online workers; a run may be resumed with any
+# GPUs 1: one process on GPU ${QX_LEARNER_GPU:-0} (default 0) with --accum 4 (GPU 1 is left to the online workers; a run may be resumed with any
 #         number of processes, train_wm320.py docstring).
 # Like train_automate.sh: the world_model tree is frozen to <run dir>/code (cl_freeze_code; a later start must find it
 # unchanged) and the run imports only from there; the "unit" (caps.sh / autodl_overrides.sh) is written to
@@ -38,7 +38,7 @@ cd "$W"
 if [ "$NG" = 2 ]; then
   setsid env CUDA_VISIBLE_DEVICES=0,1 CUDA_DEVICE_ORDER=PCI_BUS_ID /root/miniconda3/envs/wm/bin/torchrun --standalone --nproc_per_node 2 scripts/train/train_wm320.py "${ARGS[@]}" >> "$LOG" 2>&1 &
 else
-  setsid env CUDA_VISIBLE_DEVICES=0 CUDA_DEVICE_ORDER=PCI_BUS_ID /root/miniconda3/envs/wm/bin/python -u scripts/train/train_wm320.py "${ARGS[@]}" >> "$LOG" 2>&1 &
+  setsid env CUDA_VISIBLE_DEVICES=${QX_LEARNER_GPU:-0} CUDA_DEVICE_ORDER=PCI_BUS_ID /root/miniconda3/envs/wm/bin/python -u scripts/train/train_wm320.py "${ARGS[@]}" >> "$LOG" 2>&1 &
 fi
 pid=$!; echo "$pid $(qx_pid_start "$pid")" > "$QX_RUN_DIR/units/$unit.pid"; echo "$NG $LMEM 1600%" > "$QX_RUN_DIR/qx/$unit.gpu"
 wait $pid; rc=$?
