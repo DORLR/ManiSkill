@@ -45,10 +45,12 @@ from ..tdmpc.wm320 import WM320, encoder_settings
 #   TD-MPC2's gumbel_softmax_sample, its first step u_0; clamp. TD-MPC2 adds std_0 * N(0, 1) outside eval_mode; our
 #   attempts call it with noise=False in collection too (the user's decision of 2026-11-26: the plan stays an imitable
 #   correction; collection explores by attempt320's sparse eps moves and shift push instead).
-# Execution gate (the user's decision of 2026-11-26, "5 heads, above 0.5, as in ManiSkill"): the plan MPPI picks is executed
-# only when, valued per Q head k (reward sum + gamma^H (1 - term) Q_k(z_H, pi(z_H)), the MPPI value with each head instead
-# of 2 random ones), it beats the head's own sequence (u = 0) on every head and by more than the margin (0.5) on their mean
-# -- the fixed candidates' rule; otherwise the head's proposal is executed. Only gated plans are corrections.
+# Execution gate (the user's decisions of 2026-11-26: "5 heads, above 0.5, as in ManiSkill" for the rule; the whole
+# imagined plan for the scoring, "the imagination must be used"): the plan MPPI picks (its 3 planned moves) is valued per Q
+# head k exactly as MPPI values sequences (reward sum + gamma^H (1 - term) Q_k(z_H, pi(z_H)), each head instead of 2
+# random ones) and compared with the head's own sequence (u = 0); its first move is executed only if every head prefers
+# the plan and the mean advantage exceeds the margin (0.5) -- the fixed candidates' rule; otherwise the head's proposal is
+# executed. Only gated plans are corrections. After a rejected or replaced plan the next decision plans from mean 0.
 MPPI = {"horizon": 3, "iterations": 6, "num_samples": 512, "num_elites": 64, "num_pi_trajs": 24, "min_std": 0.05,
         "max_std": 2.0, "temperature": 0.5, "mm_per_unit": 1.5}
 

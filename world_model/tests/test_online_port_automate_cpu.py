@@ -488,7 +488,8 @@ def test_loop(tmp: Path) -> str:
         nmax = 20 if kw.get("planner") == "mppi" else 7          # MPPI runs long enough for the stub to enter the hole
         rr = make_robot(Robot, H_goal, n_max=nmax)
         tt = A.AutomateTester(rr, H_goal, axis, HandFK(rr), F)
-        summ, out = tt.attempt(S.StubAgent(), mode, 11, **kw)
+        tt_agent = S.StubAgent()
+        summ, out = tt.attempt(tt_agent, mode, 11, **kw)
         assert summ["decisions"] <= nmax and summ["max_decisions"] == nmax and summ["stopped"] in ("time", "stalled", "seated", "left")
         assert summ["success"] == summ["automate_success_any"] and summ["start_success"] is False
         fs = summ["first_success_step"]
@@ -510,6 +511,19 @@ def test_loop(tmp: Path) -> str:
             assert off and all(("gate_ok" in d) for d in off), off
             assert all(d["pick"] in ((1,) if d["gate_ok"] else (0,)) or d["pick"] == -2 for d in off), off
             assert any(d["gate_ok"] for d in off) and any(not d["gate_ok"] for d in off), off
+            for d in off:                                # the rule on the stub's 5 advantages, margin 0.5
+                assert d["gate_ok"] == (float(np.mean(d["gate_adv"])) > 0.5 and min(d["gate_adv"]) > 0), d
+            assert all(("move_mm" in d) == (d["pick"] != 0) for d in off), off   # a move is logged only when executed
+            dkind = [int(x) for x in out["dec_kind"]]    # no back-off: decision k = row k of dec_kind
+            sh = (summ["shift"] or {}).get("decision")
+            for d in pdec:                               # rejected = proposal, executed = correction (+ the push), eps = random
+                want = {1: (1,), 0: (0,), -2: (2,)}[d["pick"]]
+                assert dkind[d["k"]] in want + ((3,) if d["k"] == sh else ()), (d, dkind[d["k"]])
+            plans = tt_agent.plans                       # warm start: a plan after a rejected / replaced one starts at 0
+            assert plans and plans[0], plans
+            for i in range(1, len(plans)):
+                if off[i - 1]["pick"] != 1:
+                    assert plans[i], (i, [d["pick"] for d in off[:i + 1]])
             assert any(d["offered"] for d in pdec if d["k"] < ia), pdec
             assert summ["interventions"] == sum(1 for d in pdec if d.get("pick") == 1), (summ["interventions"], pdec)
             assert "strict_success" in summ and "noisy" not in str(pdec)

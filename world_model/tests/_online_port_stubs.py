@@ -151,6 +151,7 @@ class StubAgent:
         """agent320.WMAgent.plan_mppi's interface, deterministic: u0 from the latent, mean shifted as TD-MPC2's."""
         u0 = np.clip(np.array([np.sin(z[0] * 5.0), np.cos(z[1] * 30.0), 0.3]), -1, 1)
         noisy = bool(noise) and not eval_mode
+        self.plans = getattr(self, "plans", []) + [prev_mean is None]
         mean = np.tile(u0, (3, 1)) if prev_mean is None else np.vstack([prev_mean[1:], u0])
         return {"u0": u0, "dq": np.asarray(Wq, np.float64) @ u0, "u_seq": np.tile(u0, (3, 1)), "move_hand_mm": u0 * 1.5, "mean": mean,
                 "std0": np.full(3, 0.5), "value_max": 1.0, "value_pi": 0.5, "noisy": noisy}

@@ -85,8 +85,9 @@ Per decision of "wm"/"collect" (every 0.4 s):
 Planner "mppi" (the user's decisions of 2026-11-26; agent320.MPPI): in "wm" and "collect" the fixed candidates and their
 margin rule are replaced by TD-MPC2's MPPI over hand moves around the proposal (1.5 mm per unit); "wm" plans until the
 in-hole rule fires (inside_mm required), in both modes (in the hole the head inserts alone, the user's decision of
-2026-11-26); a plan is executed only if it passes the gate (agent320 MPPI_GATE: all 5 Q heads prefer it to the head's own
-sequence and their mean advantage exceeds the margin 0.5), else the proposal; in "collect" TD-MPC2's exploration noise is
+2026-11-26); its first move is executed only if the whole plan passes the gate (agent320, comment above MPPI: every Q head
+prefers the planned 3-step sequence to the head's own and the mean advantage exceeds the margin 0.5), else the proposal;
+a rejected or replaced plan resets the warm start (mean 0); TD-MPC2's exploration noise is
 NOT added (the user's decision of 2026-11-26: with noise at every step nearly no online decision could be imitated):
 every executed plan is the model's correction ("correction"), the imitation head copies it from seated attempts as it
 copied the fixed planner's corrections; exploration is the sparse scheme below, unchanged (eps: one of the 12 fixed
@@ -410,12 +411,11 @@ class OnlineTester(AttemptBase):
                             mv_plan = Rh @ (plan["move_hand_mm"] / 1000.0)   # [m, world]
                             gate = agent.mppi_gate(z, plan["u_seq"], Wq, m_now)   # 5 Q heads, margin (MPPI_GATE)
                             rec_d.update(gate_adv=[round(float(x), 3) for x in gate["adv"]], gate_ok=gate["ok"])
-                            if gate["ok"]:
+                            rec_d.update(u0=[round(float(x), 3) for x in plan["u0"]], std0=[round(float(x), 3) for x in plan["std0"]],
+                                         v_max=round(plan["value_max"], 3), v_pi=round(plan["value_pi"], 3))
+                            if gate["ok"]:                         # executed: pick 1 and its move (as the fixed path logs)
                                 target, kind = chunk + plan["dq"][None], "correction"
-                            rec_d.update(pick=1 if gate["ok"] else 0, u0=[round(float(x), 3) for x in plan["u0"]],
-                                         std0=[round(float(x), 3) for x in plan["std0"]],
-                                         v_max=round(plan["value_max"], 3), v_pi=round(plan["value_pi"], 3),
-                                         move_mm=[round(float(x), 3) for x in Bt @ mv_plan * 1000.0])
+                                rec_d.update(pick=1, move_mm=[round(float(x), 3) for x in Bt @ mv_plan * 1000.0])
                         if mode == "collect":
                             gap = self.face_gap_mm()
                             if not inside and 0.0 <= gap < 6.0 and rng.random() < eps:
@@ -430,6 +430,8 @@ class OnlineTester(AttemptBase):
                         if kind == "correction":                   # the model's own plan was executed (not replaced)
                             log["interventions"] += 1
                             try_corr = try_corr + mv_plan
+                        else:                                      # rejected or replaced: the next plan starts from mean 0
+                            mppi_mean = None
                         if torch.cuda.is_available():
                             torch.cuda.synchronize()
                         lat_ms = (time.perf_counter() - t_dec) * 1000.0
