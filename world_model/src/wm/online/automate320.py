@@ -189,11 +189,19 @@ def automate_io(beat=None) -> RecorderIO:
     return RecorderIO(qvel=_qvel, truth_rel=truth_rel, picture=picture, frame_cls=AR.Frame, cam_scale=C.CAM_SCALE)
 
 
+# The strict criterion (the user's decision of 2026-11-26, "the real number"; AutoMate's own rule is the loose one and is
+# kept beside it): at the attempt's last step, at the plug tip centre, depth left < 1.25 mm, full rotation angle < 4 deg,
+# lateral < 2 mm (the thresholds of the ManiSkill experiment's success, demo320).
+STRICT = {"depth_mm": 1.25, "angle_deg": 4.0, "lateral_mm": 2.0}
+
+
 def truth_final(eval_rel: np.ndarray, spec) -> dict:
     """The summary's success fields of an attempt from its eval_rel (T + 1, 7) (module docstring, success)."""
     st = K.success_steps(np.asarray(eval_rel, np.float64), spec)
     end = K.truth_from_rel_spec(np.asarray(eval_rel[-1], np.float64), spec)
-    return {"success": bool(st["success_any"]), "automate_success_any": bool(st["success_any"]),
+    strict = bool(end["depth_left_mm"] < STRICT["depth_mm"] and end["angle_deg"] < STRICT["angle_deg"]
+                  and end["lateral_mm"] < STRICT["lateral_mm"])
+    return {"success": bool(st["success_any"]), "automate_success_any": bool(st["success_any"]), "strict_success": strict,
             "success_end": bool(st["success_end"]), "first_success_step": st["first_success_step"],
             "start_success": bool(st["start_success"]), "height_mm_end": float(end["height_mm"]),
             "keypoint_dist_mm_end": float(end["keypoint_dist_mm"]),

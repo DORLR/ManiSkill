@@ -146,10 +146,10 @@ wait_learner() {     # <R> (header)
 success_of() {       # <summary.json> -> the success figure of all selection grasps, or nothing
   "$CL_PY" -I -c "import json,sys
 try:
-    s = json.load(open(sys.argv[1]))['groups']['all']['success']
+    s = json.load(open(sys.argv[1]))['groups']['all'][sys.argv[2] if len(sys.argv) > 2 else 'strict_success']
     print('' if s is None else s)
 except Exception:
-    pass" "$1"
+    pass" "$1" "${2:-strict_success}"
 }
 
 job() {   # <job dir> <prepare args...>
@@ -160,7 +160,7 @@ act_done_options() {   # ATT_EXTRA without "--inside-mm <v>" / "--inside-mm=<v>"
   local a skip=0
   for a in "${att_extra[@]}"; do
     if [ $skip = 1 ]; then skip=0; continue; fi
-    case $a in --inside-mm) skip=1; continue ;; --inside-mm=*) continue ;; esac
+    case $a in --inside-mm|--planner) skip=1; continue ;; --inside-mm=*|--planner=*) continue ;; esac
     printf '%s\n' "$a"
   done
   for a in "${act_extra[@]}"; do printf '%s\n' "$a"; done
@@ -219,7 +219,7 @@ for R in $(seq 1 "$r1"); do
       { olog "round $R: ${why:-the select tests are not paired}; rounds stop"; exit 1; }
   fi
   s=$(success_of "$D/select_wm/summary.json")
-  olog "round $R done; select success (AutoMate's rule) with the world model ${s:-unknown}, action head alone (act_done) $(success_of "$D/select_act_done/summary.json")"
+  olog "round $R done; select success, strict criterion (the stop rule's): with the world model ${s:-unknown}, action head alone (act_done) $(success_of "$D/select_act_done/summary.json"); AutoMate's own (loose) rule: $(success_of "$D/select_wm/summary.json" success) / $(success_of "$D/select_act_done/summary.json" success)"
   [ -n "$s" ] || continue
   if "$CL_PY" -I -c "import sys; sys.exit(0 if float(sys.argv[1]) > float(sys.argv[2]) else 1)" "$s" "$best"; then best=$s; worse=0
   else worse=$(( worse + 1 )); fi

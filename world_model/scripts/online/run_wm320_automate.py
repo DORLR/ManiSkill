@@ -99,7 +99,7 @@ ONLINE_META_KEYS = ("grasp", "port", "condition", "kind", "outcome", "steps", "H
                     "config_sha", "plan_sha", "format", "source", "start")
 GRASP_KEYS = ("grasp", "port", "condition", "pitch_deg", "grasp_pos_m", "spin_deg", "u", "simulator", "assembly_id")
 ATTEMPT_ARGS = ("margin", "p_shift", "eps", "candidates", "radius_mm", "random_reposition", "inside_mm", "servo_axis",
-                "probe_gap_mm")
+                "probe_gap_mm", "planner")
 CRITERION = ("AutoMate check_plug_inserted_in_socket (0 < h < d_dis and mean keypoint distance < 15 mm) after any "
              "control step of the attempt; the placed start (row 0) is never counted")
 
@@ -222,7 +222,8 @@ def summarise_automate(out: Path, gs: list[dict], starts: int, extra: dict) -> t
             if "attempt" in st:
                 a = st["attempt"]
                 rows.append((grp, cl, bool(a["success"]), a["stopped"], g["grasp"], g["port"],
-                             float(a.get("band_above_top_mm", 0.0)) > 0.0, bool(a.get("start_success"))))
+                             float(a.get("band_above_top_mm", 0.0)) > 0.0, bool(a.get("start_success")),
+                             bool(a.get("strict_success"))))
             else:
                 outc[st.get("outcome", "unknown")] += 1
                 if st.get("outcome") in ("reference_failed", "reset_failed", "contact_report_error"):
@@ -231,7 +232,10 @@ def summarise_automate(out: Path, gs: list[dict], starts: int, extra: dict) -> t
     groups = {}
     for name in ["all"] + sorted({r[0] for r in rows}):
         sel = [r for r in rows if name == "all" or r[0] == name]
-        groups[name] = {**E.cluster_rate([r[2] for r in sel], [r[1] for r in sel]), "grasps": len({r[4] for r in sel}),
+        st = E.cluster_rate([r[8] for r in sel], [r[1] for r in sel])
+        groups[name] = {**E.cluster_rate([r[2] for r in sel], [r[1] for r in sel]),
+                        "strict_success": st["success"], "strict_se": st["se"], "strict_ci95": st["ci95"],
+                        "grasps": len({r[4] for r in sel}),
                         "assemblies": len({r[5] for r in sel}),
                         "ended": dict(Counter(f"{r[3]}/{'success' if r[2] else 'failure'}" for r in sel)),
                         "successes_on_band_above_top": sum(r[2] and r[6] for r in sel),
@@ -270,6 +274,8 @@ def prepare_parser() -> argparse.ArgumentParser:
     ap.add_argument("--margin", type=float, default=0.5)
     ap.add_argument("--max-retries", type=int, default=0, help="must be 0 on AutoMate (the user's decision 5 of 2026-11-25)")
     ap.add_argument("--inside-mm", type=float, default=None)
+    ap.add_argument("--planner", choices=["fixed", "mppi"], default="fixed",
+                    help="wm / collect: the fixed candidates or TD-MPC2's MPPI (agent320.MPPI; the user's decision of 2026-11-26)")
     ap.add_argument("--candidates", type=int, default=16)
     ap.add_argument("--radius-mm", type=float, default=3.0)
     ap.add_argument("--random-reposition", type=float, default=0.5)
@@ -306,6 +312,8 @@ def build_job(args) -> tuple[Path, dict]:
         raise SystemExit("--probe-max must be 0 on AutoMate until the simulator-state restore check (plan T8) has been run")
     if args.mode == "act_done" and args.inside_mm is not None:
         raise SystemExit("--mode act_done has no candidate corrections and does not accept --inside-mm")
+    if args.planner == "mppi" and args.mode not in ("wm", "collect"):
+        raise SystemExit("--planner mppi plans in the modes wm and collect only")
     if args.mode in ("servo", "random") and args.inside_mm is None:
         raise SystemExit(f"--mode {args.mode} is an ablation of the in-hole agent: it needs --inside-mm")
     random_p = None
@@ -510,7 +518,8 @@ def run_grasp(robot, fk, agent, g: dict, job: dict, W: Path, beat, tries: int,
            "eps": job["attempt_args"]["eps"], "n_candidates": job["attempt_args"]["candidates"],
            "radius_mm": job["attempt_args"]["radius_mm"], "random_reposition": job["attempt_args"]["random_reposition"],
            "inside_mm": job["attempt_args"]["inside_mm"], "servo_axis": job["attempt_args"]["servo_axis"],
-           "random_p": job["random_p"], "probe_max": 0, "probe_gap_mm": job["attempt_args"]["probe_gap_mm"]}
+           "random_p": job["random_p"], "probe_max": 0, "probe_gap_mm": job["attempt_args"]["probe_gap_mm"],
+           "planner": job["attempt_args"].get("planner", "fixed")}
     try:
         if root is not None:                                   # a retried grasp: no file of an earlier try stays behind
             shutil.rmtree(root / sub / g["port"] / g["grasp"], ignore_errors=True)

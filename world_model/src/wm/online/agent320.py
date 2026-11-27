@@ -27,6 +27,25 @@ from ..tdmpc import wmdata320 as WD
 from ..tdmpc.wm320 import WM320, encoder_settings
 
 
+# MPPI (the user's decisions of 2026-11-26): TD-MPC2's planner (tdmpc2.py plan(), config.yaml at 332f19e) unchanged in
+# its numbers and steps, in an action space of hand moves around the built-in head's proposal:
+#   u_t in [-1, 1]^3 (t = 0..H-1): the hand moved by MPPI_MM * u_t along x, y, z of the HAND's frame (FK of the measured
+#   joints, as the fixed candidates), as one joint offset dq_t = Wq u_t (Wq (7, 3) from the caller: damped least squares
+#   on the FK Jacobian, rotation held, computed once from the measured joints) added to all 8 executed targets of
+#   pi(z_t), the head's proposal at the imagined latent z_t. u = 0 is the head itself, so TD-MPC2's mean init of zero
+#   is "centred on the head's proposal" (decision 1) and its pi trajectories (num_pi_trajs) are u = 0.
+#   MPPI_MM = 3 mm per unit (the expert's largest per-decision hand move, measured 2026-11-26); init std = max_std = 2
+#   (decision 2: TD-MPC2's default).
+# Value of a sequence = TD-MPC2's _estimate_value (episodic): sum_t gamma^t (1 - term_t) r_t + gamma^H (1 - term_H)
+#   Q_avg(z_H, pi(z_H)), term from the done head > 0.5, Q_avg = mean of 2 random Q heads (a new pair per call).
+# Steps (per decision): mean = 0 (t0 of the attempt) else the previous decision's mean shifted by one; std = max_std;
+#   6 iterations of: 488 Gaussian samples (mean + std * N(0, 1), clamped to [-1, 1]) + 24 pi trajectories -> value ->
+#   64 elites -> weights exp(0.5 (v - v_max)) -> new mean / std (clamped to [0.05, 2]); then one elite drawn by
+#   TD-MPC2's gumbel_softmax_sample, its first step u_0; outside eval_mode (collection) u_0 + std_0 * N(0, 1); clamp.
+MPPI = {"horizon": 3, "iterations": 6, "num_samples": 512, "num_elites": 64, "num_pi_trajs": 24, "min_std": 0.05,
+        "max_std": 2.0, "temperature": 0.5, "mm_per_unit": 3.0}
+
+
 class WMAgent:
     def __init__(self, ckpt: str, device: str = "cuda", horizon: int = 3):
         self.device = torch.device(device)
@@ -117,5 +136,62 @@ class WMAgent:
         total = (G[None] + (cont * self.gamma ** self.horizon)[None] * V).T.double().cpu().numpy()
         return (total, G.double().cpu().numpy()) if parts else total
 
+    @torch.no_grad()
+    def _mppi_value(self, z: torch.Tensor, u: torch.Tensor, Wq: torch.Tensor) -> torch.Tensor:
+        """TD-MPC2 _estimate_value for sequences u (N, H, 3) of hand moves around pi (module comment MPPI) -> (N,)."""
+        m, N, H = self.m, u.shape[0], u.shape[1]
+        zc = z.reshape(1, -1).expand(N, -1)
+        G = torch.zeros(N, device=self.device)
+        term = torch.zeros(N, device=self.device)
+        disc = 1.0
+        for t in range(H):
+            base = m.act_chunk(zc)[:, :WD.EXECUTE]                                    # (N, 8, 7) rad
+            a = m.scale((base + (u[:, t] @ Wq.T)[:, None, :]).reshape(N, WD.ACTION_DIM))
+            r = m.scalar(m.reward(zc, a))[:, 0]
+            zc = m.next(zc, a)
+            G = G + disc * (1 - term) * r
+            disc = disc * self.gamma
+            term = torch.clamp(term + (torch.sigmoid(m._done(zc))[:, 0] > 0.5).float(), max=1.0)
+        q = m.scalar(m.Q(zc, m.policy_action(zc)))[..., 0]                            # (num_q, N)
+        i, j = torch.randperm(q.shape[0], device=self.device)[:2]                     # TD-MPC2 Q(..., 'avg')
+        return G + disc * (1 - term) * (q[i] + q[j]) / 2
 
-__all__ = ["WMAgent"]
+    @torch.no_grad()
+    def plan_mppi(self, z: torch.Tensor, Wq: np.ndarray, prev_mean: torch.Tensor | None, eval_mode: bool) -> dict:
+        """One MPPI plan (module comment MPPI). Wq (7, 3): joint offset [rad] per unit of u. prev_mean: the previous
+        decision's final mean (H, 3) or None at the attempt's first decision (TD-MPC2's t0).
+        -> {"u0": (3,) the executed unit move, "dq": (7,) its joint offset [rad], "move_hand_mm": (3,) hand-frame mm,
+            "mean": (H, 3) to pass back next decision, "std0": (3,), "value_max": best elite value, "value_pi": value
+            of the pi trajectory (u = 0) in the last iteration}"""
+        c, H = MPPI, self.horizon
+        if H != c["horizon"]:
+            raise ValueError(f"MPPI uses TD-MPC2's horizon {c['horizon']}; the agent has {H}")
+        dev = self.device
+        Wt = torch.as_tensor(np.asarray(Wq, np.float32), device=dev)                  # (7, 3)
+        mean = torch.zeros(H, 3, device=dev)
+        if prev_mean is not None:
+            mean[:-1] = prev_mean[1:]
+        std = torch.full((H, 3), c["max_std"], device=dev)
+        n_pi, n = c["num_pi_trajs"], c["num_samples"]
+        u = torch.zeros(n, H, 3, device=dev)                                          # rows < n_pi: pi (u = 0)
+        for _ in range(c["iterations"]):
+            u[n_pi:] = (mean[None] + std[None] * torch.randn(n - n_pi, H, 3, device=dev)).clamp(-1, 1)
+            value = self._mppi_value(z, u, Wt).nan_to_num(0)
+            elite = torch.topk(value, c["num_elites"]).indices
+            ev, eu = value[elite], u[elite]                                           # (E,), (E, H, 3)
+            score = torch.exp(c["temperature"] * (ev - ev.max()))
+            score = score / score.sum()
+            mean = (score[:, None, None] * eu).sum(0) / (score.sum() + 1e-9)
+            std = ((score[:, None, None] * (eu - mean[None]) ** 2).sum(0) / (score.sum() + 1e-9)).sqrt()
+            std = std.clamp(c["min_std"], c["max_std"])
+        k = self.m.math.gumbel_softmax_sample(score)                                  # TD-MPC2 common/math.py
+        u0 = eu[int(k)][0]
+        if not eval_mode:
+            u0 = u0 + std[0] * torch.randn(3, device=dev)
+        u0 = u0.clamp(-1, 1)
+        dq = (Wt @ u0).double().cpu().numpy()
+        return {"u0": u0.double().cpu().numpy(), "dq": dq, "move_hand_mm": (u0 * c["mm_per_unit"]).double().cpu().numpy(),
+                "mean": mean, "std0": std[0].double().cpu().numpy(), "value_max": float(ev.max()), "value_pi": float(value[0])}
+
+
+__all__ = ["WMAgent", "MPPI"]
