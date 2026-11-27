@@ -337,4 +337,4 @@ qx_unit_active() {  # <unit, with or without .scope> is an active systemd scope 
   systemctl --user is-active --quiet "$u"
 }
 # AutoDL container (no systemd, ours alone): the AutoDL backend of these functions
-[ -d /root/autodl-tmp ] && source "$(dirname "${BASH_SOURCE[0]}")/autodl_overrides.sh"
+if [ -d /root/autodl-tmp ]; then source "$(dirname "${BASH_SOURCE[0]}")/autodl_overrides.sh"; fi

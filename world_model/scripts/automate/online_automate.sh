@@ -64,7 +64,7 @@ LCODE=$LRUN/code
   { olog "refused: the learner's frozen code $LCODE is missing or changed since it was frozen"; exit 1; }
 ROUND_FILES="scripts/online/run_wm320_automate.py scripts/online/run_wm320_attempts.py scripts/eval/eval_policy320.py
 scripts/automate/online_job.sh scripts/automate/online_worker.sh scripts/automate/online_automate.sh
-scripts/automate/caps.sh scripts/automate/collect_lib.sh scripts/automate/qx_watch.py"
+scripts/automate/caps.sh scripts/automate/collect_lib.sh scripts/automate/qx_watch.py scripts/automate/autodl_overrides.sh scripts/automate/autodl_watch.py"
 round_files_differ() {   # <code tree> <code tree>: prints the ROUND_FILES missing in either or with another sha256
   local f
   for f in $ROUND_FILES; do

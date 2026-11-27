@@ -18,10 +18,16 @@ QX_WORKER_GPU=${QX_WORKER_GPU:-1}
 QX_AUTODL_START_GAP_S=${QX_AUTODL_START_GAP_S:-30}
 mkdir -p "$QX_RUN_DIR/units" "$QX_RUN_DIR/qx" 2>/dev/null
 
-qx_unit_active() {  # <unit, with or without .scope>: its process group still runs
-  local u=${1%.scope} p
-  p=$(cat "$QX_RUN_DIR/units/$u.pid" 2>/dev/null) || return 1
-  kill -0 "$p" 2>/dev/null
+qx_pid_start() {   # <pid> -> its start time (field 22 of /proc/<pid>/stat); non-zero when the pid is gone
+  local st
+  st=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
+  st=${st##*) }; set -- $st; echo "${20}"
+}
+
+qx_unit_active() {  # <unit, with or without .scope>: the process its pid file names still runs (same start time)
+  local u=${1%.scope} p s
+  read -r p s < "$QX_RUN_DIR/units/$u.pid" 2>/dev/null || return 1
+  [ -n "$p" ] && [ "$(qx_pid_start "$p")" = "$s" ]
 }
 
 qx_units() {
@@ -34,11 +40,30 @@ qx_units() {
   return 0
 }
 
-qx_mem_free_bytes() {   # container memory.max - memory.current
-  local mx cur
-  mx=$(cat /sys/fs/cgroup/memory.max) && cur=$(cat /sys/fs/cgroup/memory.current) || return 1
+QX_AUTODL_MEM_CAP=${QX_AUTODL_MEM_CAP:-118000000000}   # sum of declared memory (workers + learner) <= 118 GB of 124 GiB
+
+qx_mem_used_bytes() {   # container memory in use without reclaimable page cache: memory.current - inactive_file
+  local cur ina
+  cur=$(cat /sys/fs/cgroup/memory.current) && ina=$(awk '/^inactive_file /{print $2}' /sys/fs/cgroup/memory.stat) || return 1
+  echo $(( cur - ina ))
+}
+
+qx_mem_free_bytes() {   # container memory.max - qx_mem_used_bytes
+  local mx used
+  mx=$(cat /sys/fs/cgroup/memory.max) && used=$(qx_mem_used_bytes) || return 1
   [ "$mx" = max ] && mx=$(awk '/MemTotal/{print $2 * 1024}' /proc/meminfo)
-  echo $(( mx - cur ))
+  echo $(( mx - used ))
+}
+
+qx_declared_sum() {     # declared memory of our running units (their $QX_RUN_DIR/qx/<unit>.gpu: "gpu mem cpu") in bytes
+  local u f g m c b sum=0
+  for u in $(qx_units); do
+    f=$QX_RUN_DIR/qx/${u%.scope}.gpu
+    read -r g m c < "$f" 2>/dev/null || continue
+    b=$(qx_to_bytes "$m" 2>/dev/null) || b=0
+    sum=$(( sum + b ))
+  done
+  echo $sum
 }
 
 qx_check() (
@@ -48,8 +73,11 @@ qx_check() (
   [[ "$cpu" =~ ^[0-9]+%$ ]] || { echo "refused: CPUQuota '$cpu' unreadable"; exit 1; }
   [[ "$gpu" =~ ^[0-9]+$ ]] || { echo "refused: GPU GB '$gpu' unreadable"; exit 1; }
   fb=$(qx_mem_free_bytes) || { echo "refused: container memory unreadable"; exit 1; }
+  ds=$(qx_declared_sum)
+  [ $(( ds + b )) -le $QX_AUTODL_MEM_CAP ] ||
+    { echo "refused: declared memory of our units $ds B + $b B > $QX_AUTODL_MEM_CAP B"; exit 1; }
   [ "$kind" = watch ] || [ $(( fb - b )) -ge 8000000000 ] ||
-    { echo "refused: container free memory $fb B - MemoryMax $b B < 8 GB"; exit 1; }
+    { echo "refused: container free memory $fb B (without page cache) - MemoryMax $b B < 8 GB"; exit 1; }
   if [ "$gpu" -gt 0 ]; then
     free=$(nvidia-smi -i "$QX_WORKER_GPU" --query-gpu=memory.free --format=csv,noheader,nounits | tr -d ' ') &&
       [[ "$free" =~ ^[0-9]+$ ]] || { echo "refused: nvidia-smi unreadable"; exit 1; }
@@ -81,7 +109,7 @@ qx_run() {
   [ "$gpu_gb" = "0" ] && cvd=""
   setsid env CUDA_VISIBLE_DEVICES=$cvd CUDA_DEVICE_ORDER=PCI_BUS_ID QX_GPU_GB="$gpu_gb" QX_UNIT="$unit" "$@" {lk}>&- &
   pid=$!
-  echo "$pid" > "$QX_RUN_DIR/units/$unit.pid"
+  echo "$pid $(qx_pid_start "$pid")" > "$QX_RUN_DIR/units/$unit.pid"
   [ "$gpu_gb" != "0" ] && date +%s > "$QX_RUN_DIR/.last_gpu_start"
   exec {lk}>&-
   wait $pid; rc=$?
@@ -128,8 +156,8 @@ cl_static_budget() {    # N workers x each must fit the worker GPU (32 GiB card)
   b=$(qx_to_bytes "$mem") && [[ "$cpu" =~ ^[0-9]+%$ ]] && [[ "$gpu" =~ ^[0-9]+$ ]] ||
     { echo "refused: resources '$mem $cpu $gpu' unreadable"; return 1; }
   tot=$(nvidia-smi -i "$QX_WORKER_GPU" --query-gpu=memory.total --format=csv,noheader,nounits | tr -d ' ')
-  if [ $(( n * gpu * 1000000000 / 1048576 )) -gt "${tot:-0}" ] || [ $(( n * b )) -gt 120000000000 ]; then
-    echo "refused: $n workers x ($mem, $gpu GB) exceed GPU $QX_WORKER_GPU (${tot:-?} MiB) or 120 GB of memory"; return 1
+  if [ $(( n * gpu * 1000000000 / 1048576 )) -gt "${tot:-0}" ] || [ $(( n * b )) -gt $QX_AUTODL_MEM_CAP ]; then
+    echo "refused: $n workers x ($mem, $gpu GB) exceed GPU $QX_WORKER_GPU (${tot:-?} MiB) or $QX_AUTODL_MEM_CAP B"; return 1
   fi
 }
 
@@ -147,7 +175,7 @@ cl_watch_ensure() {   # registers <dir>; starts autodl_watch.py (screen session 
   key=$(echo -n "$dir" | sha256sum | cut -c1-12)
   echo "$dir" > "$QX_RUN_DIR/watch/$key.dir"
   cl_watch_ok && return 0
-  screen -ls 2>/dev/null | grep -q '\.qingxin-watch[[:space:]]' ||
+  screen -ls 2>/dev/null | grep -q '[.]qingxin-watch[[:space:]]' ||
     screen -dmS qingxin-watch bash -c "$CL_PY -u $code/scripts/automate/autodl_watch.py $code >> $QX_RUN_DIR/watch.log 2>&1"
   for i in $(seq 1 30); do cl_watch_ok && { echo "watcher running (screen qingxin-watch, log $QX_RUN_DIR/watch.log)"; return 0; }; sleep 2; done
   echo "WARNING: autodl_watch.py not alive after 60 s (log $QX_RUN_DIR/watch.log)"; return 1
