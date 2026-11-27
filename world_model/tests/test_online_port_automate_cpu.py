@@ -464,7 +464,8 @@ def test_mppi_real(tmp: Path) -> str:
     """agent320.WMAgent._mppi_value / mppi_gate / plan_mppi (the real code) on small deterministic stand-in models:
     (a) the value equals an independent loop computation of TD-MPC2's _estimate_value, with per-head Q that differ in
         their z dependence, a random Wq, and a variant whose done head fires (termination masks reward and end value);
-    (b) the gate rule on designed per-head values: accept, reject by a head below 0, reject by the margin;
+    (b) the real gate equals the loop value of the plan minus u = 0; heads=False = the mean of the pair randperm draws;
+        the gate rule on designed per-head values: accept, reject by a head below 0, reject by the margin;
     (c) plan_mppi: u_seq is one of its final elites, u0 its first row, the warm start shifts prev_mean by one."""
     import torch
     from wm.online import agent320 as AG
@@ -496,7 +497,7 @@ def test_mppi_real(tmp: Path) -> str:
                 return z[:, :1] * 0 + self.done_bias
             return 1000.0 * self.done_sign * (z[:, :1] - self.done_c)
         def Q(self, z, a):
-            return torch.stack([(1.0 + 0.3 * k) * z.sum(-1) + 0.1 * k + 0.01 * k * a.sum(-1) for k in range(5)])[..., None]
+            return torch.stack([(1.0 + 0.3 * k) * z.sum(-1) + 0.1 * k * k + 0.01 * k * a.sum(-1) for k in range(5)])[..., None]
         def policy_action(self, z):
             return self.scale(self.act_chunk(z)[:, :E].reshape(z.shape[0], -1))
 
