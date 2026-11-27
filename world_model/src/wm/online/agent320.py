@@ -161,11 +161,12 @@ class WMAgent:
 
     @torch.no_grad()
     def plan_mppi(self, z: torch.Tensor, Wq: np.ndarray, prev_mean: torch.Tensor | None, eval_mode: bool,
-                  noise: bool | None = None) -> dict:
+                  noise: bool = False) -> dict:
         """One MPPI plan (module comment MPPI). Wq (7, 3): joint offset [rad] per unit of u. prev_mean: the previous
         decision's final mean (H, 3) or None at the attempt's first decision (TD-MPC2's t0). noise: TD-MPC2's
-        exploration noise std_0 * N(0, 1) on the executed u_0; default = not eval_mode (TD-MPC2); the caller turns it off
-        in the hole (the user's decision 2026-11-26: no exploration once the model says the tip is in the hole).
+        exploration noise std_0 * N(0, 1) on the executed u_0, applied only when noise is True AND not eval_mode
+        (TD-MPC2 adds it whenever not eval_mode); default False: the attempts never ask for it (the user's decision of
+        2026-11-26: the plan stays an imitable correction; collection explores by the sparse eps moves and push).
         -> {"u0": (3,) the executed unit move, "dq": (7,) its joint offset [rad], "move_hand_mm": (3,) hand-frame mm,
             "mean": (H, 3) to pass back next decision, "std0": (3,), "value_max": best elite value, "value_pi": value
             of the pi trajectory (u = 0) in the last iteration}"""
@@ -192,7 +193,7 @@ class WMAgent:
             std = std.clamp(c["min_std"], c["max_std"])
         k = self.m.math.gumbel_softmax_sample(score)                                  # TD-MPC2 common/math.py
         u0 = eu[int(k)][0]
-        noisy = (not eval_mode) if noise is None else bool(noise)
+        noisy = bool(noise) and not eval_mode
         if noisy:
             u0 = u0 + std[0] * torch.randn(3, device=dev)
         u0 = u0.clamp(-1, 1)

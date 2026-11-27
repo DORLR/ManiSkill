@@ -88,7 +88,8 @@ in-hole rule fires (inside_mm required), "collect" plans at every decision; in "
 NOT added (the user's decision of 2026-11-26: with noise at every step nearly no online decision could be imitated):
 every executed plan is the model's correction ("correction"), the imitation head copies it from seated attempts as it
 copied the fixed planner's corrections; exploration is the sparse scheme below, unchanged (eps: one of the 12 fixed
-moves; one shift push); interventions count executed plans (noisy_plans stays 0; the noise path is kept off).
+moves; one shift push); interventions count executed plans (a plan with the shift push added still counts, as with
+the fixed planner).
 Exploration in "collect" (labels may be used here: training grasps only, as the scripted sets did):
   - with probability `p_shift` per attempt, once, when the pin tips are first 0.5-4 mm in front of the board face
     (FK and H*), the hand is moved by 0.5-2 mm in a random direction across the insertion axis during that decision;
@@ -228,7 +229,8 @@ class OnlineTester(AttemptBase):
         """-> (summary, recording). `inside_mm` (2026-11-18, the user's decision; None = off): once the estimated pin-tip
         depth g_t < -inside_mm (agent.gap_mm: offset_mode "gap" g_t = o[0], no pin length, required on AutoMate by the
         user's decision 6 of 2026-11-23; offset_mode "along" g_t = -o[0] - L), the try is in the hole and only the proposal is executed
-        (no correction, no random candidate, no exploration push) until a back-off starts a new try. The decision and g_t at entry are logged (`inside_at`, `inside_gap_mm`). The recording is FullRecorder.end() plus `rgb_jpeg_list` (the stored JPEG bytes)
+        (no correction, no random candidate, no exploration push) until a back-off starts a new try; with planner "mppi" in
+        mode "collect" the plans go on in the hole (corrections), still without random moves or the push. The decision and g_t at entry are logged (`inside_at`, `inside_gap_mm`). The recording is FullRecorder.end() plus `rgb_jpeg_list` (the stored JPEG bytes)
         and `dec_kind` (one KINDS value per executed decision)."""
         import torch
         validate_attempt_args(mode, inside_mm=inside_mm, max_retries=max_retries, servo_axis=servo_axis,
@@ -332,7 +334,7 @@ class OnlineTester(AttemptBase):
         hands, start_hand = [r.hand_pose()[:3, 3].copy()], r.hand_pose()[:3, 3].copy()
         try_start, try_corr = start_hand.copy(), np.zeros(3)
         excluded: list[np.ndarray] = []
-        log = {"interventions": 0, "random_candidates": 0, "noisy_plans": 0, "retries": 0, "shift": None, "done_p": [], "v_mean": [], "stall_states": [],
+        log = {"interventions": 0, "random_candidates": 0, "retries": 0, "shift": None, "done_p": [], "v_mean": [], "stall_states": [],
                "repositions": [], "inside_at": None, "inside_gap_mm": None, "servo_moves": 0, "per_decision": [], "probes": [],
                "first_success_decision": None, "truth_ok": [], "truth_depth_mm": [], "truth_lateral_mm": [], "latency_ms": []}
         shifted, done_run, why, q_last, k = mode != "collect" or rng.random() >= p_shift, 0, "time", r.qpos()[:7], 0
@@ -400,13 +402,11 @@ class OnlineTester(AttemptBase):
                             # replacing A/B): the executed plan is the model's correction, which the imitation head may
                             # copy as before; collection explores only by the sparse eps moves and the one shift push
                             plan = agent.plan_mppi(z, Wq, mppi_mean, eval_mode=(mode == "wm"), noise=False)
+                            assert not plan["noisy"]
                             mppi_mean = plan["mean"]
                             mv_plan = Rh @ (plan["move_hand_mm"] / 1000.0)   # [m, world]
-                            # a plan with TD-MPC2's exploration noise is exploration ("random"): the world model learns
-                            # from it, the imitation head does not copy it (the user's decision A of 2026-11-26)
-                            target, kind = chunk + plan["dq"][None], ("random" if plan["noisy"] else "correction")
-                            log["noisy_plans"] += int(bool(plan["noisy"]))
-                            rec_d.update(pick=1, noisy=bool(plan["noisy"]), u0=[round(float(x), 3) for x in plan["u0"]],
+                            target, kind = chunk + plan["dq"][None], "correction"
+                            rec_d.update(pick=1, u0=[round(float(x), 3) for x in plan["u0"]],
                                          std0=[round(float(x), 3) for x in plan["std0"]],
                                          v_max=round(plan["value_max"], 3), v_pi=round(plan["value_pi"], 3),
                                          move_mm=[round(float(x), 3) for x in Bt @ mv_plan * 1000.0])
@@ -613,7 +613,7 @@ class OnlineTester(AttemptBase):
         summary = {"mode": mode, "offset_mode": offset_mode, "stopped": why, "decisions": k, "seated_fk": bool(lab["seated"][0]),
                    "seated_fk_after_hold": bool(lab["seated"][1]),
                    **self.truth_final(out),
-                   **{key: log[key] for key in ("interventions", "random_candidates", "noisy_plans", "retries", "shift", "stall_states", "repositions",
+                   **{key: log[key] for key in ("interventions", "random_candidates", "retries", "shift", "stall_states", "repositions",
                                                 "inside_at", "inside_gap_mm", "servo_moves", "per_decision", "probes",
                                                 "first_success_decision", "truth_ok", "truth_depth_mm", "truth_lateral_mm",
                                                 "latency_ms")},

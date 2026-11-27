@@ -485,10 +485,11 @@ def test_loop(tmp: Path) -> str:
                      ("collect", {"margin": 0.001, "p_shift": 1.0, "eps": 0.5}),
                      ("wm", {"inside_mm": 1.0, "planner": "mppi", "max_retries": 0}),
                      ("collect", {"inside_mm": 1.0, "planner": "mppi", "max_retries": 0, "p_shift": 1.0, "eps": 0.5})):
-        rr = make_robot(Robot, H_goal, n_max=7)
+        nmax = 20 if kw.get("planner") == "mppi" else 7          # MPPI runs long enough for the stub to enter the hole
+        rr = make_robot(Robot, H_goal, n_max=nmax)
         tt = A.AutomateTester(rr, H_goal, axis, HandFK(rr), F)
         summ, out = tt.attempt(S.StubAgent(), mode, 11, **kw)
-        assert summ["decisions"] <= 7 and summ["max_decisions"] == 7 and summ["stopped"] in ("time", "stalled", "seated", "left")
+        assert summ["decisions"] <= nmax and summ["max_decisions"] == nmax and summ["stopped"] in ("time", "stalled", "seated", "left")
         assert summ["success"] == summ["automate_success_any"] and summ["start_success"] is False
         fs = summ["first_success_step"]
         assert summ["first_success_decision"] == (None if fs is None else math.ceil(fs / 8))
@@ -496,17 +497,20 @@ def test_loop(tmp: Path) -> str:
         lab = WD.decision_labels({"H_star": H_goal, "axis": F[:, 0], "pin_length_m": L_M, "simulator": "automate"},
                                  out["hand"].astype(np.float64), np.array([8 * summ["decisions"]]))
         assert summ["seated_fk"] == bool(lab["seated"][0])
-        if kw.get("planner") == "mppi":                 # MPPI: every agent decision planned outside the hole (wm),
-            pdec = summ["per_decision"]                  # always (collect); noisy plans stored as exploration
+        if kw.get("planner") == "mppi":                 # MPPI: planned outside the hole (wm), always (collect)
+            pdec = summ["per_decision"]
             ia = summ["inside_at"]
+            assert ia is not None, "the stub's gap must cross -inside_mm within the run"
             if mode == "wm":                             # the in-hole rule switches MPPI off in the test mode only
-                assert not any(d["offered"] for d in pdec if ia is not None and d["k"] >= ia), (ia, pdec)
-            assert any(d["offered"] for d in pdec), pdec
-            if mode == "wm":
-                assert all(not d.get("noisy") for d in pdec) and summ["random_candidates"] == 0
-            assert summ["interventions"] == sum(1 for d in pdec if d.get("pick") == 1 and not d.get("noisy")), (summ["interventions"], pdec)
-            assert "strict_success" in summ
-            assert summ["noisy_plans"] == 0 and not any(d.get("noisy") for d in pdec), pdec   # no TD-MPC2 noise
+                assert not any(d["offered"] for d in pdec if d["k"] >= ia), (ia, pdec)
+                assert summ["random_candidates"] == 0
+            else:                                        # collect: plans go on in the hole, no eps move there
+                assert any(d["offered"] and d["pick"] == 1 for d in pdec if d["k"] >= ia), (ia, pdec)
+                assert not any(d["pick"] == -2 for d in pdec if d["k"] >= ia), (ia, pdec)
+                assert summ["shift"] is None or summ["shift"]["decision"] < ia, summ["shift"]
+            assert any(d["offered"] for d in pdec if d["k"] < ia), pdec
+            assert summ["interventions"] == sum(1 for d in pdec if d.get("pick") == 1), (summ["interventions"], pdec)
+            assert "strict_success" in summ and "noisy" not in str(pdec)
             if mode == "collect":
                 dk = summ["decision_kinds"]                 # plans are corrections; random only from the eps moves
                 # an executed plan counts as an intervention, as with the fixed planner, also when the one shift push
