@@ -147,6 +147,14 @@ class StubAgent:
             return float(self.offset_mm(z)[0])
         return float(-self.offset_mm(z)[0] - pin_length_mm)
 
+    def plan_mppi(self, z, Wq, prev_mean, eval_mode, noise=None):
+        """agent320.WMAgent.plan_mppi's interface, deterministic: u0 from the latent, mean shifted as TD-MPC2's."""
+        u0 = np.clip(np.array([np.sin(z[0] * 5.0), np.cos(z[1] * 30.0), 0.3]), -1, 1)
+        noisy = (not eval_mode) if noise is None else bool(noise)
+        mean = np.tile(u0, (3, 1)) if prev_mean is None else np.vstack([prev_mean[1:], u0])
+        return {"u0": u0, "dq": np.asarray(Wq, np.float64) @ u0, "move_hand_mm": u0 * 1.5, "mean": mean,
+                "std0": np.full(3, 0.5), "value_max": 1.0, "value_pi": 0.5, "noisy": noisy}
+
     def score(self, z, deltas, parts: bool = False):
         d = np.asarray(deltas, np.float64)
         a = d.reshape(len(d), -1)

@@ -482,7 +482,9 @@ def test_loop(tmp: Path) -> str:
             assert text in str(exc), (kw, str(exc))
     res = {}
     for mode, kw in (("act", {}), ("act_done", {}), ("wm", {"inside_mm": 1.0, "margin": 0.001}),
-                     ("collect", {"margin": 0.001, "p_shift": 1.0, "eps": 0.5})):
+                     ("collect", {"margin": 0.001, "p_shift": 1.0, "eps": 0.5}),
+                     ("wm", {"inside_mm": 1.0, "planner": "mppi", "max_retries": 0}),
+                     ("collect", {"inside_mm": 1.0, "planner": "mppi", "max_retries": 0, "p_shift": 1.0, "eps": 0.5})):
         rr = make_robot(Robot, H_goal, n_max=7)
         tt = A.AutomateTester(rr, H_goal, axis, HandFK(rr), F)
         summ, out = tt.attempt(S.StubAgent(), mode, 11, **kw)
@@ -494,7 +496,17 @@ def test_loop(tmp: Path) -> str:
         lab = WD.decision_labels({"H_star": H_goal, "axis": F[:, 0], "pin_length_m": L_M, "simulator": "automate"},
                                  out["hand"].astype(np.float64), np.array([8 * summ["decisions"]]))
         assert summ["seated_fk"] == bool(lab["seated"][0])
-        res[mode] = f"{summ['stopped']}/{summ['decisions']}"
+        if kw.get("planner") == "mppi":                 # MPPI: every agent decision planned outside the hole (wm),
+            pdec = summ["per_decision"]                  # always (collect); noisy plans stored as exploration
+            ia = summ["inside_at"]
+            if mode == "wm":                             # the in-hole rule switches MPPI off in the test mode only
+                assert not any(d["offered"] for d in pdec if ia is not None and d["k"] >= ia), (ia, pdec)
+            assert any(d["offered"] for d in pdec), pdec
+            if mode == "wm":
+                assert all(not d.get("noisy") for d in pdec) and summ["random_candidates"] == 0
+            assert summ["interventions"] == sum(1 for d in pdec if d.get("pick") == 1 and not d.get("noisy")), (summ["interventions"], pdec)
+            assert "strict_success" in summ
+        res[mode + ("_mppi" if kw.get("planner") else "")] = f"{summ['stopped']}/{summ['decisions']}"
     ms = type("Robot", (), {"__module__": "wm.env.robot"})()
     try:
         A.AutomateTester(ms, H_goal, axis, None, F)

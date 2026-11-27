@@ -388,25 +388,31 @@ class OnlineTester(AttemptBase):
                         rec_d["offered"] = bool(mode == "collect" or not inside)
                         if rec_d["offered"]:
                             Wq = np.stack([offset(J, Rh[:, i] * MPPI["mm_per_unit"] / 1000.0) for i in range(3)], 1)  # (7, 3)
-                            plan = agent.plan_mppi(z, Wq, mppi_mean, eval_mode=(mode == "wm"))
+                            plan = agent.plan_mppi(z, Wq, mppi_mean, eval_mode=(mode == "wm"),
+                                                   noise=(mode == "collect" and not inside))   # no noise in the hole (B)
                             mppi_mean = plan["mean"]
-                            mv = Rh @ (plan["move_hand_mm"] / 1000.0)  # [m, world]
-                            target, kind = chunk + plan["dq"][None], "correction"
-                            log["interventions"] += 1
-                            try_corr = try_corr + mv
-                            rec_d.update(pick=1, u0=[round(float(x), 3) for x in plan["u0"]],
+                            mv_plan = Rh @ (plan["move_hand_mm"] / 1000.0)   # [m, world]
+                            # a plan with TD-MPC2's exploration noise is exploration ("random"): the world model learns
+                            # from it, the imitation head does not copy it (the user's decision A of 2026-11-26)
+                            target, kind = chunk + plan["dq"][None], ("random" if plan["noisy"] else "correction")
+                            rec_d.update(pick=1, noisy=bool(plan["noisy"]), u0=[round(float(x), 3) for x in plan["u0"]],
                                          std0=[round(float(x), 3) for x in plan["std0"]],
                                          v_max=round(plan["value_max"], 3), v_pi=round(plan["value_pi"], 3),
-                                         move_mm=[round(float(x), 3) for x in Bt @ mv * 1000.0])
+                                         move_mm=[round(float(x), 3) for x in Bt @ mv_plan * 1000.0])
                         if mode == "collect":
                             gap = self.face_gap_mm()
-                            if not inside and 0.0 <= gap < 6.0 and rng.random() < eps:   # as the fixed candidates' eps
-                                u_r = rng.uniform(-1.0, 1.0, 3)
-                                mv = Rh @ (u_r * MPPI["mm_per_unit"] / 1000.0)
+                            if not inside and 0.0 <= gap < 6.0 and rng.random() < eps:
+                                # the collection's eps exploration exactly as with the fixed planner: one of the 12 fixed
+                                # moves (0.5 / 1.5 mm along +-x, +-y, +-z of the hand frame), uniformly
+                                moves_r = [s_ * Rh[:, i] * mm / 1000.0 for i in range(3) for s_ in (1.0, -1.0) for mm in STEPS_MM]
+                                mv = moves_r[int(rng.integers(0, len(moves_r)))]
                                 target, kind = chunk + offset(J, mv)[None], "random"
                                 log["random_candidates"] += 1
                                 rec_d["pick"] = -2
                                 rec_d["move_mm"] = [round(float(x), 3) for x in Bt @ mv * 1000.0]
+                        if kind == "correction":                   # the model's own plan was executed (not replaced)
+                            log["interventions"] += 1
+                            try_corr = try_corr + mv_plan
                         if torch.cuda.is_available():
                             torch.cuda.synchronize()
                         lat_ms = (time.perf_counter() - t_dec) * 1000.0

@@ -223,7 +223,7 @@ def summarise_automate(out: Path, gs: list[dict], starts: int, extra: dict) -> t
                 a = st["attempt"]
                 rows.append((grp, cl, bool(a["success"]), a["stopped"], g["grasp"], g["port"],
                              float(a.get("band_above_top_mm", 0.0)) > 0.0, bool(a.get("start_success")),
-                             bool(a.get("strict_success"))))
+                             a.get("strict_success")))
             else:
                 outc[st.get("outcome", "unknown")] += 1
                 if st.get("outcome") in ("reference_failed", "reset_failed", "contact_report_error"):
@@ -232,9 +232,11 @@ def summarise_automate(out: Path, gs: list[dict], starts: int, extra: dict) -> t
     groups = {}
     for name in ["all"] + sorted({r[0] for r in rows}):
         sel = [r for r in rows if name == "all" or r[0] == name]
-        st = E.cluster_rate([r[8] for r in sel], [r[1] for r in sel])
+        miss = sum(r[8] is None for r in sel)               # results of the code before strict_success: no strict figure
+        st = (E.cluster_rate([bool(r[8]) for r in sel], [r[1] for r in sel]) if not miss
+              else {"success": None, "se": None, "ci95": None})
         groups[name] = {**E.cluster_rate([r[2] for r in sel], [r[1] for r in sel]),
-                        "strict_success": st["success"], "strict_se": st["se"], "strict_ci95": st["ci95"],
+                        "strict_success": st["success"], "strict_se": st["se"], "strict_ci95": st["ci95"], "strict_missing": miss,
                         "grasps": len({r[4] for r in sel}),
                         "assemblies": len({r[5] for r in sel}),
                         "ended": dict(Counter(f"{r[3]}/{'success' if r[2] else 'failure'}" for r in sel)),

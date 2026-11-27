@@ -192,7 +192,9 @@ def automate_io(beat=None) -> RecorderIO:
 # The strict criterion (the user's decision of 2026-11-26, "the real number"; AutoMate's own rule is the loose one and is
 # kept beside it): at the attempt's last step, at the plug tip centre, depth left < 1.25 mm, full rotation angle < 4 deg,
 # lateral < 2 mm (the thresholds of the ManiSkill experiment's success, demo320).
-STRICT = {"depth_mm": 1.25, "angle_deg": 4.0, "lateral_mm": 2.0}
+from ..tdmpc.demo320 import SUCCESS as _MS_SUCCESS    # the same numbers, one definition
+STRICT = {"depth_mm": float(_MS_SUCCESS["depth_left_mm"]), "angle_deg": float(_MS_SUCCESS["angle_deg"]),
+          "lateral_mm": float(_MS_SUCCESS["lateral_mm"])}
 
 
 def truth_final(eval_rel: np.ndarray, spec) -> dict:

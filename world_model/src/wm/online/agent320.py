@@ -34,8 +34,9 @@ from ..tdmpc.wm320 import WM320, encoder_settings
 #   on the FK Jacobian, rotation held, computed once from the measured joints) added to all 8 executed targets of
 #   pi(z_t), the head's proposal at the imagined latent z_t. u = 0 is the head itself, so TD-MPC2's mean init of zero
 #   is "centred on the head's proposal" (decision 1) and its pi trajectories (num_pi_trajs) are u = 0.
-#   MPPI_MM = 3 mm per unit (the expert's largest per-decision hand move, measured 2026-11-26); init std = max_std = 2
-#   (decision 2: TD-MPC2's default).
+#   MPPI_MM = 1.5 mm per unit (the user's decision 2026-11-26, after the method review: the fixed candidates' largest
+#   move; 3 mm, the expert's largest per-decision move, put ~62 % of the sampled coordinates on the +-1 clamp, moves the
+#   data near the hole never has); init std = max_std = 2 (decision 2: TD-MPC2's default).
 # Value of a sequence = TD-MPC2's _estimate_value (episodic): sum_t gamma^t (1 - term_t) r_t + gamma^H (1 - term_H)
 #   Q_avg(z_H, pi(z_H)), term from the done head > 0.5, Q_avg = mean of 2 random Q heads (a new pair per call).
 # Steps (per decision): mean = 0 (t0 of the attempt) else the previous decision's mean shifted by one; std = max_std;
@@ -43,7 +44,7 @@ from ..tdmpc.wm320 import WM320, encoder_settings
 #   64 elites -> weights exp(0.5 (v - v_max)) -> new mean / std (clamped to [0.05, 2]); then one elite drawn by
 #   TD-MPC2's gumbel_softmax_sample, its first step u_0; outside eval_mode (collection) u_0 + std_0 * N(0, 1); clamp.
 MPPI = {"horizon": 3, "iterations": 6, "num_samples": 512, "num_elites": 64, "num_pi_trajs": 24, "min_std": 0.05,
-        "max_std": 2.0, "temperature": 0.5, "mm_per_unit": 3.0}
+        "max_std": 2.0, "temperature": 0.5, "mm_per_unit": 1.5}
 
 
 class WMAgent:
@@ -157,9 +158,12 @@ class WMAgent:
         return G + disc * (1 - term) * (q[i] + q[j]) / 2
 
     @torch.no_grad()
-    def plan_mppi(self, z: torch.Tensor, Wq: np.ndarray, prev_mean: torch.Tensor | None, eval_mode: bool) -> dict:
+    def plan_mppi(self, z: torch.Tensor, Wq: np.ndarray, prev_mean: torch.Tensor | None, eval_mode: bool,
+                  noise: bool | None = None) -> dict:
         """One MPPI plan (module comment MPPI). Wq (7, 3): joint offset [rad] per unit of u. prev_mean: the previous
-        decision's final mean (H, 3) or None at the attempt's first decision (TD-MPC2's t0).
+        decision's final mean (H, 3) or None at the attempt's first decision (TD-MPC2's t0). noise: TD-MPC2's
+        exploration noise std_0 * N(0, 1) on the executed u_0; default = not eval_mode (TD-MPC2); the caller turns it off
+        in the hole (the user's decision 2026-11-26: no exploration once the model says the tip is in the hole).
         -> {"u0": (3,) the executed unit move, "dq": (7,) its joint offset [rad], "move_hand_mm": (3,) hand-frame mm,
             "mean": (H, 3) to pass back next decision, "std0": (3,), "value_max": best elite value, "value_pi": value
             of the pi trajectory (u = 0) in the last iteration}"""
@@ -186,12 +190,14 @@ class WMAgent:
             std = std.clamp(c["min_std"], c["max_std"])
         k = self.m.math.gumbel_softmax_sample(score)                                  # TD-MPC2 common/math.py
         u0 = eu[int(k)][0]
-        if not eval_mode:
+        noisy = (not eval_mode) if noise is None else bool(noise)
+        if noisy:
             u0 = u0 + std[0] * torch.randn(3, device=dev)
         u0 = u0.clamp(-1, 1)
         dq = (Wt @ u0).double().cpu().numpy()
         return {"u0": u0.double().cpu().numpy(), "dq": dq, "move_hand_mm": (u0 * c["mm_per_unit"]).double().cpu().numpy(),
-                "mean": mean, "std0": std[0].double().cpu().numpy(), "value_max": float(ev.max()), "value_pi": float(value[0])}
+                "mean": mean, "std0": std[0].double().cpu().numpy(), "value_max": float(ev.max()), "value_pi": float(value[0]),
+                "noisy": noisy}
 
 
 __all__ = ["WMAgent", "MPPI"]

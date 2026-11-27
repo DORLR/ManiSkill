@@ -34,7 +34,8 @@
 #    AutoMate prepare refuses anything else).
 # 3. Then the same model is tested on the selection grasps (all x 4 starts): mode act_done (the action head alone with
 #    the done stop, decision 7) and mode wm, into <pool>/r<R>/select_<mode>. Two rounds in a row without a better
-#    "wm" success (AutoMate's rule, groups.all.success) than the best before end the rounds (exit 0). The two tests
+#    "wm" success (the strict criterion, groups.all.strict_success, the user's decision of 2026-11-26; AutoMate's own
+#    loose rule groups.all.success is logged beside it) than the best before end the rounds (exit 0). The two tests
 #    must be paired: when both have a job.json, they agree on seed, starts and the grasp list, else the rounds end
 #    (exit 1).
 #    A job (collection or test) whose finish reports a start_success stop (exit 4: a placed start already satisfied
@@ -220,7 +221,7 @@ for R in $(seq 1 "$r1"); do
   fi
   s=$(success_of "$D/select_wm/summary.json")
   olog "round $R done; select success, strict criterion (the stop rule's): with the world model ${s:-unknown}, action head alone (act_done) $(success_of "$D/select_act_done/summary.json"); AutoMate's own (loose) rule: $(success_of "$D/select_wm/summary.json" success) / $(success_of "$D/select_act_done/summary.json" success)"
-  [ -n "$s" ] || continue
+  [ -n "$s" ] || { olog "round $R: no strict success figure in $D/select_wm/summary.json (missing strict_success); the stop rule skips this round"; continue; }
   if "$CL_PY" -I -c "import sys; sys.exit(0 if float(sys.argv[1]) > float(sys.argv[2]) else 1)" "$s" "$best"; then best=$s; worse=0
   else worse=$(( worse + 1 )); fi
   if [ "$worse" -ge 2 ]; then olog "two rounds without improvement; rounds end after round $R"; break; fi

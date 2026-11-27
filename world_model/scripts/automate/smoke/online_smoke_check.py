@@ -57,6 +57,7 @@ for name, W in (("act_done", OUT / "act_done"), ("wm", OUT / "wm"), ("collect", 
                                   "placement_failures": [x.get("stage") for x in st.get("placement_failures") or []],
                                   "start_error_mm": st.get("start_error_mm"), "timing": st.get("timing"),
                                   "decisions": a.get("decisions"), "stopped": a.get("stopped"), "success": a.get("success"),
+                                  "strict_success": a.get("strict_success"), "truth_info_end": a.get("truth_info_end"),
                                   "start_success": a.get("start_success"), "seated_fk": a.get("seated_fk"),
                                   "first_success_decision": a.get("first_success_decision"),
                                   "latency_ms_median": (sorted(x[1] for x in a["latency_ms"])[len(a["latency_ms"]) // 2]
