@@ -610,7 +610,7 @@ class OnlineTester(AttemptBase):
         summary = {"mode": mode, "offset_mode": offset_mode, "stopped": why, "decisions": k, "seated_fk": bool(lab["seated"][0]),
                    "seated_fk_after_hold": bool(lab["seated"][1]),
                    **self.truth_final(out),
-                   **{key: log[key] for key in ("interventions", "random_candidates", "retries", "shift", "stall_states", "repositions",
+                   **{key: log[key] for key in ("interventions", "random_candidates", "noisy_plans", "retries", "shift", "stall_states", "repositions",
                                                 "inside_at", "inside_gap_mm", "servo_moves", "per_decision", "probes",
                                                 "first_success_decision", "truth_ok", "truth_depth_mm", "truth_lateral_mm",
                                                 "latency_ms")},
