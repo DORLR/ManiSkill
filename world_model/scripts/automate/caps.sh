@@ -330,3 +330,11 @@ qx_budget() {      # our units: MemoryMax, CPUQuota, declared / measured GPU-1 m
   done
   echo "sum: MemoryMax $sm B of $QX_CAP_MEM_BYTES; CPUQuota $sc % of $QX_CAP_CPU_PCT; GPU-1 $sg MiB of $QX_CAP_GPU_OURS_MIB"
 }
+
+qx_unit_active() {  # <unit, with or without .scope> is an active systemd scope (rs2); autodl_overrides.sh redefines it
+  local u=$1
+  case "$u" in *.scope|*.service) ;; *) u="$u.scope" ;; esac
+  systemctl --user is-active --quiet "$u"
+}
+# AutoDL container (no systemd, ours alone): the AutoDL backend of these functions
+[ -d /root/autodl-tmp ] && source "$(dirname "${BASH_SOURCE[0]}")/autodl_overrides.sh"

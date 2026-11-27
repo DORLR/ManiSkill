@@ -225,3 +225,5 @@ cl_watch_ensure() {
   echo "WARNING: no active qingxin-watch-* scope with a fresh $QX_RUN_DIR/watch.alive after 60 s (log $QX_RUN_DIR/watch.log)"
   return 1
 }
+# AutoDL container (no systemd, ours alone): the AutoDL backend of these functions
+[ -d /root/autodl-tmp ] && source "$(dirname "${BASH_SOURCE[0]}")/autodl_overrides.sh"

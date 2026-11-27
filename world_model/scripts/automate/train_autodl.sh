@@ -1,25 +1,44 @@
 #!/bin/bash
-# AutoDL launcher for the AutoMate world model (2x RTX 4080 SUPER, dedicated machine): the rs2 recipe of
-# wm320_segformer_b1_s0 unchanged except the GPU split: torchrun 2 processes x --accum 2 = the single-GPU --accum 4
-# (train_wm320.py: processes x accum keeps the single-GPU recipe). From scratch, offline (no --online pool yet).
-#   bash train_autodl.sh <out dir> [extra args, e.g. --steps 50 for a smoke]
+# AutoDL launcher for the AutoMate world model (2x RTX 4080 SUPER 32 GB, the container is ours alone): the rs2 recipe
+# of wm320_segformer_b1_s0 unchanged except the GPU split.
+#   bash train_autodl.sh <GPUs 1|2> <run dir> [extra train_wm320.py args, e.g. --resume, --online <pool>, --steps 600]
+# GPUs 2: torchrun, 2 processes x --accum 2 (train_wm320.py: processes x accum = the single-GPU --accum 4 recipe).
+# GPUs 1: one process on GPU 0 with --accum 4 (GPU 1 is left to the online workers; a run may be resumed with any
+#         number of processes, train_wm320.py docstring).
+# Like train_automate.sh: the world_model tree is frozen to <run dir>/code (cl_freeze_code; a later start must find it
+# unchanged) and the run imports only from there; the "unit" (caps.sh / autodl_overrides.sh) is written to
+# <run dir>/logs/train_unit_<time> and its pid to $QX_RUN_DIR/units, so online_automate.sh sees the learner.
 set -u
-OUT=$1; shift
-W=/root/autodl-tmp/code/wm/world_model
-for v in $(env | grep -o "^WM_[A-Z0-9_]*"); do unset $v; done   # as cl_clean_env on rs2
-export WM_FORBIDDEN_GPU=0 WM_DEDICATED_GPUS=1 PYTHONPATH=$W/src PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
-export TDMPC2_DIR=/root/autodl-tmp/code/ext/tdmpc2_orig/tdmpc2 TDMPC2_EXTRA=/root/autodl-tmp/code/ext/tdmpc2_extra   # TD-MPC2 332f19e, copied from rs2
-export HF_HOME=/root/autodl-tmp/cache/hf TORCH_HOME=/root/autodl-tmp/cache/torch HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
-export OMP_NUM_THREADS=8 NUMPY_MADVISE_HUGEPAGE=0
-mkdir -p "$OUT"; cd $W
-LOG=$OUT/train_$(date +%s).log
-# memory/GPU log every 30 s while training (the container limit is 124 GiB; nothing else caps it)
-( while true; do echo "$(date +%T) mem_GB $(awk '{printf "%.1f", $1/1e9}' /sys/fs/cgroup/memory.current) anon_GB $(awk '/^anon /{printf "%.1f", $2/1e9}' /sys/fs/cgroup/memory.stat) file_GB $(awk '/^file /{printf "%.1f", $2/1e9}' /sys/fs/cgroup/memory.stat) gpu_MiB $(nvidia-smi --query-gpu=memory.used,utilization.gpu --format=csv,noheader,nounits | tr '\n' ' ')"; sleep 30; done ) > $OUT/resources.log 2>&1 &
+NG=$1 RUN=$(readlink -m "$2"); shift 2
+LIVE=$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)
+source "$LIVE/scripts/automate/caps.sh"; source "$LIVE/scripts/automate/collect_lib.sh"
+[ "${QX_AUTODL:-}" = 1 ] || { echo "refused: not on AutoDL (no /root/autodl-tmp)"; exit 1; }
+case $NG in 1) ACC=4;; 2) ACC=2;; *) echo "refused: GPUs must be 1 or 2"; exit 1;; esac
+[ -e "$RUN/STOP" ] && { echo "refused: $RUN/STOP exists"; exit 1; }
+mkdir -p "$RUN/logs"
+cl_freeze_code "$LIVE" "$RUN" || exit 1
+W=$RUN/code
+for v in $(compgen -e | grep '^WM_'); do unset "$v"; done      # as cl_clean_env
+export WM_FORBIDDEN_GPU=0 WM_DEDICATED_GPUS=1 PYTHONUNBUFFERED=1 OMP_NUM_THREADS=8
+cl_isaac_env; cl_train_env "$W"
+ts=$(date +%s); LOG=$RUN/logs/train_$ts.log; unit=qingxin-train-$(basename "$RUN")-$ts
+echo "$unit" > "$RUN/logs/train_unit_$ts"
+{ date; echo "train_autodl: GPUs $NG accum $ACC, code $W sha256 $(cat "$RUN/code.sha256"), args $*"; } > "$LOG"
+ARGS=(--data /root/autodl-tmp/automate/fast --out "$RUN" --stem standard --encoder segformer_b1 --imagenet --token-dim 128
+  --offset-weight 1.0 --shift-px 4 --shaping 0.3 --steps 100000 --wm-batch 8 --bc-batch 16 --accum $ACC --save-every 500
+  --lr 3e-4 --enc-lr-scale 0.3 --td-warmup 5000 --bc-weight 1.0 --gamma 0.9666666666666667 --workers-wm 8 --workers-bc 8
+  --eval-every 5000 --eval-windows 1024 --keep-every 10000 --seed 0 --device cuda:0 "$@")
+( while true; do echo "$(date +%T) mem_GB $(awk '{printf "%.1f", $1/1e9}' /sys/fs/cgroup/memory.current) anon_GB $(awk '/^anon /{printf "%.1f", $2/1e9}' /sys/fs/cgroup/memory.stat) file_GB $(awk '/^file /{printf "%.1f", $2/1e9}' /sys/fs/cgroup/memory.stat) gpu $(nvidia-smi --query-gpu=memory.used,utilization.gpu --format=csv,noheader,nounits | tr '\n' ' ')"; sleep 30; done ) >> "$RUN/logs/resources.log" 2>&1 &
 MON=$!
-{ date; echo "code $(git -C /root/autodl-tmp/code/wm rev-parse HEAD) dirty: $(git -C /root/autodl-tmp/code/wm status --porcelain | wc -l)"; } > $LOG
-/root/miniconda3/envs/wm/bin/torchrun --standalone --nproc_per_node 2 scripts/train/train_wm320.py \
-  --data /root/autodl-tmp/automate/fast --out "$OUT" --stem standard --encoder segformer_b1 --imagenet --token-dim 128 \
-  --offset-weight 1.0 --shift-px 4 --shaping 0.3 --steps 100000 --wm-batch 8 --bc-batch 16 --accum 2 --save-every 500 \
-  --lr 3e-4 --enc-lr-scale 0.3 --td-warmup 5000 --bc-weight 1.0 --gamma 0.9666666666666667 --workers-wm 8 --workers-bc 8 \
-  --eval-every 5000 --eval-windows 1024 --keep-every 10000 --seed 0 --device cuda:0 "$@" >> $LOG 2>&1
-rc=$?; kill $MON 2>/dev/null; echo "exit $rc $(date)" >> $LOG
+cd "$W"
+if [ "$NG" = 2 ]; then
+  setsid env CUDA_VISIBLE_DEVICES=0,1 /root/miniconda3/envs/wm/bin/torchrun --standalone --nproc_per_node 2 scripts/train/train_wm320.py "${ARGS[@]}" >> "$LOG" 2>&1 &
+else
+  setsid env CUDA_VISIBLE_DEVICES=0 /root/miniconda3/envs/wm/bin/python -u scripts/train/train_wm320.py "${ARGS[@]}" >> "$LOG" 2>&1 &
+fi
+pid=$!; echo "$pid" > "$QX_RUN_DIR/units/$unit.pid"
+wait $pid; rc=$?
+rm -f "$QX_RUN_DIR/units/$unit.pid"; kill $MON 2>/dev/null
+echo "exit $rc $(date)" >> "$LOG"
+[ $rc -ne 0 ] && echo "$(date '+%F %T') training ended with exit $rc (log $LOG)" >> "$RUN/logs/ALERT"
+exit $rc
