@@ -509,7 +509,10 @@ def test_loop(tmp: Path) -> str:
             assert summ["noisy_plans"] == 0 and not any(d.get("noisy") for d in pdec), pdec   # no TD-MPC2 noise
             if mode == "collect":
                 dk = summ["decision_kinds"]                 # plans are corrections; random only from the eps moves
-                assert dk["correction"] == summ["interventions"] and dk["random"] == summ["random_candidates"], dk
+                # an executed plan counts as an intervention, as with the fixed planner, also when the one shift push
+                # is then added to it (stored as "shift")
+                assert dk["correction"] <= summ["interventions"] <= dk["correction"] + dk["shift"], (dk, summ["interventions"])
+                assert dk["random"] == summ["random_candidates"], (dk, summ["random_candidates"])
         res[mode + ("_mppi" if kw.get("planner") else "")] = f"{summ['stopped']}/{summ['decisions']}"
     ms = type("Robot", (), {"__module__": "wm.env.robot"})()
     try:
