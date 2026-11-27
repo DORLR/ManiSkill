@@ -314,8 +314,8 @@ def build_job(args) -> tuple[Path, dict]:
         raise SystemExit("--probe-max must be 0 on AutoMate until the simulator-state restore check (plan T8) has been run")
     if args.mode == "act_done" and args.inside_mm is not None:
         raise SystemExit("--mode act_done has no candidate corrections and does not accept --inside-mm")
-    if args.planner == "mppi" and args.mode not in ("wm", "collect"):
-        raise SystemExit("--planner mppi plans in the modes wm and collect only")
+    if args.planner == "mppi" and (args.mode not in ("wm", "collect") or args.inside_mm is None):
+        raise SystemExit("--planner mppi plans in the modes wm and collect only, and needs --inside-mm (the in-hole rule)")
     if args.mode in ("servo", "random") and args.inside_mm is None:
         raise SystemExit(f"--mode {args.mode} is an ablation of the in-hole agent: it needs --inside-mm")
     random_p = None

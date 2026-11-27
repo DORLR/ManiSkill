@@ -82,6 +82,12 @@ Per decision of "wm"/"collect" (every 0.4 s):
      the attempt ends "stalled".
   6. ends: seated (2), stalled (5), left (hand more than left_m from the start: ManiSkill 6 cm, AutoMate 6 cm + L),
      max_decisions in total (back-off and re-position decisions included; ManiSkill 150, AutoMate robot.max_decisions).
+Planner "mppi" (the user's decisions of 2026-11-26; agent320.MPPI): in "wm" and "collect" the fixed candidates and their
+margin rule are replaced by TD-MPC2's MPPI over hand moves around the proposal (1.5 mm per unit); "wm" plans until the
+in-hole rule fires (inside_mm required), "collect" plans at every decision; in "collect" TD-MPC2's exploration noise is
+added outside the hole only, and a plan executed with that noise is stored as kind "random" (exploration: the world
+model learns from it, the imitation head does not copy it); the eps exploration below is unchanged (one of the 12 fixed
+moves); interventions count noise-free executed plans, noisy_plans the noisy ones.
 Exploration in "collect" (labels may be used here: training grasps only, as the scripted sets did):
   - with probability `p_shift` per attempt, once, when the pin tips are first 0.5-4 mm in front of the board face
     (FK and H*), the hand is moved by 0.5-2 mm in a random direction across the insertion axis during that decision;
@@ -228,8 +234,9 @@ class OnlineTester(AttemptBase):
                               random_p=random_p, probe_max=probe_max)
         if planner not in ("fixed", "mppi"):
             raise ValueError(f"planner must be 'fixed' or 'mppi', not {planner!r}")
-        if planner == "mppi" and (mode not in ("wm", "collect") or probe_max or max_retries):
-            raise ValueError("planner mppi: modes wm / collect only, without the probe and without back-off (max_retries 0)")
+        if planner == "mppi" and (mode not in ("wm", "collect") or probe_max or max_retries or inside_mm is None):
+            raise ValueError("planner mppi: modes wm / collect only, with inside_mm (the in-hole rule), without the probe "
+                             "and without back-off (max_retries 0)")
         mppi_mean = None                                       # TD-MPC2 t0: the attempt's first plan starts from mean 0
         offset_mode = str(getattr(agent, "offset_mode", "along"))
         forbid_L = mode != "collect" and (offset_mode == "gap" or mode in ("act", "act_done"))
@@ -324,7 +331,7 @@ class OnlineTester(AttemptBase):
         hands, start_hand = [r.hand_pose()[:3, 3].copy()], r.hand_pose()[:3, 3].copy()
         try_start, try_corr = start_hand.copy(), np.zeros(3)
         excluded: list[np.ndarray] = []
-        log = {"interventions": 0, "random_candidates": 0, "retries": 0, "shift": None, "done_p": [], "v_mean": [], "stall_states": [],
+        log = {"interventions": 0, "random_candidates": 0, "noisy_plans": 0, "retries": 0, "shift": None, "done_p": [], "v_mean": [], "stall_states": [],
                "repositions": [], "inside_at": None, "inside_gap_mm": None, "servo_moves": 0, "per_decision": [], "probes": [],
                "first_success_decision": None, "truth_ok": [], "truth_depth_mm": [], "truth_lateral_mm": [], "latency_ms": []}
         shifted, done_run, why, q_last, k = mode != "collect" or rng.random() >= p_shift, 0, "time", r.qpos()[:7], 0
@@ -395,6 +402,7 @@ class OnlineTester(AttemptBase):
                             # a plan with TD-MPC2's exploration noise is exploration ("random"): the world model learns
                             # from it, the imitation head does not copy it (the user's decision A of 2026-11-26)
                             target, kind = chunk + plan["dq"][None], ("random" if plan["noisy"] else "correction")
+                            log["noisy_plans"] += int(bool(plan["noisy"]))
                             rec_d.update(pick=1, noisy=bool(plan["noisy"]), u0=[round(float(x), 3) for x in plan["u0"]],
                                          std0=[round(float(x), 3) for x in plan["std0"]],
                                          v_max=round(plan["value_max"], 3), v_pi=round(plan["value_pi"], 3),
