@@ -461,65 +461,108 @@ def test_t6(tmp: Path) -> str:
 
 
 def test_mppi_real(tmp: Path) -> str:
-    """agent320.WMAgent._mppi_value / mppi_gate / plan_mppi (the real code) on a small deterministic stand-in model:
-    the value equals a hand computation of TD-MPC2's _estimate_value, heads=True gives every head, the gate applies
-    mean > margin and min > 0, plan_mppi returns its chosen elite's first step and the TD-MPC2 numbers."""
+    """agent320.WMAgent._mppi_value / mppi_gate / plan_mppi (the real code) on small deterministic stand-in models:
+    (a) the value equals an independent loop computation of TD-MPC2's _estimate_value, with per-head Q that differ in
+        their z dependence, a random Wq, and a variant whose done head fires (termination masks reward and end value);
+    (b) the gate rule on designed per-head values: accept, reject by a head below 0, reject by the margin;
+    (c) plan_mppi: u_seq is one of its final elites, u0 its first row, the warm start shifts prev_mean by one."""
     import torch
     from wm.online import agent320 as AG
-    from wm.tdmpc import wmdata320 as WD
+    from wm.tdmpc import use_tdmpc2, wmdata320 as WD
+    use_tdmpc2()
+    import common.math as tm                     # TD-MPC2's math (gumbel_softmax_sample), as WM320.math
+    E, J, A_DIM = WD.EXECUTE, 7, WD.ACTION_DIM
 
-    class M:                                     # the WM320 methods the planner uses, linear and deterministic
-        num_q = 5
-        def __init__(self):
-            g = torch.Generator().manual_seed(0)
-            self.A = torch.randn(4, WD.ACTION_DIM, generator=g) * 0.1
+    class M:                                     # the WM320 methods the planner uses
+        def __init__(self, done_bias):
+            g = torch.Generator().manual_seed(1)
+            self.A = torch.randn(4, A_DIM, generator=g) * 0.05
             self.w = torch.randn(4, generator=g)
-            self.cfg = type("C", (), {"num_q": 5})()
-            from wm.tdmpc import use_tdmpc2
-            use_tdmpc2()
-            import common.math as tm             # TD-MPC2 math (gumbel_softmax_sample), as WM320.math
+            self.done_bias = done_bias
             self.math = tm
         def act_chunk(self, z):
-            return torch.zeros(z.shape[0], 16, 7) + 0.001 * z[:, :1, None]
+            return torch.zeros(z.shape[0], 16, J) + 0.002 * z[:, :1, None]
         def scale(self, d):
             return torch.tanh(d * 100.0)
         def reward(self, z, a):
-            return (z @ self.w)[:, None] + a.sum(-1, keepdim=True) * 0.01
+            return ((z @ self.w) + a.sum(-1) * 0.01)[:, None]
         def scalar(self, x):
-            return x[..., None] if x.dim() == 2 and x.shape[-1] == 1 else x
+            return x
         def next(self, z, a):
             return 0.9 * z + a @ self.A.T
         def _done(self, z):
-            return (z[:, :1] - 100.0)
+            return (z[:, :1] * 0 + self.done_bias)
         def Q(self, z, a):
-            return torch.stack([(z.sum(-1) + k * 0.1) for k in range(5)])[..., None]
+            return torch.stack([(1.0 + 0.3 * k) * z.sum(-1) + 0.1 * k + 0.01 * k * a.sum(-1) for k in range(5)])[..., None]
         def policy_action(self, z):
-            return self.scale(self.act_chunk(z)[:, :WD.EXECUTE].reshape(z.shape[0], -1))
+            return self.scale(self.act_chunk(z)[:, :E].reshape(z.shape[0], -1))
+
+    def loop_value(m, z0, u, Wq, gamma):         # independent: per sample, per step, numpy
+        out = []
+        for n in range(u.shape[0]):
+            z, G, disc, term = z0.clone(), 0.0, 1.0, 0.0
+            for t in range(u.shape[1]):
+                dq = (Wq.numpy() @ u[n, t].numpy())                                   # (7,)
+                base = m.act_chunk(z)[0, :E].numpy()                                  # (8, 7)
+                a = m.scale(torch.tensor((base + dq[None, :]).reshape(1, -1), dtype=torch.float32))
+                r = float(m.reward(z, a)[0, 0])
+                z = m.next(z, a)
+                G += disc * (1 - term) * r
+                disc *= gamma
+                term = min(1.0, term + float(torch.sigmoid(m._done(z))[0, 0] > 0.5))
+            q = m.Q(z, m.policy_action(z))[:, 0, 0].numpy()
+            out.append(G + disc * (1 - term) * q)
+        return np.stack(out, 1)                                                          # (5, N)
 
     ag = AG.WMAgent.__new__(AG.WMAgent)
-    ag.m, ag.device, ag.horizon, ag.gamma = M(), torch.device("cpu"), 3, 0.9
-    ag.m.scalar = lambda x: x
+    ag.device, ag.horizon, ag.gamma = torch.device("cpu"), 3, 0.9
     z = torch.tensor([[0.3, -0.2, 0.1, 0.05]])
-    Wq = torch.full((7, 3), 0.001)
-    u = torch.zeros(2, 3, 3); u[0] = torch.tensor([[1.0, 0.0, -1.0], [0.5, 0.5, 0.0], [0.0, 0.0, 1.0]])
-    vh = ag._mppi_value(z, u, Wq, heads=True)                 # (5, 2)
-    assert vh.shape == (5, 2)
-    zc, G, disc = z.expand(2, -1), torch.zeros(2), 1.0         # hand computation (term stays 0: done logits << 0)
-    for t in range(3):
-        a = ag.m.scale((ag.m.act_chunk(zc)[:, :WD.EXECUTE] + (u[:, t] @ Wq.T)[:, None, :]).reshape(2, -1))
-        G = G + disc * ag.m.reward(zc, a)[:, 0]; zc = ag.m.next(zc, a); disc *= 0.9
-    q = ag.m.Q(zc, ag.m.policy_action(zc))[..., 0]
-    assert torch.allclose(vh, G[None] + disc * q, atol=1e-5), (vh, G[None] + disc * q)
-    g = ag.mppi_gate(z, u[0].numpy(), Wq.numpy(), 0.5)
-    adv = (vh[:, 0] - vh[:, 1]).numpy()
-    assert np.allclose(g["adv"], adv, atol=1e-5) and g["ok"] == bool(adv.mean() > 0.5 and adv.min() > 0)
-    assert ag.mppi_gate(z, u[0].numpy(), Wq.numpy(), 1e9)["ok"] is False
+    Wq = torch.tensor(np.random.default_rng(3).normal(size=(7, 3)) * 0.001, dtype=torch.float32)
+    u = torch.zeros(3, 3, 3)
+    u[0] = torch.tensor([[1.0, 0.0, -1.0], [0.5, -0.5, 0.0], [0.0, 0.2, 1.0]])
+    u[1] = torch.tensor([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]])          # axes permuted: must differ
+    for done_bias, label in ((-100.0, "no end"), (100.0, "done fires")):
+        ag.m = M(done_bias)
+        vh = ag._mppi_value(z, u, Wq, heads=True).numpy()                              # (5, 3)
+        ref = loop_value(ag.m, z, u, Wq, 0.9)
+        assert np.allclose(vh, ref, atol=1e-5), (label, vh, ref)
+        assert not np.allclose(vh[:, 0], vh[:, 1]), "a permuted move gave the same value"
+        if done_bias > 0:                        # the end value is masked: only the first reward counts
+            assert np.allclose(vh[0], vh[4]), vh
+    ag.m = M(-100.0)
+    real_value = ag._mppi_value
+    for vals, want in ((np.array([[2.0, 1.0]] * 5), True),                          # every head +1: accept
+                       (np.array([[2.0, 1.0]] * 4 + [[0.9, 1.0]]), False),          # mean 0.78 > 0.5, one head < 0
+                       (np.array([[1.3, 1.0]] * 5), False)):                        # every head > 0, mean 0.3 < 0.5
+        ag._mppi_value = lambda z_, u_, W_, heads=False, v=vals: torch.tensor(v)
+        g = ag.mppi_gate(z, u[0].numpy(), Wq.numpy(), 0.5)
+        assert g["ok"] is want and np.allclose(g["adv"], vals[:, 0] - vals[:, 1]), (vals, g)
+    ag._mppi_value = real_value
     torch.manual_seed(0)
-    p = ag.plan_mppi(z, Wq.numpy(), None, eval_mode=True)
-    assert p["u_seq"].shape == (3, 3) and np.allclose(p["u_seq"][0], p["u0"]) and not p["noisy"]
-    assert np.allclose(p["dq"], Wq.numpy() @ p["u0"], atol=1e-6) and np.all(np.abs(p["u0"]) <= 1)
+    p0 = ag.plan_mppi(z, Wq.numpy(), None, eval_mode=True)
+    assert p0["u_seq"].shape == (3, 3) and np.allclose(p0["u_seq"][0], p0["u0"]) and not p0["noisy"]
+    assert np.all(np.abs(p0["u_seq"]) <= 1) and p0["mean"].shape == (3, 3)
+    seen = {}                                    # the warm start: plan_mppi's first sampling mean = prev_mean shifted
+    real_randn = torch.randn
+    def spy_randn(*a, **k):
+        seen.setdefault("calls", 0); seen["calls"] += 1
+        return real_randn(*a, **k) * 0.0         # std * 0: the first iteration's samples equal the initial mean
+    prev = torch.tensor([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]])
+    torch.randn = spy_randn
+    try:
+        orig = ag._mppi_value
+        def capture(z_, u_, W_, heads=False):
+            seen.setdefault("first", u_[24].clone())
+            return orig(z_, u_, W_, heads)
+        ag._mppi_value = capture
+        ag.plan_mppi(z, Wq.numpy(), prev, eval_mode=True)
+    finally:
+        torch.randn = real_randn
+        ag._mppi_value = orig
+    want0 = torch.tensor([[0.4, 0.5, 0.6], [0.7, 0.8, 0.9], [0.0, 0.0, 0.0]])
+    assert torch.allclose(seen["first"], want0), seen["first"]                         # shifted, last row 0
     assert AG.MPPI["mm_per_unit"] == 1.5 and AG.MPPI["num_samples"] == 512 and AG.MPPI["num_elites"] == 64
-    return f"value = hand TD-MPC2 value, gate adv {np.round(adv, 3)} ok {g['ok']}, plan u0 {np.round(p['u0'], 3)}"
+    return "value = independent TD-MPC2 loop (with and without termination), gate rule 3 cases, warm start shift"
 
 
 def test_loop(tmp: Path) -> str:
@@ -588,6 +631,7 @@ def test_loop(tmp: Path) -> str:
                     assert plans[i], (i, [d["pick"] for d in off[:i + 1]])
                 else:
                     assert not plans[i] and np.allclose(tt_agent.prev_means[i], tt_agent.means_out[i - 1]), i
+            assert any(off[i - 1]["pick"] == 1 for i in range(1, len(plans))), "the kept warm start was never tested"
             gc = tt_agent.gate_calls                     # the gate gets the plan's whole sequence and the margin
             assert len(gc) == len(off) and all(c[0] == (3, 3) and c[1] == 0.5 for c in gc), gc[:2]
             assert all(np.allclose(c[2], u) for c, u in zip(gc, tt_agent.useqs)), "gate not given the chosen u_seq"
