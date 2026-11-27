@@ -186,16 +186,18 @@ def cap_gpu_memory(dev: torch.device, automate: bool, ddp: bool) -> float | None
     """The GPU memory the launcher declared for this job's scope (caps.sh / qx_run exports QX_GPU_GB) becomes the
     process's own cap: torch.cuda.set_per_process_memory_fraction((QX_GPU_GB - GPU_CONTEXT_GB) * 1e9 / total), so a
     job never allocates beyond its declaration (the watcher only reacts after GPU 1 is over budget). AutoMate data on
-    CUDA refuses to run without QX_GPU_GB; ManiSkill runs without it are unchanged (no cap). QX_GPU_GB is one GPU's
+    CUDA refuses to run without QX_GPU_GB unless WM_DEDICATED_GPUS=1 (a machine whose GPUs nobody else uses,
+    e.g. AutoDL: no cap, also under torchrun); ManiSkill runs without it are unchanged (no cap). QX_GPU_GB is one GPU's
     budget: refused with several processes (torchrun). -> the cap in GB, or None."""
     v = os.environ.get("QX_GPU_GB")
     if dev.type != "cuda":
         return None
     if not v:
-        if automate:
+        if automate and os.environ.get("WM_DEDICATED_GPUS") != "1":
             raise SystemExit("AutoMate data on CUDA: QX_GPU_GB (the declared GPU memory of the job, exported by qx_run) "
-                             "is not set; start it through the capped launcher (scripts/automate/train_automate.sh)")
-        return None
+                             "is not set; start it through the capped launcher (scripts/automate/train_automate.sh), "
+                             "or set WM_DEDICATED_GPUS=1 on a machine whose GPUs nobody else uses (AutoDL)")
+        return None             # no cap: the GPUs are not shared (WM_DEDICATED_GPUS=1) or the data is ManiSkill
     if ddp:
         raise SystemExit("QX_GPU_GB is the budget of one GPU: not for a torchrun run of several processes")
     try:
@@ -219,7 +221,8 @@ def check_encoder_env(encoder: str) -> None:
         v = os.environ.get(var)
         if not v:
             raise SystemExit(f"--encoder {encoder}: set ${var} (the weights are read from a local cache, never the account's home)")
-        if Path(v).resolve().is_relative_to(home):
+        if Path(v).resolve().is_relative_to(home) and os.stat(Path(v).resolve()).st_dev == os.stat(home).st_dev:
+            # (a cache on another file system mounted under home, e.g. AutoDL's data disk /root/autodl-tmp, is allowed)
             raise SystemExit(f"--encoder {encoder}: ${var}={v} lies in the account's home {home}: use our own storage")
     os.environ["HF_HUB_OFFLINE"] = "1"
     if encoder == "segformer_b1":
