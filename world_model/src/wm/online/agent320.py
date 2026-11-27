@@ -42,8 +42,9 @@ from ..tdmpc.wm320 import WM320, encoder_settings
 # Steps (per decision): mean = 0 (t0 of the attempt) else the previous decision's mean shifted by one; std = max_std;
 #   6 iterations of: 488 Gaussian samples (mean + std * N(0, 1), clamped to [-1, 1]) + 24 pi trajectories -> value ->
 #   64 elites -> weights exp(0.5 (v - v_max)) -> new mean / std (clamped to [0.05, 2]); then one elite drawn by
-#   TD-MPC2's gumbel_softmax_sample, its first step u_0; outside eval_mode (collection) u_0 + std_0 * N(0, 1) (not in
-#   the hole: plan_mppi's noise argument); clamp.
+#   TD-MPC2's gumbel_softmax_sample, its first step u_0; clamp. TD-MPC2 adds std_0 * N(0, 1) outside eval_mode; our
+#   attempts call it with noise=False in collection too (the user's decision of 2026-11-26: the plan stays an imitable
+#   correction; collection explores by attempt320's sparse eps moves and shift push instead).
 MPPI = {"horizon": 3, "iterations": 6, "num_samples": 512, "num_elites": 64, "num_pi_trajs": 24, "min_std": 0.05,
         "max_std": 2.0, "temperature": 0.5, "mm_per_unit": 1.5}
 

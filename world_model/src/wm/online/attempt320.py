@@ -85,9 +85,10 @@ Per decision of "wm"/"collect" (every 0.4 s):
 Planner "mppi" (the user's decisions of 2026-11-26; agent320.MPPI): in "wm" and "collect" the fixed candidates and their
 margin rule are replaced by TD-MPC2's MPPI over hand moves around the proposal (1.5 mm per unit); "wm" plans until the
 in-hole rule fires (inside_mm required), "collect" plans at every decision; in "collect" TD-MPC2's exploration noise is
-added outside the hole only, and a plan executed with that noise is stored as kind "random" (exploration: the world
-model learns from it, the imitation head does not copy it); the eps exploration below is unchanged (one of the 12 fixed
-moves); interventions count noise-free executed plans, noisy_plans the noisy ones.
+NOT added (the user's decision of 2026-11-26: with noise at every step nearly no online decision could be imitated):
+every executed plan is the model's correction ("correction"), the imitation head copies it from seated attempts as it
+copied the fixed planner's corrections; exploration is the sparse scheme below, unchanged (eps: one of the 12 fixed
+moves; one shift push); interventions count executed plans (noisy_plans stays 0; the noise path is kept off).
 Exploration in "collect" (labels may be used here: training grasps only, as the scripted sets did):
   - with probability `p_shift` per attempt, once, when the pin tips are first 0.5-4 mm in front of the board face
     (FK and H*), the hand is moved by 0.5-2 mm in a random direction across the insertion axis during that decision;
@@ -395,8 +396,10 @@ class OnlineTester(AttemptBase):
                         rec_d["offered"] = bool(mode == "collect" or not inside)
                         if rec_d["offered"]:
                             Wq = np.stack([offset(J, Rh[:, i] * MPPI["mm_per_unit"] / 1000.0) for i in range(3)], 1)  # (7, 3)
-                            plan = agent.plan_mppi(z, Wq, mppi_mean, eval_mode=(mode == "wm"),
-                                                   noise=(mode == "collect" and not inside))   # no noise in the hole (B)
+                            # no TD-MPC2 exploration noise, in collection either (the user's decision of 2026-11-26,
+                            # replacing A/B): the executed plan is the model's correction, which the imitation head may
+                            # copy as before; collection explores only by the sparse eps moves and the one shift push
+                            plan = agent.plan_mppi(z, Wq, mppi_mean, eval_mode=(mode == "wm"), noise=False)
                             mppi_mean = plan["mean"]
                             mv_plan = Rh @ (plan["move_hand_mm"] / 1000.0)   # [m, world]
                             # a plan with TD-MPC2's exploration noise is exploration ("random"): the world model learns

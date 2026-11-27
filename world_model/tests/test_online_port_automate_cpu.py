@@ -506,11 +506,10 @@ def test_loop(tmp: Path) -> str:
                 assert all(not d.get("noisy") for d in pdec) and summ["random_candidates"] == 0
             assert summ["interventions"] == sum(1 for d in pdec if d.get("pick") == 1 and not d.get("noisy")), (summ["interventions"], pdec)
             assert "strict_success" in summ
-            if mode == "collect":                       # noise only outside the hole; noisy plans stored as exploration
-                assert not any(d.get("noisy") for d in pdec if ia is not None and d["k"] >= ia), pdec
-                assert summ["noisy_plans"] == sum(1 for d in pdec if d.get("noisy"))
-                dk = summ["decision_kinds"]                 # a noisy plan is stored as random, or replaced by the shift push
-                assert dk["random"] + dk["shift"] >= summ["noisy_plans"] and dk["correction"] == summ["interventions"], dk
+            assert summ["noisy_plans"] == 0 and not any(d.get("noisy") for d in pdec), pdec   # no TD-MPC2 noise
+            if mode == "collect":
+                dk = summ["decision_kinds"]                 # plans are corrections; random only from the eps moves
+                assert dk["correction"] == summ["interventions"] and dk["random"] == summ["random_candidates"], dk
         res[mode + ("_mppi" if kw.get("planner") else "")] = f"{summ['stopped']}/{summ['decisions']}"
     ms = type("Robot", (), {"__module__": "wm.env.robot"})()
     try:
