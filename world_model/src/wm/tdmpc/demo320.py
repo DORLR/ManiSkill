@@ -215,7 +215,7 @@ def convert(src: str | Path, dst: str | Path, pin_length_m: float, rel: str, all
 # keys an AutoMate fast-copy meta may hold (no simulator truth: no eval_*, truth, peak, stages, start_error_mm,
 # depth_left_mm, placement_failures, tip_centre_m, disassembly_dist_m, and no episode_seed / seed_offset / rng, which
 # regenerate the socket pose). expert_completed and automate_success_any are scalar outcomes (module docstring,
-# imitation set). No tilt_definition: the labels use the full angle only (wmdata320, decision 9 of 2026-11-22).
+# imitation set). No tilt_definition key in fast meta: wmdata320 defaults AutoMate to symmetric_angle using symmetry_n.
 FAST_META_AUTOMATE = ("grasp", "port", "condition", "kind", "outcome", "expert_completed", "automate_success_any", "steps",
                       "idx", "H_star", "axis", "pin_length_m", "pitch_deg", "grasp_pos_m", "spin_deg", "u", "simulator",
                       "symmetry_n", "switches", "start", "schema", "rgb_codec", "format", "source", "assembly_id",

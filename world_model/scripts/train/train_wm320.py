@@ -113,7 +113,8 @@ from wm.tdmpc import demo320 as D  # noqa: E402
 from wm.tdmpc import wmdata320 as WD  # noqa: E402
 from wm.tdmpc.policy320 import (ENCODER_DEFAULTS, ENCODERS, PolicyData, check_depth_settings, collate_cat,  # noqa: E402
                                  default_depth_invalid, policy_loader, shift)
-from wm.tdmpc.wm320 import WM320, WindowData, auc, encoder_settings, face_items, stats_for, window_items  # noqa: E402
+from wm.tdmpc.wm320 import (WM320, WindowData, auc, effective_decisions_for, encoder_settings, face_items,  # noqa: E402
+                             stats_for, window_items)
 from wm.training.common import Logger, cycle, seed_all  # noqa: E402
 
 
@@ -321,8 +322,9 @@ def online_entries(pool, split_sha: str | None = None, split_mode: str = "split3
     collection's split is refused (port plan item 10). split_sha is None exactly for a ManiSkill fast copy (only an
     AutoMate copy's manifest has "split"), so an entry whose simulator differs from the fast copy's is refused: a
     ManiSkill pool given to an AutoMate run, or the reverse (r7-data-01)."""
+    pool = Path(pool).resolve()
     out, rounds = [], []
-    for r in sorted(Path(pool).glob("r*"), key=lambda p: int(p.name[1:]) if p.name[1:].isdigit() else -1):
+    for r in sorted(pool.glob("r*"), key=lambda p: int(p.name[1:]) if p.name[1:].isdigit() else -1):
         if not r.name[1:].isdigit():
             continue
         if (r / "DONE").exists() and (r / "manifest.json").exists():
@@ -341,8 +343,8 @@ def online_entries(pool, split_sha: str | None = None, split_mode: str = "split3
                                  f"{split_sha}: the pool must come from the fast copy's collection and split")
             if sp != "train":
                 raise SystemExit(f"online trajectory {e['path']} is of split {sp} (split_mode={split_mode}): the pool must hold training grasps only")
-            if e["steps"] >= WD.EXECUTE and (not partial or (Path(pool) / e["path"]).exists()):
-                out.append({**e, "path": str(Path(pool) / e["path"]), "split": sp, "bc": e.get("outcome") == "seated_fk", "partial": partial})
+            if e["steps"] >= WD.EXECUTE and (not partial or (pool / e["path"]).exists()):
+                out.append({**e, "path": str(pool / e["path"]), "split": sp, "bc": e.get("outcome") == "seated_fk", "partial": partial})
     return out, rounds
 
 
@@ -394,9 +396,10 @@ def validate(model, sets, args, dev):
             for k, v in info.items():
                 if not k.startswith("_"):
                     num[k].append(v)
-            m = ((W["obs_valid"] > 0) & (W["fk_depth"] > 0)).cpu().numpy()
-            done_s.append(info["_done"][m]); done_y.append(W["done"].cpu().numpy()[m])
-            di_s.append(info["_done_imag"][m[:, 1:]]); di_y.append(W["done"][:, 1:].cpu().numpy()[m[:, 1:]])
+            md = ((W.get("done_valid", W["obs_valid"]) > 0) & (W["fk_depth"] > 0)).cpu().numpy()
+            mi = ((W["obs_valid"][:, 1:] > 0) & (W["fk_depth"][:, 1:] > 0)).cpu().numpy()
+            done_s.append(info["_done"][md]); done_y.append(W["done"].cpu().numpy()[md])
+            di_s.append(info["_done_imag"][mi]); di_y.append(W["done"][:, 1:].cpu().numpy()[mi])
         for W in fl:
             W = to(W, dev)
             _, info = model.loss(W, None, args.td_warmup, args.td_warmup, 0.0, detail=True)
@@ -615,8 +618,22 @@ def main():
             raise SystemExit(f"{run}/last.pt has {k}={v}, --{k.replace('_', '-')} is {enc_set[k]}: start a new run")
     if ck and (args.offset_weight > 0 or ck.get("offset_weight", 0.0) > 0) and ck.get("offset_mode", "along") != args.offset_mode:
         raise SystemExit(f"{run}/last.pt has offset_mode={ck.get('offset_mode', 'along')}, --offset-mode is {args.offset_mode}: start a new run")
+    tilt_def = "symmetric_angle" if automate else "full_angle"
+    t_mode = "first_seated" if automate else "last_step"
     if ck and ck.get("split_mode", "split320") != args.split_mode:
         raise SystemExit(f"{run}/last.pt has split_mode={ck.get('split_mode', 'split320')}, --split-mode is {args.split_mode}: start a new run")
+    if ck and ck.get("tilt_definition", "full_angle") != tilt_def:
+        raise SystemExit(f"{run}/last.pt has tilt_definition={ck.get('tilt_definition', 'full_angle')}, this code uses {tilt_def}: start a new run")
+    if ck and ck.get("term_mode", "last_step") != t_mode:
+        raise SystemExit(f"{run}/last.pt has term_mode={ck.get('term_mode', 'last_step')}, this code uses {t_mode}: start a new run")
+    data_max_pin_mm = max([20.0] + [float(math.ceil(float(e["pin_length_m"]) * 1000.0))
+                                    for e in by["train"] if e.get("pin_length_m") is not None])
+    if ck:
+        max_pin_mm = float(ck.get("max_pin_mm") or 20.0)
+        if data_max_pin_mm > max_pin_mm:
+            raise SystemExit(f"{run}/last.pt has max_pin_mm={max_pin_mm}, training data needs {data_max_pin_mm}: start a new run")
+    else:
+        max_pin_mm = data_max_pin_mm
     try:                                                              # wm320.auc at the first validation: refuse now,
         import sklearn.metrics  # noqa: F401                          # not at step 500
     except ImportError as exc:
@@ -628,12 +645,14 @@ def main():
         if ddp:
             dist.broadcast_object_list(box, src=0)
         stats = box[0]
+    neff_cache: dict[str, int] = {}
     rng = np.random.default_rng(1)
     sets, face_kept = {}, {}
     for name in ("select", "heldout", *(AUTOMATE_HELDOUT_CONDITIONS if automate else ())) if main_rank else ():
         if not by[name]:
             continue
-        wi = window_items(by[name])
+        wi = (window_items(by[name], effective_decisions_for(args.data, by[name], neff_cache, workers=max(1, min(4, args.workers_wm))))
+              if automate else window_items(by[name]))
         wi = wi[np.sort(rng.choice(len(wi), min(args.eval_windows, len(wi)), replace=False))]
         fi = face_items(by[name], args.data, args.shaping, args.gamma)
         if automate:                                                # coverage of the face AUC (AutoMate only)
@@ -643,9 +662,16 @@ def main():
         bi = bi[np.sort(rng.choice(len(bi), min(1024, len(bi)), replace=False))]
         mk = lambda items: [{k: v.clone() for k, v in b.items()} for b in loader(WindowData(args.data, by[name], items, stats, args.shaping, args.gamma, offset_mode=args.offset_mode), 16, 4, 0, False)]  # noqa: E731
         sets[name] = (mk(wi), mk(fi) if len(fi) else [], [], [{k: v.clone() for k, v in b.items()} for b in policy_loader(args.data, bce, 32, 4, shuffle=False, items=bi)])
+    if automate:
+        tbox = [effective_decisions_for(args.data, by["train"], neff_cache, workers=max(1, args.workers_wm)) if main_rank else None]
+        if ddp:
+            dist.broadcast_object_list(tbox, src=0)
+        train_wi = window_items(by["train"], tbox[0])
+    else:
+        train_wi = window_items(by["train"])
     torch.manual_seed(args.seed)
     model = WM320(args.stem, stats, args.shaping, imagenet=args.imagenet, offset_weight=args.offset_weight, offset_mode=args.offset_mode,
-                  **enc_set, gamma=args.gamma)
+                  max_pin_mm=max_pin_mm, **enc_set, gamma=args.gamma)
     copied = None if ck else model.enc.pic.init_pretrained() if args.imagenet else 0   # identical on every process
     model = model.to(dev)
     net = DDP(model, device_ids=[dev.index], broadcast_buffers=False) if ddp else model     # broadcasts process 0's weights
@@ -663,8 +689,8 @@ def main():
     if ddp:          # the model was built identically everywhere (same seed); from here each process draws its own
         torch.manual_seed(args.seed + RS * rank + step)     # shifts, noise and dropout (a resumed run: a fresh stream from the step on)
     info0 = {"format": "wm320-1", "labels": WD.LABELS, "stem": args.stem, "imagenet": args.imagenet, "offset_weight": args.offset_weight, **enc_set,
-             "offset_mode": args.offset_mode, "split_mode": args.split_mode, "shaping": args.shaping, "cfg": {"gamma": args.gamma}, "stats": stats,
-             "provenance": prov}
+             "offset_mode": args.offset_mode, "split_mode": args.split_mode, "tilt_definition": tilt_def, "term_mode": t_mode,
+             "max_pin_mm": max_pin_mm, "shaping": args.shaping, "cfg": {"gamma": args.gamma}, "stats": stats, "provenance": prov}
 
     def checkpoint(full: bool):
         c = {**info0, "state": model.state_dict(), "step": step, "skipped": skipped, "args": vars(args)}
@@ -676,10 +702,11 @@ def main():
     log = Logger(run) if main_rank else (lambda **kw: None)
     log(event="resume" if ck else "start", step=step, processes=world, windows_per_step=world * args.wm_batch * args.accum,
         imitation_samples_per_step=world * args.bc_batch * args.accum, trajectories={k: len(v) for k, v in by.items()},
-        windows=int(len(window_items(by["train"]))), imitation_samples=int(sum(e["n_images"] for e in by["train"] if e["bc"])),
+        windows=int(len(train_wi)), imitation_samples=int(sum(e["n_images"] for e in by["train"] if e["bc"])),
         validation={k: [len(v[0]) * 16, len(v[1]) * 16, len(v[2]) * 16, len(v[3]) * 32] for k, v in sets.items()},
         params_m=sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6, imagenet=args.imagenet, imagenet_tensors_copied=copied,
-        tokens_per_picture=model.enc.pic.n_tokens, **enc_set, provenance=prov,
+        tokens_per_picture=model.enc.pic.n_tokens, **enc_set, max_pin_mm=max_pin_mm, ret_max=float(model.ret_max),
+        tilt_definition=tilt_def, term_mode=t_mode, provenance=prov,
         select_grasps=len({e["grasp"] for e in by["select"]}), heldout_grasps=len({e["grasp"] for e in by["heldout"]}),
         **({"gpu_cap_GB": gpu_cap_gb} if gpu_cap_gb is not None else {}), args=vars(args))
     wo = int(round(args.online_frac * args.wm_batch)) if args.online else 0
@@ -687,30 +714,57 @@ def main():
         raise SystemExit("--refresh-every, --online-min and --online-reload must be at least 1")
     if args.online and not 0 < wo < args.wm_batch:
         raise SystemExit(f"--online-frac {args.online_frac} of {args.wm_batch} windows leaves no window to one of the two sources")
-    rounds_in, onl, mix = None, [], False
+    rounds_in, onl, onl_wi, mix = None, [], np.zeros((0, 2), np.int64), False
+
+    def poll_online(force: bool = False):
+        """Read --online pool on rank 0 only, validate pin lengths, compute AutoMate n_eff, and broadcast in lockstep
+        so DDP ranks never diverge or hang on a live pool refresh / error."""
+        if main_rank:
+            try:
+                new, names = online_entries(args.online, (split_id or {}).get("sha256"), args.split_mode)
+                bad_pin = [e for e in new if e.get("pin_length_m") is not None and float(e["pin_length_m"]) * 1000.0 > max_pin_mm]
+                if bad_pin:
+                    raise SystemExit(f"online entry {bad_pin[0].get('grasp')} has pin_length_m={bad_pin[0]['pin_length_m']}, "
+                                     f"exceeding model max_pin_mm={max_pin_mm}")
+                neffs = (effective_decisions_for(args.data, new, neff_cache, workers=max(1, args.workers_wm // 2))
+                         if automate else None)
+                n_win = sum(neffs) if neffs is not None else sum(e["steps"] // WD.EXECUTE for e in new)
+                new_mix = len(new) >= args.online_min and n_win >= wo
+                changed = force or names != rounds_in or len(new) - len(onl) >= args.online_reload or new_mix != mix
+                obox = [(changed, new, names, neffs, new_mix, None) if changed else (False, None, None, None, None, None)]
+            except SystemExit as exc:
+                obox = [(False, None, None, None, None, ("exit", exc.code))]
+            except Exception as exc:
+                obox = [(False, None, None, None, None, ("err", f"{type(exc).__name__}: {exc}"))]
+        else:
+            obox = [None]
+        if ddp:
+            dist.broadcast_object_list(obox, src=0)
+        changed, new, names, neffs, new_mix, err = obox[0]
+        if err is not None:
+            if err[0] == "exit":
+                raise SystemExit(err[1])
+            raise RuntimeError(err[1])
+        return changed, new, names, (window_items(new, neffs) if changed else None), new_mix
 
     def make_loaders():
         """Windows: the fast copy alone, or wm_batch - wo from it and wo from the online pool; imitation: the
         successful demonstrations and the online attempts that ended seated (FK)."""
         sd = args.seed + RS * rank + step
-        ws = WindowData(args.data, by["train"], window_items(by["train"]), stats, args.shaping, args.gamma, offset_mode=args.offset_mode)
+        ws = WindowData(args.data, by["train"], train_wi, stats, args.shaping, args.gamma, offset_mode=args.offset_mode)
         wl = [cycle(loader(ws, args.wm_batch - (wo if mix else 0), args.workers_wm, sd))]
         if mix:                                                # (fewer windows than wo: a drop_last loader would never yield)
-            wl.append(cycle(loader(WindowData(args.data, onl, window_items(onl), stats, args.shaping, args.gamma, offset_mode=args.offset_mode), wo,
+            wl.append(cycle(loader(WindowData(args.data, onl, onl_wi, stats, args.shaping, args.gamma, offset_mode=args.offset_mode), wo,
                                    args.workers_wm // 2, sd + 3)))
         bce = [e for e in by["train"] if e["bc"]] + ([e for e in onl if e["bc"]] if mix else [])     # online data only once mixed in
         return wl, cycle(loader(PolicyData(args.data, bce, bc_items(bce)), args.bc_batch, args.workers_bc, sd + 1))
-
-    def mixes(entries):
-        return len(entries) >= args.online_min and len(window_items(entries)) >= wo
 
     def data_record():
         log(event="data", step=step, online_rounds=rounds_in, online_trajectories=len(onl), online_seated=sum(e["bc"] for e in onl),
             online_partial_trajectories=sum(bool(e.get("partial")) for e in onl), online_windows_per_micro_batch=wo if mix else 0)
 
     if args.online:
-        onl, rounds_in = online_entries(args.online, (split_id or {}).get("sha256"), args.split_mode)
-        mix = mixes(onl)
+        _, onl, rounds_in, onl_wi, mix = poll_online(force=True)
     wtrain, btrain = make_loaders()
     data_record()
     params = [p for p in model.parameters() if p.requires_grad]
@@ -733,11 +787,10 @@ def main():
             opt.zero_grad(set_to_none=True)
             finite = True
             if args.online and step % args.refresh_every == 0:
-                new, names = online_entries(args.online, (split_id or {}).get("sha256"), args.split_mode)
-                if names != rounds_in or len(new) - len(onl) >= args.online_reload or mixes(new) != mix:
+                changed, new, names, new_wi, new_mix = poll_online()
+                if changed:
                     del wtrain, btrain                                     # the old loaders' workers end with them
-                    onl, rounds_in = new, names
-                    mix = mixes(onl)
+                    onl, rounds_in, onl_wi, mix = new, names, new_wi, new_mix
                     wtrain, btrain = make_loaders()
                     data_record()
             for i in range(args.accum):

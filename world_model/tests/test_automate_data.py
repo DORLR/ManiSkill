@@ -19,9 +19,11 @@
     split_sha256 is missing or differs from the fast copy's split identity; a pool entry of the other simulator
     (ManiSkill under an AutoMate fast copy, AutoMate under a ManiSkill one) is refused; ManiSkill pool entries under a
     ManiSkill fast copy unchanged
-  6 labels: ManiSkill bit-identical to the formula; AutoMate default (no tilt_definition) = the same full angle;
-    any other angle term ("symmetric_angle" at the top level or in switches, unknown names) and a missing axis are
-    refused; the 7-joint slice of trajectory()
+  6 labels: ManiSkill bit-identical to the formula (full_angle + last_step termination, no done_valid key); AutoMate
+    default = symmetric_angle using symmetry_n (matches checks.tilt_spin across round / None / integer n on tilted
+    axes; missing/invalid symmetry_n and unknown tilt_definition refused) + first_seated termination (BONUS, term=1 and
+    zero terminal potential on first seated k_term, post-terminal reward=0, transition/value masks stop at n_eff while
+    done_valid retains stationary post-terminal seated frames; effective_decisions filters k >= n_eff); 7-joint slice
   7 AutoMate index: only grasps with grasp.json; rows with "file" name their file, rows without (label_failed,
     placement_failed, error) are skipped; an older grasp.json without "file" by t<idx>_<kind>.npz minus the no-file
     outcomes; a listed missing file raises; split "unassigned"; expert_completed / automate_success_any carried;
@@ -331,7 +333,14 @@ def test_online_entries(tmp: Path):
     (pool / "r0" / "DONE").write_text("")
     (pool / "r0" / "manifest.json").write_text(json.dumps({"entries": [am(condition="train", path="r0/x.npz", split_sha256="S")]}))
     out, rounds = T.online_entries(pool, "S")
-    assert len(out) == 1 and out[0]["split"] == "train" and rounds == ["r0"]
+    assert len(out) == 1 and out[0]["split"] == "train" and rounds == ["r0"] and Path(out[0]["path"]).is_absolute()
+    cwd0 = os.getcwd()
+    try:
+        os.chdir(tmp)
+        out_rel, _ = T.online_entries(Path("pool_train"), "S")
+        assert len(out_rel) == 1 and Path(out_rel[0]["path"]).is_absolute() and out_rel[0]["path"] == out[0]["path"]
+    finally:
+        os.chdir(cwd0)
     raises(lambda: T.online_entries(pool, "other"), SystemExit, "carries the split S")       # another split identity
     raises(lambda: T.online_entries(pool), SystemExit, "is AutoMate, the fast copy is ManiSkill")   # ManiSkill fast copy
     (pool / "r0" / "manifest.json").write_text(json.dumps({"entries": [am(condition="train", path="r0/x.npz")]}))
@@ -375,25 +384,87 @@ def test_labels():
     for k in ref:
         assert np.array_equal(lab[k], ref[k]), k
     am_meta = {**meta, "simulator": "automate", "symmetry_n": 4}
-    for m in (am_meta, {**am_meta, "tilt_definition": "full_angle"}):              # AutoMate default: the same angle
-        la = WD.decision_labels(m, hand, steps)
-        assert all(np.array_equal(la[k], lab[k]) for k in lab)
+    la_full = WD.decision_labels({**am_meta, "tilt_definition": "full_angle"}, hand, steps)
+    assert all(np.array_equal(la_full[k], lab[k]) for k in lab)
     hs = np.tile(np.eye(4), (2, 1, 1))
     hs[:, :3, :3] = Rotation.from_euler("z", 90 + 3, degrees=True).as_matrix()     # a quarter turn + 3 deg about the axis
     m0 = {**am_meta, "H_star": np.eye(4).tolist()}
-    full = WD.decision_labels(m0, hs, np.arange(2))["probe"][:, 3]
-    assert np.allclose(full, 93, atol=1e-4), full                                 # the spin counts in full
-    assert WD.TILT_DEFINITIONS == ("full_angle",)
-    for m in ({**m0, "tilt_definition": "symmetric_angle"}, {**m0, "switches": {"tilt_definition": "symmetric_angle"}},
-              {**am_meta, "tilt_definition": "axis_tilt"}):
+    sym4 = WD.decision_labels(m0, hs, np.arange(2))["probe"][:, 3]                # AutoMate default: symmetric_angle
+    assert np.allclose(sym4, 3, atol=1e-4), sym4                                  # quarter turn removed for n=4 -> 3 deg
+    sym_round = WD.decision_labels({**m0, "symmetry_n": "round"}, hs, np.arange(2))["probe"][:, 3]
+    assert np.allclose(sym_round, 0, atol=1e-4), sym_round                        # round plug: pure axial spin -> 0 deg
+    full = WD.decision_labels({**m0, "tilt_definition": "full_angle"}, hs, np.arange(2))["probe"][:, 3]
+    assert np.allclose(full, 93, atol=1e-4), full                                 # explicit full_angle keeps 93 deg
+    assert WD.TILT_DEFINITIONS == ("full_angle", "symmetric_angle") and WD.TERM_MODES == ("last_step", "first_seated")
+    for m in ({**am_meta, "tilt_definition": "axis_tilt"}, {**m0, "switches": {"tilt_definition": "axis_tilt"}}):
         raises(lambda: WD.decision_labels(m, hs, np.arange(2)), ValueError, "tilt_definition")
+    raises(lambda: WD.decision_labels({**meta, "simulator": "automate"}, hs, np.arange(2)), ValueError, "symmetry_n")
+    for bad_sym in (0, -1, False, True, 3.5, float("nan"), "square"):
+        raises(lambda s=bad_sym: WD.decision_labels({**m0, "symmetry_n": s}, hs, np.arange(2)), ValueError, "symmetry_n")
+    # verify _symmetric_angle_deg against checks.tilt_spin on tilted non-unit axis and float symmetry_n (e.g. 4.0)
+    from wm.sim_automate import checks as K
+    tilt_axis = np.array([1.0, -2.0, 3.0])                                        # non-unit tilted insertion axis
+    B_t = WD._basis(tilt_axis)
+    Hs_t = np.eye(4)
+    Hs_t[:3, :3] = B_t.T                                                          # col 0 = unit insertion axis
+    R_loc = Rotation.from_rotvec(g.normal(size=(12, 3)) * 0.7).as_matrix()
+    hand_t = np.tile(np.eye(4), (12, 1, 1))
+    hand_t[:, :3, :3] = np.einsum("ij,tjk->tik", Hs_t[:3, :3], R_loc)             # rel rot in socket frame
+    q_xyzw = Rotation.from_matrix(R_loc).as_quat()
+    q_wxyz = np.concatenate([q_xyzw[:, 3:4], q_xyzw[:, :3]], axis=1)
+    for sym in ("round", None, 1, 2, 4, 4.0, 6):
+        got = WD.decision_labels({"H_star": Hs_t.tolist(), "pin_length_m": 0.03, "axis": tilt_axis.tolist(),
+                                  "grasp": "t", "simulator": "automate", "symmetry_n": sym},
+                                 hand_t, np.arange(12))["probe"][:, 3]
+        ref_sym = K.tilt_spin(q_wxyz, int(sym) if isinstance(sym, float) else sym)["tilt_symmetric_deg"]
+        assert np.allclose(got, ref_sym, atol=1e-4), (sym, np.max(np.abs(got - ref_sym)))
+    # empty steps safe
+    assert WD.decision_labels(m0, hs, np.array([], np.int64))["probe"].shape == (0, 4)
     raises(lambda: WD.decision_labels({**meta, "axis": None}, hand, steps), ValueError, "no insertion axis")
+    # trajectory(): 7-joint slice (ManiSkill last_step unchanged) + AutoMate first_seated termination & done_valid
     T = 16
     z = {"action": g.normal(size=(T, 7)), "img_step": np.arange(0, T + 1, 4), "qpos": g.normal(size=(T + 1, 9)),
          "hand": np.tile(np.eye(4), (T + 1, 1, 1))}
     tr = WD.trajectory(z, {**meta, "kind": "insert", "H_star": np.eye(4).tolist()}, 0.3, 0.967)
     assert tr["q"].shape == (3, 7) and np.array_equal(tr["q"], z["qpos"][[0, 8, 16], :7].astype(np.float32))
-    return "ManiSkill labels = HEAD formula bit for bit; AutoMate full angle (93 deg); symmetric_angle / unknown / no axis refused"
+    assert "term_mode" not in tr and tr["term"].tolist() == [0.0, 1.0]            # ManiSkill: last_step unchanged
+    # AutoMate n=6 trajectory: first seated at d=3 (k_term=2), stays seated at d=4,5, bounces out at d=6
+    n6 = 6
+    T6 = 8 * n6
+    hand6 = np.tile(np.eye(4), (T6 + 1, 1, 1))
+    z_pos = [0.015, 0.008, 0.003, 0.0005, 0.0001, 0.0001, 0.003]                  # d=3,4,5 seated (<1.5mm); d=6 unseated
+    for d_i, zp in enumerate(z_pos):
+        hand6[8 * d_i, 2, 3] = zp
+    z6 = {"action": g.normal(size=(T6, 7)) * 0.01, "img_step": np.arange(0, T6 + 1, 4),
+          "qpos": g.normal(size=(T6 + 1, 9)), "hand": hand6}
+    am_tr_meta = {"H_star": np.eye(4).tolist(), "pin_length_m": 0.03, "axis": [0.0, 0.0, -1.0],
+                  "grasp": "00015_g00", "kind": "insert", "simulator": "automate", "symmetry_n": "round"}
+    assert WD.effective_decisions(z6, am_tr_meta) == 3                            # k_term=2 -> n_eff=3
+    tr_am = WD.trajectory(z6, am_tr_meta, 0.3, 0.967, offset_mode="gap")
+    assert tr_am["term_mode"] == "first_seated" and tr_am["end_seated"] is True
+    assert tr_am["term"].tolist() == [0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+    assert np.allclose(tr_am["reward"][3:], 0.0) and tr_am["reward"][2] > 10.0
+    s0, top = np.full(WD.ACTION_DIM, 0.05, np.float32), np.full(WD.ACTION_DIM, 0.5, np.float32)
+    # straddling window k=2 (k_term): transitions stop at n_eff=3, done_valid keeps stationary d=4,5 (excludes bounced d=6)
+    w2 = WD.window(tr_am, 2, s0, top)
+    assert w2["valid"].tolist() == [1.0, 0.0, 0.0, 0.0] and w2["term"].tolist() == [1.0, 0.0, 0.0, 0.0]
+    assert w2["obs_valid"].tolist() == [1.0, 1.0, 0.0, 0.0, 0.0]                  # d=2,3 only for imagined/offset
+    assert w2["done_valid"].tolist() == [1.0, 1.0, 1.0, 1.0, 0.0]                 # d=2,3,4,5 (d=6 bounced -> 0!)
+    assert w2["v_valid"].tolist() == [1.0, 0.0, 0.0, 0.0, 0.0]
+    assert w2["a_next_valid"].tolist() == [1.0, 0.0, 0.0, 0.0, 0.0]
+    # exact boundary k=n_eff=3: all masks 0 (no crash / negative slice)
+    w3 = WD.window(tr_am, 3, s0, top)
+    assert all(w3[k].sum() == 0.0 for k in ("valid", "obs_valid", "done_valid", "v_valid", "a_next_valid"))
+    # ManiSkill trajectory on identical motion keeps legacy last_step (no done_valid key)
+    ms_tr = WD.trajectory(z6, {k: v for k, v in am_tr_meta.items() if k not in ("simulator", "symmetry_n")}, 0.3, 0.967)
+    assert "term_mode" not in ms_tr and ms_tr["end_seated"] is False and ms_tr["term"].sum() == 0.0
+    assert "done_valid" not in WD.window(ms_tr, 2, s0, top)
+    # AutoMate random kind never gets first_seated term
+    rnd_am = WD.trajectory(z6, {**am_tr_meta, "kind": "random"}, 0.3, 0.967, offset_mode="gap")
+    assert rnd_am["term"].sum() == 0.0 and WD.effective_decisions(z6, {**am_tr_meta, "kind": "random"}) == n6
+    return ("ManiSkill labels = HEAD formula bit for bit (last_step, no done_valid); AutoMate symmetric_angle matches "
+            "checks.tilt_spin (tilted axis, round/None/int/float), invalid/missing symmetry_n refused; AutoMate "
+            "first_seated termination + done_valid stationary seated supervision + effective_decisions verified")
 
 
 # ------------------------------------------------------------------------------------------------------------- 7

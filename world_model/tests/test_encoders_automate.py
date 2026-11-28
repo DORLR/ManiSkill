@@ -755,11 +755,13 @@ def test_automate_train(tmp: Path):
     assert pv["completeness"] == comp and pv["allow_partial"] is False and pv["fast_copy_code"] == code, pv
     assert ck["offset_mode"] == "gap" and "offset_label" not in ck and "offset_label" not in pv, \
         "AutoMate: the offset head learns the gap (decision 6; --offset-mode default gap)"
+    assert ck["tilt_definition"] == "symmetric_angle" and ck["term_mode"] == "first_seated" and ck["max_pin_mm"] == 20.0
     m = refused(data, tmp / "t11m", *args, "--offset-mode", "along")            # decision 6: gap only on AutoMate
     assert "--offset-mode gap only" in m and not (tmp / "t11m").exists(), m
     assert (tmp / "t11" / "step2.pt").exists() and (tmp / "t11" / "DONE.json").exists()
     log = [json.loads(x) for x in (tmp / "t11" / "log.jsonl").read_text().splitlines()]
     start = [r for r in log if r.get("event") == "start"][0]
+    assert start["max_pin_mm"] == 20.0 and start["tilt_definition"] == "symmetric_angle" and start["term_mode"] == "first_seated"
     assert start["trajectories"]["train"] == 3 and start["trajectories"]["select"] == 20, start["trajectories"]
     assert start["trajectories"]["heldout"] == 2 and start["trajectories"]["heldout_shape"] == 1, start["trajectories"]
     val = [r for r in log if r.get("event") == "val"][0]
@@ -806,6 +808,35 @@ def test_automate_train(tmp: Path):
     assert "was trained on the split" in m, m
     (data / "manifest.json").write_text(json.dumps({**man, "split": split, "completeness": comp}))
     (data / "depth_stats.json").write_text(json.dumps(DS.compute(str(data), 0.5)))
+    # AutoMate --resume guards for tilt_definition, term_mode, max_pin_mm + max_pin_mm save/load round-trip
+    for tag, patch, want in (
+        ("old_tilt", {"tilt_definition": "full_angle"}, "tilt_definition=full_angle"),
+        ("old_term", {"term_mode": "last_step"}, "term_mode=last_step"),
+        ("old_pin", {"max_pin_mm": 15.0}, "max_pin_mm=15.0"),
+    ):
+        d = tmp / f"t11_{tag}"
+        d.mkdir()
+        torch.save({**ck, **patch}, d / "last.pt")
+        msg = refused(data, d, *args, "--resume")
+        assert want in msg, (tag, msg)
+    # dynamic max_pin_mm / ret_max round-trip via WM320, wm320.load and WMAgent (and legacy default 20.0)
+    m59 = WM320("standard", STATS, 0.3, imagenet=False, offset_weight=1.0, offset_mode="gap", max_pin_mm=59.0, gamma=0.967)
+    assert m59.max_pin_mm == 59.0 and abs(m59.ret_max - (69.0 + 0.3 * (150.0 + 2.0 * 39.0 + 80.0))) < 1e-6
+    m20 = WM320("standard", STATS, 0.3, imagenet=False, offset_weight=1.0, offset_mode="gap", max_pin_mm=12.0, gamma=0.967)
+    assert m20.max_pin_mm == 20.0 and abs(m20.ret_max - (30.0 + 0.3 * 150.0)) < 1e-6
+    p59 = tmp / "m59.pt"
+    torch.save({**ck, "stem": "standard", "imagenet": False, "encoder": "resnet18", "token_dim": 32, "depth_max_m": None,
+                "depth_mean_m": None, "depth_std_m": None, "depth_invalid": None, "offset_weight": 1.0, "offset_mode": "gap",
+                "shaping": 0.3, "cfg": {"gamma": 0.967}, "stats": STATS, "max_pin_mm": 59.0, "state": m59.state_dict()}, p59)
+    ml = load(str(p59), device="cpu")
+    ag = WMAgent(str(p59), device="cpu")
+    assert ml.max_pin_mm == 59.0 and abs(ml.ret_max - m59.ret_max) < 1e-6
+    assert ag.m.max_pin_mm == 59.0 and abs(ag.m.ret_max - m59.ret_max) < 1e-6
+    p_leg = tmp / "m_leg.pt"
+    ck_leg = torch.load(p59, map_location="cpu", weights_only=False)
+    ck_leg.pop("max_pin_mm")
+    torch.save(ck_leg, p_leg)
+    assert load(str(p_leg), device="cpu").max_pin_mm == 20.0 and WMAgent(str(p_leg), device="cpu").m.max_pin_mm == 20.0
     return (f"2 optimiser steps on 3 training trajectories (resnet34, token_dim 8), validation over select / heldout / "
             f"heldout_shape / heldout_grasp; provenance with this tree's wm, the split identity, the stats sha256, the "
             f"completeness and the converter's code record; face_items_kept logged per split; with --offset-weight 1.0: offset_weight 1.0, offset_mode gap "

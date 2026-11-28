@@ -49,7 +49,7 @@ from wm.online.agent320 import WMAgent  # noqa: E402
 from wm.tdmpc import demo320 as D  # noqa: E402
 from wm.tdmpc import wmdata320 as WD  # noqa: E402
 from wm.tdmpc.policy320 import PolicyData, shift  # noqa: E402
-from wm.tdmpc.wm320 import WM320, WindowData, auc, window_items  # noqa: E402
+from wm.tdmpc.wm320 import WM320, WindowData, auc, encoder_settings, window_items  # noqa: E402
 from wm.training.common import Logger, cycle, seed_all  # noqa: E402
 
 
@@ -136,15 +136,18 @@ def evaluate_gap_head(model: WM320, eval_sets: dict, dev: torch.device, inside_m
             pr = (model._offset(zs) * model.off_scale).double().cpu().numpy()   # (H+1, B, 4)
             tgt = W["probe"].transpose(0, 1).double().numpy()                   # (H+1, B, 4)
             ov = W["obs_valid"].T.double().numpy()                              # (H+1, B)
-            pe.append(pr[0])
-            te.append(tgt[0])
-            pi.append(pr[-1])
-            ti.append(tgt[-1])
-            ovi.append(ov[-1])
-            lm.append(np.array([1000.0 * float(entries[int(e)]["pin_length_m"]) for e in e_idx], np.float64))
+            m0 = ov[0] > 0.5
+            if not m0.any():
+                continue
+            pe.append(pr[0][m0])
+            te.append(tgt[0][m0])
+            pi.append(pr[-1][m0])
+            ti.append(tgt[-1][m0])
+            ovi.append(ov[-1][m0])
+            lm.append(np.array([1000.0 * float(entries[int(e)]["pin_length_m"]) for e in e_idx[m0]], np.float64))
             grps += [D.group320(entries[int(e)]["port"], entries[int(e)]["pitch_deg"],
                                 entries[int(e)]["grasp_pos_m"], entries[int(e)]["grasp"], split_mode=split_mode)
-                     for e in e_idx]
+                     for e in e_idx[m0]]
         if not pe:
             continue
         pe_a, te_a = np.concatenate(pe, 0), np.concatenate(te, 0)
@@ -249,7 +252,8 @@ def main():
 
     torch.manual_seed(args.seed)
     model = WM320(ck["stem"], stats, shaping, imagenet=ck.get("imagenet", False),
-                  offset_weight=out_offset_weight, offset_mode="gap", **ck["cfg"])
+                  offset_weight=out_offset_weight, offset_mode="gap",
+                  max_pin_mm=ck.get("max_pin_mm") or 20.0, **encoder_settings(ck), **ck["cfg"])
     if src_offset_weight > 0:
         model.load_state_dict(ck["state"], strict=True)
     else:
@@ -333,8 +337,12 @@ def main():
         "stem": ck["stem"],
         "imagenet": ck.get("imagenet", False),
         "offset_weight": out_offset_weight,
+        **encoder_settings(ck),
         "offset_mode": "gap",
         "split_mode": args.split_mode,
+        "tilt_definition": ck.get("tilt_definition", "full_angle"),
+        "term_mode": ck.get("term_mode", "last_step"),
+        "max_pin_mm": float(ck.get("max_pin_mm") or 20.0),
         "shaping": shaping,
         "cfg": ck["cfg"],
         "stats": stats,

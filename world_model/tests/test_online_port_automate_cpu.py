@@ -405,6 +405,15 @@ def test_t5(tmp: Path) -> str:
     rel2[0, 0], rel2[7, 0] = -0.03, -0.004
     t2 = A.truth_final(rel2, spec)
     assert t2["success"] and t2["first_success_step"] == 7 and not t2["start_success"] and not t2["success_end"]
+    # strict_success (full angle) vs strict_success_sym (symmetric angle) on a spun round plug seated at the end
+    from scipy.spatial.transform import Rotation
+    rel3 = rel.copy()
+    rel3[0, 0], rel3[-1, 0] = -0.03, -0.0005
+    q_xyzw = Rotation.from_euler("x", 15.0, degrees=True).as_quat()   # 15 deg pure axial spin (> 4 deg full, 0 deg round)
+    rel3[-1, 3:7] = [q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]]
+    spec_round = types.SimpleNamespace(**{**spec.__dict__, "symmetry_n": "round"})
+    t3 = A.truth_final(rel3, spec_round)
+    assert t3["strict_success"] is False and t3["strict_success_sym"] is True, t3
     # AutomateTester stops the run on a successful start
     r = make_robot(Robot, H_goal, n_max=3)
     r.H_goal = r.hand_pose().copy()
@@ -598,7 +607,7 @@ def test_loop(tmp: Path) -> str:
     assert simulator_of_robot(r) == "automate"
     F = frames.frame(axis, S.BASE_T[:3, 0])
     t = A.AutomateTester(r, H_goal, axis, HandFK(r), F)
-    assert abs(t.left_m - (0.06 + L_M)) < 1e-15 and t.label_meta == {"simulator": "automate"}
+    assert abs(t.left_m - (0.06 + L_M)) < 1e-15 and t.label_meta == {"simulator": "automate", "symmetry_n": 4}
     s_mm = -float((r.hand_pose()[:3, 3] - H_goal[:3, 3]) @ axis) * 1000.0
     assert abs(t.face_gap_mm() - (s_mm - L_M * 1000.0)) < 1e-9
     for kw, text in (({"max_retries": 1}, "decision 5"), ({"max_decisions": 150}, "decision 6"), ({"probe_max": 1}, "T8")):
@@ -622,7 +631,7 @@ def test_loop(tmp: Path) -> str:
         fs = summ["first_success_step"]
         assert summ["first_success_decision"] == (None if fs is None else math.ceil(fs / 8))
         assert out["eval_tip"].shape == (len(out["eval_rel"]), 9) and len(summ["truth_ok"]) == summ["decisions"]
-        lab = WD.decision_labels({"H_star": H_goal, "axis": F[:, 0], "pin_length_m": L_M, "simulator": "automate"},
+        lab = WD.decision_labels({"H_star": H_goal, "axis": F[:, 0], "pin_length_m": L_M, "simulator": "automate", "symmetry_n": 4},
                                  out["hand"].astype(np.float64), np.array([8 * summ["decisions"]]))
         assert summ["seated_fk"] == bool(lab["seated"][0])
         if kw.get("planner") == "mppi":                 # MPPI: planned outside the hole only, gated
@@ -660,7 +669,7 @@ def test_loop(tmp: Path) -> str:
             assert any((not d["gate_ok"]) and min(d["gate_adv"]) > 0 for d in off), "no rejection by the margin"
             assert any(d["offered"] for d in pdec if d["k"] < ia), pdec
             assert summ["interventions"] == sum(1 for d in pdec if d.get("pick") == 1), (summ["interventions"], pdec)
-            assert "strict_success" in summ and "noisy" not in str(pdec)
+            assert "strict_success" in summ and "strict_success_sym" in summ and "noisy" not in str(pdec)
             if mode == "collect":
                 dk = summ["decision_kinds"]                 # plans are corrections; random only from the eps moves
                 # an executed plan counts as an intervention, as with the fixed planner, also when the one shift push

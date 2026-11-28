@@ -11,7 +11,7 @@ AutomateTester(robot, H_star, axis, fk, F): the attempt loop of attempt320 on wm
                  collection records Robot.frame(); the float twin shim of the ManiSkill reads would round the depth
                  through float32, tests/test_online_port_automate_cpu.py T3)
     left_m       attempt320.LEFT_M + L = 6 cm + the tight-fit depth (the user's decision 3 of 2026-11-25)
-    labels       the meta of WD.decision_labels carries simulator "automate" (labels, reward: unchanged from ManiSkill)
+    labels       the meta of WD.decision_labels carries simulator "automate" and symmetry_n (symmetric_angle + first_seated)
     max_decisions  robot.max_decisions = 150 + ceil(max(0, L - 20 mm) / 0.5 mm) (decision 6); any other value refused
     max_retries  0 only (decision 5: no back-off on AutoMate)
     probe_max    0 only: the counterfactual probe restores the simulator state, which on AutoMate needs the restore
@@ -203,7 +203,10 @@ def truth_final(eval_rel: np.ndarray, spec) -> dict:
     end = K.truth_from_rel_spec(np.asarray(eval_rel[-1], np.float64), spec)
     strict = bool(end["depth_left_mm"] < STRICT["depth_mm"] and end["angle_deg"] < STRICT["angle_deg"]
                   and end["lateral_mm"] < STRICT["lateral_mm"])
+    strict_sym = bool(end["depth_left_mm"] < STRICT["depth_mm"] and end["tilt_symmetric_deg"] < STRICT["angle_deg"]
+                      and end["lateral_mm"] < STRICT["lateral_mm"])
     return {"success": bool(st["success_any"]), "automate_success_any": bool(st["success_any"]), "strict_success": strict,
+            "strict_success_sym": strict_sym,
             "success_end": bool(st["success_end"]), "first_success_step": st["first_success_step"],
             "start_success": bool(st["start_success"]), "height_mm_end": float(end["height_mm"]),
             "keypoint_dist_mm_end": float(end["keypoint_dist_mm"]),
@@ -225,8 +228,8 @@ class AutomateTester(OnlineTester):
         super().__init__(robot, H_star, axis, fk=fk, F=F)
         self.io = automate_io(beat) if io is None else io
         self.left_m = LEFT_M + self.L                 # decision 3 of 2026-11-25 (environment side, not the agent's)
-        self.label_meta = {"simulator": "automate"}
         self.spec = robot.port_spec
+        self.label_meta = {"simulator": "automate", "symmetry_n": self.spec.symmetry_n}
 
     def truth_step(self, rel7: np.ndarray) -> tuple[bool, float, float]:
         t = K.truth_from_rel_spec(np.asarray(rel7, np.float64), self.spec)

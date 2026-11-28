@@ -101,8 +101,8 @@ Exploration in "collect" (labels may be used here: training grasps only, as the 
 Every executed decision (back-off ones included) is a decision of the stored trajectory, so the world model learns
 from all of it; `dec_kind` records what each decision was (KINDS), so that imitation can keep the proposal and
 correction decisions only. The last decision is followed by a 4-step hold (as every other set). Labels from FK and
-H* only (wmdata320); `seated_fk` is taken at the last decision's end (step 8n, the instant of the trajectory's
-terminal flag; the stored outcome), `seated_fk_after_hold` after the hold (as the policies' test reports it). The
+H* only (wmdata320); `seated_fk` is taken at the last decision's end (step 8n; the stored outcome / online BC gate),
+`seated_fk_after_hold` after the hold (as the policies' test reports it). The
 simulator's truth goes to the attempt's summary, for reporting, never into the trajectory.
 Simulators (the user's decisions 1, 3, 6 and 9 of 2026-11-25): this module and wm.online.shared320 import no simulator;
 the adapters wm.online.maniskill320 (ManiSkill, behaviour unchanged) and wm.online.automate320 (AutoMate) give the
@@ -195,7 +195,7 @@ class OnlineTester(AttemptBase):
     wm.online.automate320.AutomateTester) sets
         io           shared320.RecorderIO of its simulator (the recorder's reads)
         left_m       the "left" distance [m] from the start (ManiSkill LEFT_M; AutoMate LEFT_M + L)
-        label_meta   extra keys of the labels' meta (AutoMate: simulator "automate"; ManiSkill: none)
+        label_meta   extra keys of the labels' meta (AutoMate: simulator "automate" and symmetry_n; ManiSkill: none)
     and defines truth_step(rel7) -> (success, depth_left_mm, lateral_mm) after a decision and truth_final(out) -> the
     summary's success fields (simulator truth: reporting only, never an input of the agent)."""
 

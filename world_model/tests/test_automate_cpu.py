@@ -17,8 +17,8 @@ it; no simulator runs):
  25 socket pose: AutoMate's randomisation (+-5 cm, yaw 0-10 deg), a new pose per reset index, deterministic
  26 truth: AutoMate's success rule (height, keypoints, after any control step, never the start state;
     first_success_step); information numbers (tilt of the axis, spin modulo symmetry, full / symmetric angle, depth /
-    lateral at the tip centre); labels: the full angle for both simulators (symmetric_angle refused), ManiSkill labels
-    bit-identical; step budget
+    lateral at the tip centre); labels: ManiSkill full angle bit-identical, AutoMate default symmetric_angle (unknown
+    tilt_definition refused); step budget
  27 GPU 0 rule (app.py): nvidia-smi PIDS parsing, graphics <= 50 MiB accepted, compute or more graphics -> 7, no
     memory value -> 8; PRE_EXIT_HOOKS run with the exit code, a failing hook does not stop the others
  28 start pose and the start-box helper: frames.start_pose = Expert.start_pose; the START_GAP_FROM switch (the user's
@@ -489,18 +489,21 @@ def test_truth_symmetry():
     hs = hand.copy()
     hs[:, :3, :3] = Rotation.from_euler("z", 37, degrees=True).as_matrix()   # spin about the (vertical) axis only
     la = WD.decision_labels({**meta, "simulator": "automate", "symmetry_n": "round"}, hs, np.arange(5))
-    assert np.allclose(la["probe"][:, 3], 37, atol=1e-4), "AutoMate labels = ManiSkill labels: the full angle"
+    assert np.allclose(la["probe"][:, 3], 0, atol=1e-4), "AutoMate round plug: pure axial spin -> 0 deg"
+    la_full = WD.decision_labels({**meta, "simulator": "automate", "symmetry_n": "round", "tilt_definition": "full_angle"},
+                                 hs, np.arange(5))
+    assert np.allclose(la_full["probe"][:, 3], 37, atol=1e-4), "explicit full_angle keeps 37 deg"
     try:
-        WD.decision_labels({**meta, "simulator": "automate", "symmetry_n": 4, "tilt_definition": "symmetric_angle"},
+        WD.decision_labels({**meta, "simulator": "automate", "symmetry_n": 4, "tilt_definition": "axis_tilt"},
                            hs, np.arange(5))
-        raise AssertionError("tilt_definition symmetric_angle accepted")
+        raise AssertionError("unknown tilt_definition accepted")
     except ValueError:
         pass
     assert EX.step_budget(0.020, 0.0) == 800 and EX.step_budget(0.0251, 0.0) == 800 + 8 * 11
     assert EX.step_budget(0.015, 0.008) == 800 + 8 * 6
     return "success = AutoMate's check_plug_inserted_in_socket (0 < h < d_dis, mean keypoint distance < 15 mm, after " \
         "any control step, start state excluded, first_success_step); depth / lateral / tilt / spin / angles " \
-        "information only; labels: full angle for both simulators; step budget 800 + 8 per 0.5 mm beyond 20 mm"
+        "information only; labels: ManiSkill full angle, AutoMate symmetric_angle; step budget 800 + 8 per 0.5 mm beyond 20 mm"
 
 
 # ------------------------------------------------------------------------------------------------------------- 27

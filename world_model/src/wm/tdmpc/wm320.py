@@ -83,20 +83,27 @@ class WM320(nn.Module):
                  encoder: str = ENCODER_DEFAULTS["encoder"], token_dim: int = ENCODER_DEFAULTS["token_dim"],
                  depth_max_m: float = ENCODER_DEFAULTS["depth_max_m"], depth_mean_m: float = ENCODER_DEFAULTS["depth_mean_m"],
                  depth_std_m: float = ENCODER_DEFAULTS["depth_std_m"], depth_invalid: float = ENCODER_DEFAULTS["depth_invalid"],
-                 offset_mode: str = "along", **cfg_over):
+                 offset_mode: str = "along", max_pin_mm: float = 20.0, **cfg_over):
         """encoder, token_dim, depth_*: the picture encoder (policy320.PictureTokens, policy320.ENCODER_DEFAULTS; the
         defaults are the legacy ResNet-18).
         offset_weight > 0 (the user's decision 2026-11-18): a head reads the offset target from the latents the
         reward head sees (the encoded z and the imagined z of the window).
         offset_mode:
           - 'gap' (zero-privilege): dim 0 = pin-tip gap (-along - L) [mm], dims 1..3 = lateral x, y [mm], tilt [deg].
-          - 'along' (legacy): dim 0 = hand along offset from H* [mm], dims 1..3 = lateral x, y [mm], tilt [deg]."""
+          - 'along' (legacy): dim 0 = hand along offset from H* [mm], dims 1..3 = lateral x, y [mm], tilt [deg].
+        max_pin_mm: largest training pin length [mm] (default 20.0 for legacy ManiSkill checkpoints; computed from the
+        training set on AutoMate so deep assemblies are not silently clamped in TD targets)."""
         super().__init__()
         if offset_mode not in WD.OFFSET_MODES:
             raise ValueError(f"unknown offset_mode {offset_mode!r}; expected one of {WD.OFFSET_MODES}")
         self.offset_weight = float(offset_weight)
         self.offset_mode = str(offset_mode)
-        self.ret_max = 20.0 + 10.0 + shaping * PHI_MAX                    # value targets lie within +-ret_max
+        self.max_pin_mm = float(max(20.0, 20.0 if max_pin_mm is None else max_pin_mm))
+        extra_pin = self.max_pin_mm - 20.0
+        # 150.0 when max_pin_mm == 20.0 (ManiSkill bit-identical); for deeper AutoMate pins widen by 2*extra_pin + 80
+        # to accommodate g_top and AutoMate's online left_m = 60 + L drift without clamping shaping returns
+        phi_max = PHI_MAX + (2.0 * extra_pin + 80.0 if extra_pin > 0.0 else 0.0)
+        self.ret_max = self.max_pin_mm + 10.0 + shaping * phi_max         # value targets lie within +-ret_max
         self.shaping = shaping
         use_tdmpc2()
         from common import init, layers as L, math as M
@@ -220,7 +227,8 @@ class WM320(nn.Module):
         cons, rl, ql, vl = cons / WD.H, rl / WD.H, ql / (WD.H * cfg.num_q), vl / ((WD.H + 1) * cfg.num_q)
         dlog = self._done(z)[..., 0]
         dimg = self._done(zs[1:])[..., 0].T                                  # the imagined latents too (as TD-MPC2's termination)
-        dl = ((F.binary_cross_entropy_with_logits(dlog, W["done"], reduction="none") * W["obs_valid"]).sum()
+        dv = W.get("done_valid", W["obs_valid"])
+        dl = ((F.binary_cross_entropy_with_logits(dlog, W["done"], reduction="none") * dv).sum()
               + (F.binary_cross_entropy_with_logits(dimg, W["done"][:, 1:], reduction="none") * W["obs_valid"][:, 1:]).sum()) / (B * (2 * WD.H + 1))
         bc = zs.sum() * 0
         if Bc is not None:
@@ -268,7 +276,8 @@ def load(ckpt: str, device="cuda") -> "WM320":
     if ck.get("labels") != WD.LABELS:
         raise ValueError(f"{ckpt} was trained with labels {ck.get('labels')}, this code has {WD.LABELS}")
     m = WM320(ck["stem"], ck["stats"], ck.get("shaping", 0.0), imagenet=ck.get("imagenet", False),
-              offset_weight=ck.get("offset_weight", 0.0), offset_mode=ck.get("offset_mode", "along"), **encoder_settings(ck), **ck["cfg"])
+              offset_weight=ck.get("offset_weight", 0.0), offset_mode=ck.get("offset_mode", "along"),
+              max_pin_mm=ck.get("max_pin_mm") or 20.0, **encoder_settings(ck), **ck["cfg"])
     m.load_state_dict(ck["state"])
     return m.to(device).eval()
 
@@ -306,9 +315,41 @@ class WindowData(torch.utils.data.Dataset):
 WD_KINDS = {"reference": 0, "insert": 0, "perturbed": 0, "contact": 1, "random": 2}
 
 
-def window_items(entries: list[dict]) -> np.ndarray:
-    """(entry, k) for every decision k of every trajectory (n = steps // 8)."""
-    return np.array([(i, k) for i, e in enumerate(entries) for k in range(e["steps"] // WD.EXECUTE)], np.int64).reshape(-1, 2)
+def effective_decisions_for(root, entries: list[dict], cache: dict[str, int] | None = None, workers: int = 8) -> list[int]:
+    """Effective decision counts n_eff for each entry (<= steps // 8). Non-AutoMate and random entries return
+    steps // 8 without disk reads; AutoMate non-random entries read only meta/hand/action once and cache by path."""
+    from concurrent.futures import ThreadPoolExecutor
+    cache = {} if cache is None else cache
+    out = [e["steps"] // WD.EXECUTE for e in entries]
+    todo = []
+    for i, e in enumerate(entries):
+        if not D.is_automate(e) or e.get("kind") == "random":
+            continue
+        p = str((Path(root) / e["path"]).resolve())
+        if p in cache:
+            out[i] = cache[p]
+        else:
+            todo.append((i, p))
+    if todo:
+        def _scan(item):
+            i, p = item
+            with np.load(p) as z:
+                return i, p, WD.effective_decisions(z, json.loads(str(z["meta"])))
+        if workers > 1 and len(todo) > 32:
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                res = list(ex.map(_scan, todo))
+        else:
+            res = [_scan(item) for item in todo]
+        for i, p, ne in res:
+            cache[p] = ne
+            out[i] = ne
+    return out
+
+
+def window_items(entries: list[dict], n_effs: list[int] | None = None) -> np.ndarray:
+    """(entry, k) for every active decision k of every trajectory (0 <= k < n_eff; default n_eff = steps // 8)."""
+    ns = [e["steps"] // WD.EXECUTE for e in entries] if n_effs is None else n_effs
+    return np.array([(i, k) for i, n in enumerate(ns) for k in range(n)], np.int64).reshape(-1, 2)
 
 
 def stats_for(root, entries: list[dict], n_traj: int = 600, seed: int = 0) -> dict:
@@ -353,10 +394,11 @@ def face_items(entries: list[dict], root, shaping: float, gamma: float, kinds=("
     return np.array(out, np.int64).reshape(-1, 2)
 
 
-def end_items(entries: list[dict], kinds=("contact",)) -> np.ndarray:
-    """(entry, max(0, n - H)) of every trajectory of the given kinds: its last window, which ends at its last state."""
-    return np.array([(i, max(0, e["steps"] // WD.EXECUTE - WD.H)) for i, e in enumerate(entries)
-                     if e["kind"] in kinds and e["steps"] >= WD.EXECUTE], np.int64).reshape(-1, 2)
+def end_items(entries: list[dict], kinds=("contact",), n_effs: list[int] | None = None) -> np.ndarray:
+    """(entry, max(0, n_eff - H)) of every trajectory of the given kinds: its last active window."""
+    ns = [e["steps"] // WD.EXECUTE for e in entries] if n_effs is None else n_effs
+    return np.array([(i, max(0, ns[i] - WD.H)) for i, e in enumerate(entries)
+                     if e["kind"] in kinds and ns[i] >= 1], np.int64).reshape(-1, 2)
 
 
-__all__ = ["WM320", "Encoder", "WindowData", "window_items", "stats_for", "face_items", "end_items", "auc", "load", "encoder_settings"]
+__all__ = ["WM320", "Encoder", "WindowData", "effective_decisions_for", "window_items", "stats_for", "face_items", "end_items", "auc", "load", "encoder_settings"]

@@ -65,7 +65,8 @@ class WMAgent:
         if self.offset_mode not in WD.OFFSET_MODES:
             raise ValueError(f"{ckpt} has unknown offset_mode {self.offset_mode!r}; expected one of {WD.OFFSET_MODES}")
         self.m = WM320(ck["stem"], ck["stats"], ck.get("shaping", 0.0), imagenet=ck.get("imagenet", False),
-                       offset_weight=ck.get("offset_weight", 0.0), offset_mode=self.offset_mode, **encoder_settings(ck), **ck["cfg"])
+                       offset_weight=ck.get("offset_weight", 0.0), offset_mode=self.offset_mode,
+                       max_pin_mm=ck.get("max_pin_mm") or 20.0, **encoder_settings(ck), **ck["cfg"])
         self.m.load_state_dict(ck["state"])
         self.m.to(self.device).eval()
         self.horizon, self.gamma, self.step = horizon, float(self.m.cfg.gamma), int(ck.get("step", -1))
